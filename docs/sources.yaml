@@ -1,0 +1,202 @@
+# Finnish job board sources — machine-readable registry
+# Counts are snapshots from 2026-06-20; live totals drift. Run: make test-regression
+
+sources:
+  duunitori:
+    method: json_api
+    scheduled_by_default: true
+    url: https://duunitori.fi/api/v1/jobentries
+    params:
+      ordering: "-date_posted"
+      page_size: 100
+    snapshot_count: 16809
+    poll_interval_min: 5
+    incremental: page_walk_by_date_posted
+    notes:
+      - "municipality= and date_posted__gte= accepted but do not filter"
+      - "search= works for keyword filter"
+      - "collector also merges DISCOVERY_SEARCH_QUERIES results to recover still-open older high-value matches, including library and selected music/content/culture terms"
+      - "descr field contains full listing text"
+      - "page_size values above 100 are silently capped to 100 results"
+
+  tmt:
+    method: json_api
+    scheduled_by_default: true
+    url: https://tyomarkkinatori.fi/api/jobpostingfulltext/search/v2/search
+    method_http: POST
+    body:
+      sorting: LATEST
+      pageSize: 90
+    snapshot_count: 11327
+    full_backfill_pages: 126  # ceil(11327/90), ~10.5 min @ 5s/req
+    poll_interval_min: 5
+    incremental: publishedAfter  # pageSize=90 works; pageSize>=99 returns HTTP 400
+    attribution: "Lähde: Työmarkkinatorin asiakastietojärjestelmä"
+    notes:
+      - "collector also runs DISCOVERY_SEARCH_QUERIES with the same filters and fetches detail payloads, including library and selected music/content/culture terms"
+
+  laura:
+    method: wordpress_rest
+    scheduled_by_default: true
+    url: https://laura.fi/wp-json/wp/v2/job-listings
+    params:
+      per_page: 100
+      orderby: date
+    snapshot_count: 11997
+    poll_interval_min: 5
+    incremental:
+      new_postings: after  # ISO8601, publish date
+      edits: modified_after
+    notes:
+      - "collector also merges first-page REST search results for DISCOVERY_SEARCH_QUERIES, including library and selected music/content/culture terms"
+
+  jobly:
+    method: sitemap_jsonld
+    scheduled_by_default: true
+    sitemap_urls:
+      - https://www.jobly.fi/sitemap.xml?page=1
+      - https://www.jobly.fi/sitemap.xml?page=2
+    snapshot_count: 13779
+    lastmod_today_2026_06_20:
+      page_1: 31
+      page_2: 46
+      total: 77
+    poll_interval_min: 60
+    incremental: lastmod
+
+  eures_fi:
+    method: json_api
+    scheduled_by_default: true
+    url: https://europa.eu/eures/api/jv-searchengine/public/jv-search/search
+    detail_url_template: https://europa.eu/eures/portal/jv-se/jv-details/{url_encoded_id}?jvDisplayLanguage=fi&lang=fi
+    method_http: POST
+    body:
+      resultsPerPage: 50
+      locationCodes: ["fi"]
+      keywords: []
+    snapshot_count: 12005
+    poll_interval_min: 15
+    incremental: unreliable  # MOST_RECENT sort not trustworthy
+    response_fields:
+      total: numberRecords
+      items: jvs
+
+  tmt_oulu:
+    method: json_api
+    scheduled_by_default: true
+    url: https://tyomarkkinatori.fi/api/jobpostingfulltext/search/v2/search
+    method_http: POST
+    filters:
+      municipalities: ["564"]
+    snapshot_count: 566
+    poll_interval_min: 15
+    incremental: publishedAfter
+    notes:
+      - "Regional TMT configuration for Oulu municipality code 564"
+      - "Not a separate backend; same search/v2 API as tmt"
+
+  kuntarekry:
+    method: processwire_format_json
+    scheduled_by_default: true
+    base_url: https://kuntarekry.fi
+    regional_paths:
+      - oulu
+      - pohjois-pohjanmaa
+      - lappi
+      - rovaniemi
+      - oulun-kaupunki
+      - kemijarvi
+    snapshot_count_union_probe: 90
+    poll_interval_min: 60
+    incremental: publication_date
+    notes:
+      - "Regional ?format=json shards deduped by id; national pagination still broken"
+      - "Detail HTML fetched from <article> for description text"
+
+  kirkkorekry:
+    method: processwire_format_json
+    scheduled_by_default: true
+    base_url: https://kirkkorekry.fi
+    regional_paths:
+      - oulu
+      - pohjois-pohjanmaa
+      - lappi
+    snapshot_count_union_probe: 12
+    poll_interval_min: 60
+    incremental: publication_date
+    notes:
+      - "Church parish jobs; regional shards return complete small catalogs"
+
+  oulu_varbi:
+    method: rss_then_detail_html
+    scheduled_by_default: true
+    rss_url: https://oulunyliopisto.varbi.com/fi/what:rssfeed/
+    base_url: https://oulunyliopisto.varbi.com
+    snapshot_count: 15
+    poll_interval_min: 60
+    incremental: rss_pubdate
+    notes:
+      - "RSS returns complete Oulu university catalog"
+      - "Description from .job-desc.mb on FI detail pages"
+
+# Research candidates — probed but not in collector (see tyonhaku-rajapinnat.md §13)
+research:
+  kuntarekry_national:
+    method: processwire_format_json_org_shard
+    filters_url: https://www.kuntarekry.fi/fi/api/filters-data/
+    listing_url: https://www.kuntarekry.fi/fi/tyopaikat/?format=json&organisation={id}
+    snapshot_count_advertised: 1900
+    snapshot_count_org_shard: 1158
+    snapshot_count_sort_shard: 101
+    harvest_verdict: stdlib_org_shard_recommended
+    notes:
+      - "Use singular organisation={id} from filters-data; plural organisations= ignored"
+      - "571 orgs, 225 with jobs, ~289s full sweep; respect 429 rate limits"
+      - "Sort sharding adds little beyond org loop; Playwright found no bulk JSON API"
+
+  valtiolle:
+    method: processwire_format_json_org_shard
+    filters_url: https://valtiolle.fi/fi/api/filters-data/
+    listing_url: https://valtiolle.fi/fi/tyopaikat/?format=json&organisation={id}
+    snapshot_count_advertised: 181
+    snapshot_count_org_shard: 187
+    snapshot_count_json_probe: 48
+    poll_interval_min: 360
+    incremental: organisation_watermark
+    harvest_verdict: stdlib_org_shard_recommended
+    notes:
+      - "Full catalog via organisation sharding; 159 orgs, ~50s sweep"
+      - "TMT query 'Valtiolle' returns ~49 rows — incomplete vs org-shard harvest"
+      - "/fi/api/search-guard/ is job-alert storage, not job search"
+
+  tmt_regional_oulu:
+    method: tmt_municipality_filter  # superseded by sources.tmt_oulu collector
+    regional_page: https://tyomarkkinatori.fi/aluesivu/oulu/tyopaikat?m=564
+    municipality_code: "564"
+    region_code: "17"  # Pohjois-Pohjanmaa
+    snapshot_count_municipality: 566
+    snapshot_count_region: 941
+    harvest_verdict: implemented_as_tmt_oulu
+    notes:
+      - "Aluesivu is CMS wrapper; m=564 matches TMT filters.municipalities"
+      - "Pagination verified: pageSize=90, ~7 pages for Oulu"
+
+  ouka_city:
+    method: html_kuntarekry_embed
+    url: https://www.ouka.fi/avoimet-tyopaikat
+    snapshot_count_html_links: 38
+    poll_interval_min: null
+    harvest_verdict: skip_duplicate_of_kuntarekry
+    notes:
+      - "Drupal page titled Oulun kaupungin avoimet työpaikat; all listings link to kuntarekry.fi"
+      - "No working /feed, /rss, jsonapi, or ?_format=json"
+      - "Curated subset of Kuntarekry Oulun kaupunki; 6 links not in Kuntarekry city SSR snapshot"
+      - "Do not add separate adapter once Kuntarekry harvest works"
+
+blocked:
+  indeed:
+    reason: HTTP 403 bot protection
+  careerjet:
+    reason: HTTP 401 requires API key
+  kipa_p67:
+    reason: KEHA contract + IP allowlist required

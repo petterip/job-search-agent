@@ -1,0 +1,35 @@
+[project]
+name = "job-search-agent-backend"
+version = "0.1.0"
+description = "FastAPI backend and worker for a Finnish job portal"
+requires-python = ">=3.10"
+dependencies = [
+  "alembic>=1.16,<2",
+  "apscheduler>=3.10,<4",
+  "fastapi>=0.116,<1",
+  "httpx>=0.28,<1",
+  "openai>=2.0,<3",
+  "psycopg[binary]>=3.2,<4",
+  "pydantic>=2.11,<3",
+  "pyyaml>=6.0,<7",
+  "python-dateutil>=2.9,<3",
+  "sqlalchemy>=2.0,<3",
+  "uvicorn[standard]>=0.35,<1",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.4,<9",
+  "pytest-asyncio>=1.0,<2",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["app"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"

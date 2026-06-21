@@ -1,0 +1,4 @@
+# Optional dependencies for exploratory scrape-test scripts (not required for regression_test.py)
+playwright>=1.40
+cloudscraper>=1.2.71
+requests>=2.31

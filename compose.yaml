@@ -1,0 +1,61 @@
+name: job-search-agent
+
+x-backend: &backend
+  image: job-search-agent-backend:${APP_VERSION:-local}
+  env_file: .env
+  depends_on:
+    db:
+      condition: service_healthy
+  volumes:
+    - app_storage:/storage
+
+services:
+  web:
+    build: ./web
+    environment:
+      INTERNAL_API_BASE_URL: ${INTERNAL_API_BASE_URL:-http://api:8000}
+      NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-http://localhost:8008}
+    depends_on:
+      api:
+        condition: service_healthy
+    ports:
+      - "${WEB_BIND:-127.0.0.1}:${WEB_PORT:-3080}:3000"
+
+  api:
+    <<: *backend
+    build: ./backend
+    command: sh -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2).read()"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    ports:
+      - "${API_BIND:-127.0.0.1}:${API_PORT:-8008}:8000"
+
+  worker:
+    <<: *backend
+    command: python -m app.worker
+    depends_on:
+      api:
+        condition: service_healthy
+      db:
+        condition: service_healthy
+
+  db:
+    image: pgvector/pgvector:pg18
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-jobsearchagent}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-me}
+      POSTGRES_DB: ${POSTGRES_DB:-jobsearchagent}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    volumes:
+      - postgres_data:/var/lib/postgresql
+
+volumes:
+  postgres_data:
+  app_storage:
