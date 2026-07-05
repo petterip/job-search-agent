@@ -214,7 +214,7 @@ def check_jobly_sitemap() -> None:
             fail(f"jobly_sitemap_p{page}", f"HTTP {status}")
             return
         total_urls += len(re.findall(r"/tyopaikka/", xml))
-    if total_urls < 13_000:
+    if total_urls < 12_000:
         fail("jobly_url_count", f"only {total_urls} job URLs across 2 pages")
     else:
         ok(f"{total_urls} job URLs (pages 1+2)")

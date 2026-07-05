@@ -52,14 +52,15 @@ def test_poll_intervals_match_sources_yaml_and_adapters() -> None:
         assert sources[source_name]["poll_interval_min"] == interval_minutes
 
 
-def test_optional_registry_sources_are_not_collectable_until_adapters_exist() -> None:
+def test_optional_registry_sources_have_adapters_but_are_disabled_by_default() -> None:
     sources = _load_sources_yaml()["sources"]
-    optional_without_adapter = {
+    optional_with_adapters = {
         name
         for name, entry in sources.items()
-        if entry.get("scheduled_by_default") is False and name not in SOURCE_NAMES
+        if entry.get("scheduled_by_default") is False and name in SOURCE_NAMES
     }
-    assert optional_without_adapter == {"careerjet", "linkedin"}
+    assert optional_with_adapters == {"careerjet", "linkedin", "valtiolle"}
+    assert not (set(Settings().collector_enabled_sources) & optional_with_adapters)
 
 
 def test_configured_collect_source_names_rejects_unknown_source(

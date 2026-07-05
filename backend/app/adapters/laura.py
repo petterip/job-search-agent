@@ -12,6 +12,7 @@ from app.adapters.base import (
     payload_content_hash,
 )
 from app.config import get_settings
+from app.feedback_learning import get_discovery_search_queries
 from app.location import laura_location
 
 
@@ -124,7 +125,7 @@ class LauraAdapter:
                     if len(rows) < effective_page_size:
                         break
 
-            for query in get_settings().discovery_search_queries:
+            for query in get_discovery_search_queries():
                 params: dict[str, str | int] = {
                     "search": query,
                     "per_page": min(effective_page_size, 20),

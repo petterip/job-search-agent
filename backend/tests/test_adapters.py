@@ -3,6 +3,7 @@ from datetime import datetime, timezone
 import pytest
 
 from app.adapters.base import collect_page_results, ensure_aware_utc, is_newer_than_watermark
+from app.adapters.careerjet import CareerjetAdapter, parse_careerjet_date
 from app.adapters.duunitori import DuunitoriAdapter, DuunitoriFetchResult
 from app.adapters.eures import EuresAdapter, epoch_ms_to_datetime, eures_description_text, eures_portal_url
 from app.adapters.jobly import (
@@ -18,6 +19,7 @@ from app.adapters.talentech_org_shard import (
 )
 from app.adapters.valtiolle import ValtiolleAdapter
 from app.adapters.laura import LauraAdapter, laura_content_text, laura_employer_from_link, laura_rendered
+from app.adapters.linkedin import LinkedinAdapter, parse_linkedin_guest_jobs
 from app.adapters.talentech import (
     extract_talentech_description,
     normalize_talentech_summary,
@@ -82,7 +84,11 @@ def test_laura_location_infers_smaller_municipality_from_employer_slug() -> None
     assert laura_location(payload) == "Rantasalmi"
 
 
-async def test_duunitori_collect_includes_discovery_search_results() -> None:
+async def test_duunitori_collect_includes_discovery_search_results(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "app.adapters.duunitori.get_discovery_search_queries",
+        lambda: ["kirjastonhoitaja"],
+    )
     class FakeDuunitoriAdapter(DuunitoriAdapter):
         def __init__(self) -> None:
             self.url = "https://example.test"
@@ -114,7 +120,7 @@ async def test_duunitori_collect_includes_discovery_search_results() -> None:
     result = await FakeDuunitoriAdapter().collect(watermark=datetime(2026, 6, 21, tzinfo=timezone.utc))
 
     assert [listing.title for listing in result.listings] == ["Kirjastonhoitaja"]
-    assert result.pages_fetched == 10
+    assert result.pages_fetched == 2
 
 
 def test_is_newer_than_watermark_without_watermark() -> None:
@@ -496,6 +502,47 @@ def test_jobly_static_description_falls_back_to_visible_body() -> None:
     assert extract_jobly_static_description(html) == (
         "We are hiring a library professional for municipal services in northern Finland."
     )
+
+
+def test_careerjet_normalize_maps_publisher_job_fields() -> None:
+    payload = {
+        "title": "Information Specialist",
+        "company": "Example Oy",
+        "date": "Wed, 15 Nov 2025 19:13:43 GMT",
+        "description": "Library and information work.",
+        "locations": "Oulu",
+        "url": "https://jobviewtrack.com/v2/test",
+    }
+
+    listing = CareerjetAdapter().normalize(payload)
+
+    assert listing.external_id == payload["url"]
+    assert listing.title == "Information Specialist"
+    assert listing.employer == "Example Oy"
+    assert listing.location == "Oulu"
+    assert listing.description == "Library and information work."
+    assert listing.published_at == parse_careerjet_date(payload["date"])
+
+
+def test_linkedin_guest_parser_extracts_search_cards() -> None:
+    markup = """
+    <li>
+      <a href="/jobs/view/information-specialist-1234567890?trk=public_jobs"></a>
+      <h3 class="base-search-card__title"> Information Specialist </h3>
+      <h4 class="base-search-card__subtitle"> Example Org </h4>
+      <span class="job-search-card__location"> Oulu, North Ostrobothnia </span>
+      <time datetime="2026-07-01"></time>
+    </li>
+    """
+
+    rows = parse_linkedin_guest_jobs(markup)
+    listing = LinkedinAdapter().normalize(rows[0])
+
+    assert rows[0]["id"] == "1234567890"
+    assert rows[0]["url"] == "https://www.linkedin.com/jobs/view/information-specialist-1234567890"
+    assert listing.title == "Information Specialist"
+    assert listing.employer == "Example Org"
+    assert listing.location == "Oulu, North Ostrobothnia"
 
 
 def test_varbi_helpers_parse_rss_and_description() -> None:

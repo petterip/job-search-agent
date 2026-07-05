@@ -30,7 +30,7 @@ Suomessa **yksittäisten työpaikkailmoitusten ajantasainen haku** on mahdollist
 | **Tilastokeskus StatFin PxWeb** | Kyllä | Ei — aggregaatit | Kuukausittain | ✅ 34 865 (2026M04) |
 | **Duunitori jobentries API** (epävirallinen) | Kyllä | Kyllä | Reaaliaikainen | ✅ 16 809 ilmoitusta |
 | **Laura.fi WP REST** (epävirallinen) | Kyllä | Kyllä | Reaaliaikainen | ✅ 11 997 ilmoitusta |
-| **Jobly sitemap** | Kyllä (ei API:a) | Kyllä (URL + JSON-LD) | `lastmod` tunteja | ⚠️ ~13 779 URL |
+| **Jobly sitemap** | Kyllä (ei API:a) | Kyllä (URL + JSON-LD) | `lastmod` tunteja | ⚠️ ~12 537 URL |
 | **Indeed.fi** | Ei | — | — | ❌ HTTP 403 |
 | **RSS-syötteet (työpaikat)** | Ei yleistä julkista feediä | Rajallinen | Vaihtelee | ⚠️ Luku 11 |
 
@@ -440,7 +440,7 @@ Content-Type: application/xml
 | RSS / Atom | `/rss`, `/feed` | ❌ HTTP 404 |
 | `/rss.xml` | `https://www.jobly.fi/rss.xml` | ⚠️ HTTP 200 mutta palauttaa HTML:n, ei RSS:ää |
 | Hakusivut | `/tyopaikkailmoitus/hae`, `/tyopaikka` | ❌ HTTP 404 (20.6.2026) — ei staattista listaa |
-| **Sitemap** | `https://www.jobly.fi/sitemap.xml?page=1` (+ `page=2`) | ✅ **9 569 + 4 210 = 13 779** työ-URL |
+| **Sitemap** | `https://www.jobly.fi/sitemap.xml?page=1` (+ `page=2`) | ✅ **9 563 + 2 974 = 12 537** työ-URL |
 | Yksityissivu JSON-LD | `/tyopaikka/{slug}-{id}` | ⚠️ JobPosting osassa ilmoituksista |
 
 **Ohjelmallinen keruu (ei julkista hakurajapintaa):**
@@ -563,7 +563,7 @@ Teamtailorilla on myös **suora Työmarkkinatori-kanavaintegraatio** julkaisuun 
     Laura WP REST  ───────┤  ~12k, aggregaatti (epävirallinen REST)
     EURES (fi)  ──────────┤  ~12k, lähde TMT (virallinen EU-API)
     KIPA P67  ────────────┤  sama data kuin TMT, sopimus + IP (virallinen)
-    Jobly sitemap  ───────┤  ~13,8k URL, ei listaa-API:a
+    Jobly sitemap  ───────┤  ~12,5k URL, ei listaa-API:a
     Careerjet  ───────────┤  aggregaatti, vaatii API-avaimen
                          │
     StatFin PxWeb  ───────┤  kuukausittainen aggregaatti (~35k)
@@ -661,7 +661,7 @@ Uudelleentarkistettu curl-testeillä samana päivänä.
 | Työmarkkinatori `/rss/tyopaikat` | 200 tyhjä XML | Shell-rakenne (CMS localhost), 0 item |
 | Jobly.fi `/rss.xml` | 200 HTML | Palauttaa normaalin sivun, ei RSS:ää |
 | Jobly listasivut | 404 | `/tyopaikka`, `/tyopaikkailmoitus/hae` |
-| Jobly sitemap | 200 | 13 779 työ-URL (page 1+2) |
+| Jobly sitemap | 200 | 12 537 työ-URL (page 1+2) |
 | EURES `/rss` | timeout/dns | Ei RSS:ää |
 | Indeed.fi haku | 403 | Bot-suoja; captcha |
 | Laura työpaikka-RSS | 200 tyhjä | WordPress-syöte, 0 item |
@@ -716,7 +716,7 @@ https://duunitori.fi/sitemap-jobentry.xml?p=2
 |---|---|---|---|
 | Hakusivut | `/tyopaikkailmoitus/hae`, `/tyopaikka` | ❌ 404 | Ei staattista listaa |
 | Julkaisu-API (XML) | `/api/v1/job?key=…` | ⚠️ 401 | Vain ATS-asiakkaille |
-| **Sitemap** | `/sitemap.xml?page=1` (+ page=2) | ✅ | **13 779** työ-URL, `lastmod` |
+| **Sitemap** | `/sitemap.xml?page=1` (+ page=2) | ✅ | **12 537** työ-URL, `lastmod` |
 | Yksityissivu JSON-LD | `/tyopaikka/{slug}-{id}` | ⚠️ | JobPosting osassa ilmoituksista |
 
 ### 11.5 Laura.fi / Rekrytointi.com
@@ -778,7 +778,7 @@ Raspberry Pi -deployssa worker ajaa käytössä olevat lähdehaut tällä hetkel
 | **Työmarkkinatori** | JSON-API | `POST .../search/v2/search` + `sorting: LATEST` | 11 327 | `publishedAfter` tai LATEST, `pageSize` max 90 | 10/10 @ ~0,28 s |
 | **Laura.fi** | WordPress REST | `GET /wp-json/wp/v2/job-listings?orderby=date&after=…` | 11 997 | `after={iso8601}` | 10/10 @ ~0,13 s |
 | **EURES** | JSON-API | `POST .../jv-search/search` | ~12 000 (fi) | ⚠️ `MOST_RECENT` epäluotettava | OK |
-| **Jobly** | Sitemap + JSON-LD | `sitemap.xml?page=1|2`, `/tyopaikka/{slug}` | 13 779 | `lastmod`-päivä | sitemap ~30 s |
+| **Jobly** | Sitemap + JSON-LD | `sitemap.xml?page=1|2`, `/tyopaikka/{slug}` | 12 537 | `lastmod`-päivä | sitemap ~30 s |
 | **Indeed.fi** | — | ❌ HTTP 403 | — | — | Estetty |
 | **ATS (Greenhouse jne.)** | Yritys-API | `boards-api.greenhouse.io/...` | yrityskoht. | full poll | OK |
 
@@ -903,7 +903,7 @@ Headerit: `X-WP-Total: 11997`, `X-WP-TotalPages: 120` (kun `per_page=100`).
 | `/tyopaikkailmoitus/hae` | 404 | Ei listaa |
 | `/tyopaikka` | 404 | Ei listaa |
 | `/tyopaikka/{slug}-{id}` | 200 | JSON-LD JobPosting (osassa) |
-| `/sitemap.xml?page=1` | 200 | 9 569 työ-URL |
+| `/sitemap.xml?page=1` | 200 | 9 563 työ-URL |
 
 ### 12.3 Tuoreusvertailu (snapshot 20.6.2026 ~13 UTC)
 
@@ -1118,7 +1118,7 @@ def jobly_urls_updated_since(day: str | None = None):
 | Duunitori sitemap | ✅ 85×200 URL |
 | Laura REST | ✅ 11 997, TotalPages=120 |
 | Laura RSS | ❌ tyhjä |
-| Jobly sitemap | ✅ 13 779 URL |
+| Jobly sitemap | ✅ 12 537 URL |
 | Jobly sitemap lastmod tänään | ✅ 77 URL (sivu 1: 31, sivu 2: 46) |
 | Jobly listasivut | ❌ 404 |
 | Jobly JSON-LD | ⚠️ osassa ilmoituksista |

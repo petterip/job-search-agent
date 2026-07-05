@@ -12,6 +12,7 @@ from app.adapters.base import (
     payload_content_hash,
 )
 from app.config import get_settings
+from app.feedback_learning import get_discovery_search_queries
 from app.location import append_work_mode, detect_work_mode, infer_city_from_text
 
 
@@ -122,7 +123,7 @@ class DuunitoriAdapter:
         )
         payloads_by_slug = {str(payload["slug"]): payload for payload in fetch_result.payloads}
         pages_fetched = fetch_result.pages_fetched
-        for query in get_settings().discovery_search_queries:
+        for query in get_discovery_search_queries():
             for payload in await self.fetch_search(query=query, page_size=20):
                 payloads_by_slug[str(payload["slug"])] = payload
             pages_fetched += 1

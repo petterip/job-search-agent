@@ -10,6 +10,7 @@ from app.adapters.base import (
     payload_content_hash,
 )
 from app.config import get_settings
+from app.feedback_learning import get_discovery_search_queries
 
 
 def tmt_title(title_obj: dict) -> str:
@@ -174,7 +175,7 @@ class TmtAdapter:
                 if data.get("lastPage", False) or len(content) < effective_page_size:
                     break
 
-            for query in get_settings().discovery_search_queries:
+            for query in get_discovery_search_queries():
                 body = {
                     "query": query,
                     "filters": dict(self.extra_filters()),

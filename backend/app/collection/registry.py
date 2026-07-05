@@ -2,12 +2,14 @@ from collections.abc import Callable
 from typing import Any
 
 from app.adapters.base import SourceAdapter
+from app.adapters.careerjet import CareerjetAdapter
 from app.adapters.duunitori import DuunitoriAdapter
 from app.adapters.eures import EuresAdapter
 from app.adapters.jobly import JoblyAdapter
 from app.adapters.kirkkorekry import KirkkorekryAdapter
 from app.adapters.kuntarekry import KuntarekryAdapter
 from app.adapters.laura import LauraAdapter
+from app.adapters.linkedin import LinkedinAdapter
 from app.adapters.tmt import TmtAdapter
 from app.adapters.tmt_oulu import TmtOuluAdapter
 from app.adapters.varbi import OuluVarbiAdapter
@@ -25,6 +27,8 @@ SOURCE_NAMES = (
     "kuntarekry",
     "kirkkorekry",
     "oulu_varbi",
+    "careerjet",
+    "linkedin",
     "valtiolle",
 )
 
@@ -48,6 +52,8 @@ def build_adapter(source_name: str) -> SourceAdapter:
         "kuntarekry": KuntarekryAdapter,
         "kirkkorekry": KirkkorekryAdapter,
         "oulu_varbi": OuluVarbiAdapter,
+        "careerjet": CareerjetAdapter,
+        "linkedin": LinkedinAdapter,
         "valtiolle": ValtiolleAdapter,
     }
     try:

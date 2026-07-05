@@ -58,7 +58,7 @@ sources:
     sitemap_urls:
       - https://www.jobly.fi/sitemap.xml?page=1
       - https://www.jobly.fi/sitemap.xml?page=2
-    snapshot_count: 13779
+    snapshot_count: 12537
     lastmod_today_2026_06_20:
       page_1: 31
       page_2: 46
@@ -150,7 +150,7 @@ sources:
     incremental: query_watermark
     notes:
       - "Optional aggregate source; skipped with warning when CAREERJET_API_KEY is absent"
-      - "Disabled by default; enable explicitly in COLLECTOR_ENABLED_SOURCES when adapter ships"
+      - "Disabled by default; enable explicitly in COLLECTOR_ENABLED_SOURCES when CAREERJET_API_KEY and CAREERJET_USER_IP are configured"
 
   linkedin:
     method: guest_http_search
@@ -160,7 +160,7 @@ sources:
     incremental: search_watermark
     notes:
       - "Optional supplementary aggregate; disabled unless LINKEDIN_ENABLED=true"
-      - "Guest HTTP search first; short descriptions may route through enrichment queue"
+      - "Guest HTTP search first; short descriptions route through the enrichment queue when enabled"
 
   valtiolle:
     method: processwire_format_json_org_shard
