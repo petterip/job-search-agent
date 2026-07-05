@@ -118,6 +118,14 @@ def test_missing_source_listings_only_removed_after_complete_refresh() -> None:
     )
 
 
+class MappingResult:
+    def __init__(self, value: object = None) -> None:
+        self.value = value
+
+    def one_or_none(self) -> object:
+        return self.value
+
+
 class ScalarResult:
     def __init__(self, value: object = None) -> None:
         self.value = value
@@ -127,6 +135,9 @@ class ScalarResult:
 
     def scalar_one(self) -> object:
         return self.value
+
+    def mappings(self) -> MappingResult:
+        return MappingResult(self.value)
 
 
 class UpsertUnchangedConnection:
@@ -146,6 +157,8 @@ class UpsertUnchangedConnection:
             return ScalarResult(123)
         if "select js.job_id" in sql:
             return ScalarResult(self.existing_job_id)
+        if "from job_description_state" in sql:
+            return ScalarResult()
         return ScalarResult()
 
 
@@ -166,6 +179,8 @@ class RelinkCrossSourceConnection(UpsertUnchangedConnection):
             return ScalarResult(self.existing_job_id)
         if "select j.id" in sql:
             return ScalarResult(self.cross_source_job_id)
+        if "from job_description_state" in sql:
+            return ScalarResult()
         return ScalarResult()
 
 

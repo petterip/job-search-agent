@@ -11,6 +11,8 @@ Start with [`goal.md`](goal.md) for the product north star, then [`implementatio
 | [`raspberry-pi-deployment.md`](raspberry-pi-deployment.md) | Raspberry Pi Docker Compose deployment, update, backup, and hardening runbook. |
 | [`llm-hosted.md`](llm-hosted.md) | Hosted LLM and embedding model selection, prompt goals, privacy rules, and evaluation contract. |
 | [`implementation-journal.md`](implementation-journal.md) | Concise record of what is implemented, verified, and still missing. |
+| [`browser-enrichment-plan.md`](browser-enrichment-plan.md) | Planned browser enrichment tier, HTTP coverage gaps, Careerjet/LinkedIn integration, and phased tasks. |
+| [`feedback-learning-plan.md`](feedback-learning-plan.md) | Five-point recommendation feedback, async LLM feedback analysis, feedback-driven learning loop, and phased integration with matching and collection. |
 | [`sources.yaml`](sources.yaml) | Machine-readable source registry for collectors: endpoints, snapshot counts, and polling intervals. |
 
 Repeatable source test scripts live in [`../scrape-test/`](../scrape-test/).

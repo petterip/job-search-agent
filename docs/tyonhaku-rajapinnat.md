@@ -521,11 +521,13 @@ Authorization: Basic {API_KEY}:
 - Rekisteröityminen: [careerjet.com/partners](https://www.careerjet.com/partners/api)
 - Testi ilman avainta: **HTTP 401** — *"You did not provide an API key"*
 - Aggregoi useita lähteitä (Duunitori, yrityssivut jne.) — ei yksinomaan virallista TMT-dataa
+- **Projektin tila:** valinnainen lisälähde `sources.yaml`-rekisterissä (`scheduled_by_default: false`); adapteri vaatii `CAREERJET_API_KEY` ja ohitetaan varoituksella ilman avainta
 
 ### 5.7 LinkedIn Jobs
 
 - Job Posting API: **vain hyväksytyt Talent Solutions -kumppanit** — ei uusia kumppanuuksia avoinna pieniä toimijoita varten
 - Työpaikkojen haku ulos: ei virallista API:a; kolmannen osapuolen scraping-palvelut rikkovat käyttöehtoja
+- **Projektin tila:** valinnainen lisälähde `sources.yaml`-rekisterissä (`scheduled_by_default: false`, `LINKEDIN_ENABLED=false` oletuksena); guest HTTP -haku ensin, lyhyet kuvaukset mahdollisesti enrichment-jonon kautta
 
 ---
 
@@ -580,9 +582,10 @@ Projektin MVP-keruu vastaa [`goal.md`](goal.md)-MVP:tä ja [`sources.yaml`](sour
 
 1. **MVP-lähteet:** Duunitori `jobentries` + TMT `search/v2/search` + Laura REST
 2. **Post-MVP:** Jobly sitemap + JSON-LD; EURES täydentäväksi, ei luotettava incrementaali
-3. **Ei MVP:ssä:** Indeed, Careerjet, KIPA P67 (estetty tai sopimusvaatimus)
-4. **Incrementaali:** Duunitori `-date_posted`-sivutus, TMT `publishedAfter` (`pageSize=90`), Laura `after`/`modified_after`
-5. **Recall-lisähaku:** aja Duunitori/TMT/Laura-incrementaalin rinnalla pieni `DISCOVERY_SEARCH_QUERIES`-termilista. Tämä palauttaa edelleen avoimia, mutta vesileimaa vanhempia korkean arvon osumia kuten kirjastonhoitaja-, kirjastovirkailija-, informaatikko-, musiikkikirjasto-, sisällöntuottaja- ja kulttuurituottajaroolit.
+3. **Ei MVP:ssä / estetty:** Indeed, KIPA P67 (estetty tai sopimusvaatimus)
+4. **Valinnaiset lisälähteet (ei oletusajossa):** Careerjet (API-avain), LinkedIn (`LINKEDIN_ENABLED=false` oletuksena)
+5. **Incrementaali:** Duunitori `-date_posted`-sivutus, TMT `publishedAfter` (`pageSize=90`), Laura `after`/`modified_after`
+6. **Recall-lisähaku:** aja Duunitori/TMT/Laura-incrementaalin rinnalla pieni `DISCOVERY_SEARCH_QUERIES`-termilista. Tämä palauttaa edelleen avoimia, mutta vesileimaa vanhempia korkean arvon osumia kuten kirjastonhoitaja-, kirjastovirkailija-, informaatikko-, musiikkikirjasto-, sisällöntuottaja- ja kulttuurituottajaroolit.
 
 Alla yleisempi vertailu muihin käyttötarkoituksiin.
 
@@ -753,6 +756,8 @@ Harvalla kunnalla on erillinen avoin työpaikka-API; tämä projekti ei kerää 
 ## 12. Ohjelmallinen keruu — API, sitemap ja scrape (integroitu)
 
 Tämä luku yhdistää rajapintakartoituksen, toimivat curl-esimerkit ja scrape-vs-API-testit **yhdeksi tuotantosuositukseksi**. Tavoite: **mahdollisimman tuoreet ilmoitukset luotettavasti**.
+
+Raspberry Pi -deployssa worker ajaa käytössä olevat lähdehaut tällä hetkellä **kerran päivässä klo 16:00 Europe/Helsinki**. Alla olevat lähdekohtaiset poll-välit kuvaavat vastuullisia minimivälejä ja rajapintakohtaista tuoreusmallia, eivät aktiivista Pi-ajastusta.
 
 ### 12.1 Menetelmävalinta — prioriteettijärjestys
 
@@ -1317,7 +1322,7 @@ Oulu-area sources probed after Kuntarekry was queued for adapter work. **Do not 
 4. Watermark on max(pubDate)
 ```
 
-RSS is the **primary** path; listing HTML is a fallback checksum. Poll interval **60 min** is sufficient (low volume).
+RSS is the **primary** path; listing HTML is a fallback checksum. Poll interval **60 min** is sufficient as a source-aware minimum (low volume); the current Pi worker schedule runs it once daily at 16:00 Europe/Helsinki.
 
 #### 13.4.3 Oulun seurakunnat — Kirkkorekry (not Kuntarekry)
 

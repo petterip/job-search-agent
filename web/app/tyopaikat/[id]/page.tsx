@@ -17,6 +17,10 @@ type RecommendationItem = {
   suggested_action: string | null;
   rationale: string | null;
   concerns: string[];
+  location_evidence: {
+    text: string;
+    tone: "good" | "warning" | "bad";
+  } | null;
 };
 
 type JobDetailResponse = {
@@ -25,6 +29,10 @@ type JobDetailResponse = {
   employer: string | null;
   description: string | null;
   location: string | null;
+  location_evidence: {
+    text: string;
+    tone: "good" | "warning" | "bad";
+  } | null;
   published_at: string | null;
   status: string;
   sources: JobSourceItem[];
@@ -85,6 +93,12 @@ export default async function JobPage({ params }: PageProps) {
               <dt>Sijainti</dt>
               <dd>{job.location ?? "Ei tiedossa"}</dd>
             </div>
+            {job.location_evidence ? (
+              <div>
+                <dt>Matka Oulusta</dt>
+                <dd>{job.location_evidence.text}</dd>
+              </div>
+            ) : null}
             <div>
               <dt>Julkaistu</dt>
               <dd>{formatDate(job.published_at)}</dd>
@@ -113,6 +127,7 @@ export default async function JobPage({ params }: PageProps) {
               concerns={job.recommendation.concerns}
               idPrefix={`recommendation-${job.recommendation.id}`}
               location={job.location}
+              locationEvidence={job.recommendation.location_evidence ?? job.location_evidence}
               rationale={job.recommendation.rationale}
               score={job.recommendation.llm_score ?? job.recommendation.machine_score}
             />

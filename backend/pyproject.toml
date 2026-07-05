@@ -15,12 +15,16 @@ dependencies = [
   "python-dateutil>=2.9,<3",
   "sqlalchemy>=2.0,<3",
   "uvicorn[standard]>=0.35,<1",
+  "browserbase>=1.14,<2",
 ]
 
 [project.optional-dependencies]
 dev = [
   "pytest>=8.4,<9",
   "pytest-asyncio>=1.0,<2",
+]
+enrichment = [
+  "playwright>=1.49,<2",
 ]
 
 [build-system]

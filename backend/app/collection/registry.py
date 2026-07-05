@@ -11,7 +11,9 @@ from app.adapters.laura import LauraAdapter
 from app.adapters.tmt import TmtAdapter
 from app.adapters.tmt_oulu import TmtOuluAdapter
 from app.adapters.varbi import OuluVarbiAdapter
+from app.adapters.valtiolle import ValtiolleAdapter
 from app.collection.runner import run_source_collection
+from app.config import get_settings
 
 SOURCE_NAMES = (
     "duunitori",
@@ -23,7 +25,16 @@ SOURCE_NAMES = (
     "kuntarekry",
     "kirkkorekry",
     "oulu_varbi",
+    "valtiolle",
 )
+
+
+def configured_collect_source_names() -> tuple[str, ...]:
+    enabled = set(get_settings().collector_enabled_sources)
+    unknown = sorted(enabled - set(SOURCE_NAMES))
+    if unknown:
+        raise ValueError(f"Unknown COLLECTOR_ENABLED_SOURCES entries: {', '.join(unknown)}")
+    return tuple(source_name for source_name in SOURCE_NAMES if source_name in enabled)
 
 
 def build_adapter(source_name: str) -> SourceAdapter:
@@ -37,6 +48,7 @@ def build_adapter(source_name: str) -> SourceAdapter:
         "kuntarekry": KuntarekryAdapter,
         "kirkkorekry": KirkkorekryAdapter,
         "oulu_varbi": OuluVarbiAdapter,
+        "valtiolle": ValtiolleAdapter,
     }
     try:
         return factories[source_name]()
@@ -64,6 +76,6 @@ async def collect_source(
 
 async def collect_all_sources(**kwargs: Any) -> list[dict[str, Any]]:
     results: list[dict[str, Any]] = []
-    for source_name in SOURCE_NAMES:
+    for source_name in configured_collect_source_names():
         results.append(await collect_source(source_name, **kwargs))
     return results

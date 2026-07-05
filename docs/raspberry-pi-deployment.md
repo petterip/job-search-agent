@@ -106,6 +106,11 @@ NEXT_PUBLIC_API_BASE_URL=https://<public-or-private-web-hostname>
 LLM_PROVIDER=
 OPENAI_API_KEY=
 GEMINI_API_KEY=
+
+COLLECTOR_DAILY_HOUR=16
+COLLECTOR_DAILY_MINUTE=0
+MATCHER_DAILY_HOUR=16
+MATCHER_DAILY_MINUTE=0
 ```
 
 Use `NEXT_PUBLIC_API_BASE_URL=http://<pi-lan-ip>:8008` only for a temporary LAN
@@ -392,6 +397,11 @@ If hosted LLM evaluation is enabled, monitor quota failures and cooldowns:
 ```bash
 docker compose logs --tail=200 worker | grep -Ei 'llm|quota|cooldown|provider'
 ```
+
+The worker uses `Europe/Helsinki` time. By default all enabled source searches
+and the matching/LLM pass are scheduled once per day at 16:00. Change
+`COLLECTOR_DAILY_*` and `MATCHER_DAILY_*` in `.env` if the Pi should use a
+different quiet-hour window.
 
 ## Rollback
 

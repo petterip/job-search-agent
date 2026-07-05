@@ -1,4 +1,5 @@
 import json
+import html as html_lib
 import logging
 import re
 from datetime import datetime, timezone
@@ -52,6 +53,76 @@ def extract_jobposting_jsonld(html: str) -> dict | None:
     return None
 
 
+def _meta_content(html: str, *, name: str | None = None, prop: str | None = None) -> str | None:
+    if name is not None:
+        patterns = (
+            rf'<meta[^>]+name=["\']{re.escape(name)}["\'][^>]+content=["\']([^"\']+)',
+            rf'<meta[^>]+content=["\']([^"\']+)["\'][^>]+name=["\']{re.escape(name)}["\']',
+        )
+    else:
+        patterns = (
+            rf'<meta[^>]+property=["\']{re.escape(prop or "")}["\'][^>]+content=["\']([^"\']+)',
+            rf'<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']{re.escape(prop or "")}["\']',
+        )
+    for pattern in patterns:
+        match = re.search(pattern, html, re.I | re.S)
+        if match:
+            text = html_lib.unescape(match.group(1).strip())
+            if text:
+                return text
+    return None
+
+
+def extract_jobly_static_description(html: str) -> str | None:
+    for extractor in (
+        lambda: _meta_content(html, name="description"),
+        lambda: _meta_content(html, prop="og:description"),
+        lambda: _meta_content(html, prop="twitter:description"),
+    ):
+        text = extractor()
+        if text and len(text) >= 40:
+            return text
+
+    itemprop = re.search(
+        r'itemprop=["\']description["\'][^>]*>(.*?)</',
+        html,
+        re.I | re.S,
+    )
+    if itemprop:
+        text = re.sub(r"<[^>]+>", " ", itemprop.group(1))
+        text = html_lib.unescape(re.sub(r"\s+", " ", text).strip())
+        if len(text) >= 40:
+            return text
+
+    body_match = re.search(
+        r'<(?:div|section)[^>]+class=["\'][^"\']*(?:job-description|job__description|description)[^"\']*["\'][^>]*>(.*?)</(?:div|section)>',
+        html,
+        re.I | re.S,
+    )
+    if body_match:
+        text = re.sub(r"<[^>]+>", " ", body_match.group(1))
+        text = html_lib.unescape(re.sub(r"\s+", " ", text).strip())
+        if len(text) >= 40:
+            return text
+    return None
+
+
+def extract_jobly_detail_payload(html: str, *, source_url: str) -> dict:
+    payload = extract_jobposting_jsonld(html)
+    if payload is not None:
+        return payload
+
+    title_match = re.search(r"<title>([^<]+)</title>", html)
+    payload = {
+        "url": source_url,
+        "title": title_match.group(1).strip() if title_match else source_url,
+    }
+    description = extract_jobly_static_description(html)
+    if description:
+        payload["description"] = description
+    return payload
+
+
 def jobly_external_id(url: str) -> str:
     match = re.search(r"-(\d+)(?:/)?$", url.rstrip("/"))
     return match.group(1) if match else url
@@ -100,13 +171,7 @@ class JoblyAdapter:
                     logger.warning("event=jobly_listing_missing url=%s", url)
                     continue
                 page_response.raise_for_status()
-                payload = extract_jobposting_jsonld(page_response.text)
-                if payload is None:
-                    title_match = re.search(r"<title>([^<]+)</title>", page_response.text)
-                    payload = {
-                        "url": url,
-                        "title": title_match.group(1) if title_match else url,
-                    }
+                payload = extract_jobly_detail_payload(page_response.text, source_url=url)
                 listing = self.normalize(payload, source_url=url)
                 listings.append(listing)
                 fetched += 1

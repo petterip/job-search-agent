@@ -88,10 +88,15 @@ The current backend exposes:
 Scheduled collection defaults to all verified non-blocked harvesters:
 
 ```env
+COLLECTOR_DAILY_HOUR=16
+COLLECTOR_DAILY_MINUTE=0
+MATCHER_DAILY_HOUR=16
+MATCHER_DAILY_MINUTE=0
 COLLECTOR_ENABLED_SOURCES=duunitori,tmt,tmt_oulu,laura,jobly,eures_fi,kuntarekry,kirkkorekry,oulu_varbi
 ```
 
 Remove sources from `COLLECTOR_ENABLED_SOURCES` only when intentionally narrowing the automatic schedule.
+The worker uses `Europe/Helsinki` time; by default collection and matching/LLM evaluation each run once daily at 16:00.
 
 ## Recommended collection stack
 

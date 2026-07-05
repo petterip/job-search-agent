@@ -2,7 +2,7 @@ import logging
 
 from apscheduler.jobstores.sqlalchemy import SQLAlchemyJobStore
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from apscheduler.triggers.interval import IntervalTrigger
+from apscheduler.triggers.cron import CronTrigger
 import sqlalchemy as sa
 
 from app.adapters.duunitori import DuunitoriAdapter
@@ -14,6 +14,7 @@ from app.adapters.laura import LauraAdapter
 from app.adapters.tmt import TmtAdapter
 from app.adapters.tmt_oulu import TmtOuluAdapter
 from app.adapters.varbi import OuluVarbiAdapter
+from app.adapters.valtiolle import ValtiolleAdapter
 from app.collection.registry import collect_source
 from app.config import get_settings
 from app.matching import run_matching
@@ -22,6 +23,7 @@ logger = logging.getLogger("worker.scheduler")
 
 _kuntarekry_adapter = KuntarekryAdapter()
 _kirkkorekry_adapter = KirkkorekryAdapter()
+_valtiolle_adapter = ValtiolleAdapter()
 
 AVAILABLE_SCHEDULED_SOURCES: tuple[tuple[str, int], ...] = (
     (DuunitoriAdapter.source_name, DuunitoriAdapter.poll_interval_min),
@@ -33,6 +35,7 @@ AVAILABLE_SCHEDULED_SOURCES: tuple[tuple[str, int], ...] = (
     (_kuntarekry_adapter.source_name, _kuntarekry_adapter.poll_interval_min),
     (_kirkkorekry_adapter.source_name, _kirkkorekry_adapter.poll_interval_min),
     (OuluVarbiAdapter.source_name, OuluVarbiAdapter.poll_interval_min),
+    (_valtiolle_adapter.source_name, _valtiolle_adapter.poll_interval_min),
 )
 
 
@@ -120,10 +123,14 @@ def build_scheduler() -> AsyncIOScheduler:
         jobstores={"default": SQLAlchemyJobStore(url=settings.database_url)},
         timezone="Europe/Helsinki",
     )
-    for source_name, interval_minutes in scheduled_sources:
+    for source_name, _interval_minutes in scheduled_sources:
         scheduler.add_job(
             scheduled_collect,
-            trigger=IntervalTrigger(minutes=interval_minutes),
+            trigger=CronTrigger(
+                hour=settings.collector_daily_hour,
+                minute=settings.collector_daily_minute,
+                timezone="Europe/Helsinki",
+            ),
             id=f"collect_{source_name}",
             args=[source_name],
             replace_existing=True,
@@ -132,7 +139,11 @@ def build_scheduler() -> AsyncIOScheduler:
         )
     scheduler.add_job(
         scheduled_match,
-        trigger=IntervalTrigger(minutes=settings.matcher_interval_min),
+        trigger=CronTrigger(
+            hour=settings.matcher_daily_hour,
+            minute=settings.matcher_daily_minute,
+            timezone="Europe/Helsinki",
+        ),
         id="match_recommendations",
         replace_existing=True,
         max_instances=1,

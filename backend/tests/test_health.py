@@ -12,3 +12,4 @@ def test_health_returns_service_status() -> None:
     assert body["service"] == "job-search-agent"
     assert body["embedding_dimension"] == 1536
     assert body["eval_model"]
+    assert "transit_distance_enabled" in body

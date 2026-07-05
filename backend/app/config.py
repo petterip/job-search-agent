@@ -20,7 +20,10 @@ class Settings(BaseModel):
     llm_provider_failure_cooldown_min: int = 360
     storage_dir: str = "/storage"
     llm_prompt_version: int = 7
-    matcher_interval_min: int = 15
+    collector_daily_hour: int = 16
+    collector_daily_minute: int = 0
+    matcher_daily_hour: int = 16
+    matcher_daily_minute: int = 0
     matcher_max_jobs: int = 1000
     discovery_search_queries: list[str] = Field(
         default_factory=lambda: [
@@ -72,6 +75,28 @@ class Settings(BaseModel):
     oulu_varbi_rss_url: str = "https://oulunyliopisto.varbi.com/fi/what:rssfeed/"
     oulu_varbi_base_url: str = "https://oulunyliopisto.varbi.com"
     collector_stale_run_minutes: int = 30
+    kuntarekry_collection_mode: str = "regional"
+    browserbase_api_key: str = ""
+    google_maps_api_key: str = ""
+    transit_origin_address: str = "Jalkatie 2, Oulu, Finland"
+    enrichment_enabled: bool = False
+    enrichment_provider: str = "browserbase"
+    enrichment_max_jobs_per_run: int = 50
+    enrichment_short_description_chars: int = 200
+    jobly_browser_enrich_max_per_run: int = 20
+
+    def browserbase_configured(self) -> bool:
+        return bool(self.browserbase_api_key.strip())
+
+    def google_maps_configured(self) -> bool:
+        return bool(self.google_maps_api_key.strip())
+
+
+def _bool_env(name: str, default: bool) -> bool:
+    raw = getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _int_env(name: str, default: int) -> int:
@@ -127,7 +152,13 @@ def get_settings() -> Settings:
         ),
         storage_dir=getenv("STORAGE_DIR", defaults.storage_dir),
         llm_prompt_version=_int_env("LLM_PROMPT_VERSION", defaults.llm_prompt_version),
-        matcher_interval_min=_int_env("MATCHER_INTERVAL_MIN", defaults.matcher_interval_min),
+        collector_daily_hour=_int_env("COLLECTOR_DAILY_HOUR", defaults.collector_daily_hour),
+        collector_daily_minute=_int_env(
+            "COLLECTOR_DAILY_MINUTE",
+            defaults.collector_daily_minute,
+        ),
+        matcher_daily_hour=_int_env("MATCHER_DAILY_HOUR", defaults.matcher_daily_hour),
+        matcher_daily_minute=_int_env("MATCHER_DAILY_MINUTE", defaults.matcher_daily_minute),
         matcher_max_jobs=_int_env("MATCHER_MAX_JOBS", defaults.matcher_max_jobs),
         discovery_search_queries=discovery_search_queries,
         collector_enabled_sources=collector_enabled_sources,
@@ -145,5 +176,26 @@ def get_settings() -> Settings:
         collector_stale_run_minutes=_int_env(
             "COLLECTOR_STALE_RUN_MINUTES",
             defaults.collector_stale_run_minutes,
+        ),
+        kuntarekry_collection_mode=getenv(
+            "KUNTAREKRY_COLLECTION_MODE",
+            defaults.kuntarekry_collection_mode,
+        ),
+        browserbase_api_key=getenv("BROWSERBASE_API_KEY", ""),
+        google_maps_api_key=getenv("GOOGLE_MAPS_API_KEY", ""),
+        transit_origin_address=getenv("TRANSIT_ORIGIN_ADDRESS", defaults.transit_origin_address),
+        enrichment_enabled=_bool_env("ENRICHMENT_ENABLED", defaults.enrichment_enabled),
+        enrichment_provider=getenv("ENRICHMENT_PROVIDER", defaults.enrichment_provider),
+        enrichment_max_jobs_per_run=_int_env(
+            "ENRICHMENT_MAX_JOBS_PER_RUN",
+            defaults.enrichment_max_jobs_per_run,
+        ),
+        enrichment_short_description_chars=_int_env(
+            "ENRICHMENT_SHORT_DESCRIPTION_CHARS",
+            defaults.enrichment_short_description_chars,
+        ),
+        jobly_browser_enrich_max_per_run=_int_env(
+            "JOBLY_BROWSER_ENRICH_MAX_PER_RUN",
+            defaults.jobly_browser_enrich_max_per_run,
         ),
     )

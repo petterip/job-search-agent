@@ -6,6 +6,7 @@ Concise record of what is actually implemented. Keep this file current when code
 
 ### Implemented
 
+- Worker scheduling for Raspberry Pi deployment now runs enabled source collection once daily at 16:00 Europe/Helsinki by default. Matching and hosted LLM evaluation are likewise limited to one scheduled run per day at 16:00, with `COLLECTOR_DAILY_HOUR`, `COLLECTOR_DAILY_MINUTE`, `MATCHER_DAILY_HOUR`, and `MATCHER_DAILY_MINUTE` available for deploy-time adjustment.
 - Recommendation candidate ordering now uses multi-lane selection before LLM review:
   - `direct_title` for obvious title matches.
   - `application_history` for roles and duties similar to real past applications.
@@ -74,8 +75,8 @@ Concise record of what is actually implemented. Keep this file current when code
   - Collector warnings/errors emitted during a run are persisted with source/run context, message, logger, file/line, args, and exception text when present.
 - Worker scheduler:
   - APScheduler + PostgreSQL `SQLAlchemyJobStore`
-  - One interval job per enabled source using poll intervals from `sources.yaml`
-  - Automatic deterministic recommendation refresh via `match_recommendations` every `MATCHER_INTERVAL_MIN`
+  - One daily cron job per enabled source, defaulting to 16:00 Europe/Helsinki
+  - Automatic deterministic recommendation refresh and hosted LLM evaluation via `match_recommendations` once daily, defaulting to 16:00 Europe/Helsinki
   - Overlap guard via `source_runs.status = running`
   - Stale runs abandoned after `COLLECTOR_STALE_RUN_MINUTES`
 - Manual CLI: `python -m app.collect <source|all>` with `--page-size`, `--max-pages`, `--max-urls`, `--force`
@@ -163,10 +164,10 @@ Concise record of what is actually implemented. Keep this file current when code
 - Expiration/removal handling is conservative and source-refresh based; source-provided deadlines are not fully normalized yet.
 - Jobly runs cap URL fetches per poll (`JOBLY_MAX_URLS_PER_RUN`); first backfill is incremental-by-`lastmod`, not full 13k import in one run.
 - EURES incremental relies on `creationDate` filtering, not API sort order.
-- Deterministic scoring and stored recommendations are implemented and scheduled; OpenAI LLM evaluation is implemented but currently blocked by provider quota; recommendation feedback is implemented; embeddings are not implemented.
+- Deterministic scoring and stored recommendations are implemented and scheduled; OpenAI LLM evaluation is implemented but currently blocked by provider quota; recommendation feedback is implemented; OpenAI embeddings are generated when `OPENAI_API_KEY` is configured (see Current Capabilities above).
 - Three active Jobly rows still lack descriptions because their stored JSON-LD/detail payloads do not contain usable body text.
-- Embeddings are not implemented.
+- Browserbase cloud session bootstrap is implemented (`browserbase_client.py`, `make browserbase-check`); Playwright CDP helper and `ENRICHMENT_ENABLED` gating ship in Phase A. Durable enrichment tables, repository merge rules, `python -m app.enrich --dry-run`, and upsert provenance preservation ship in Phase C core; worker lease, HTTP enricher execution, and browser extraction remain open.
 
 ### Blocked Sources (not implemented)
 
-- Indeed, Careerjet, KIPA P67 — documented in `sources.yaml` under `blocked`.
+- Indeed and KIPA P67 remain blocked in `sources.yaml`. Careerjet and LinkedIn are optional registry entries (`scheduled_by_default: false`) without adapters yet.

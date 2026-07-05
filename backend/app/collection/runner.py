@@ -17,6 +17,7 @@ from app.collection.events import (
 )
 from app.config import get_settings
 from app.db import get_engine
+from app.enrichers.repository import preserve_enriched_description_on_upsert, record_source_provenance
 
 logger = logging.getLogger("collector")
 
@@ -297,6 +298,39 @@ def upsert_listing(
                     "published_at": listing.published_at,
                 },
             ).scalar_one()
+            if listing.description and listing.description.strip():
+                record_source_provenance(
+                    connection,
+                    job_id=int(job_id),
+                    source_id=source_id,
+                )
+        elif listing.description and listing.description.strip():
+            effective_description = preserve_enriched_description_on_upsert(
+                connection,
+                job_id=int(job_id),
+                source_description=listing.description,
+                source_id=source_id,
+            )
+            connection.execute(
+                sa.text(
+                    """
+                    update jobs
+                    set description = coalesce(:effective_description, jobs.description),
+                        employer = coalesce(jobs.employer, :employer),
+                        updated_at = case
+                            when jobs.description is null and :effective_description is not null then now()
+                            when jobs.employer is null and :employer is not null then now()
+                            else jobs.updated_at
+                        end
+                    where id = :job_id
+                    """
+                ),
+                {
+                    "job_id": job_id,
+                    "effective_description": effective_description,
+                    "employer": listing.employer,
+                },
+            )
         connection.execute(
             sa.text(
                 """
@@ -335,6 +369,12 @@ def upsert_listing(
         return result
 
     if existing_hash == listing.content_hash:
+        effective_description = preserve_enriched_description_on_upsert(
+            connection,
+            job_id=int(existing_job),
+            source_description=listing.description,
+            source_id=source_id,
+        )
         connection.execute(
             sa.text(
                 """
@@ -350,7 +390,7 @@ def upsert_listing(
                 """
                 update jobs
                 set employer = coalesce(jobs.employer, :employer),
-                    description = coalesce(jobs.description, :description),
+                    description = coalesce(:effective_description, jobs.description),
                     location = case
                         when jobs.location is null then :location
                         when trim(regexp_replace(lower(coalesce(jobs.location, '')), '[^0-9a-zåäö]+', ' ', 'g')) in ('', 'suomi', 'finland', 'sijainti ei tiedossa')
@@ -362,7 +402,7 @@ def upsert_listing(
                     status = 'active',
                     updated_at = case
                         when jobs.employer is null and :employer is not null then now()
-                        when jobs.description is null and :description is not null then now()
+                        when jobs.description is null and :effective_description is not null then now()
                         when jobs.location is null and cast(:location as text) is not null then now()
                         when trim(regexp_replace(lower(coalesce(jobs.location, '')), '[^0-9a-zåäö]+', ' ', 'g')) in ('', 'suomi', 'finland', 'sijainti ei tiedossa')
                              and cast(:location as text) is not null
@@ -377,19 +417,25 @@ def upsert_listing(
             {
                 "job_id": existing_job,
                 "employer": listing.employer,
-                "description": listing.description,
+                "effective_description": effective_description,
                 "location": listing.location,
             },
         )
         return "deduplicated" if relinked_to_cross_source else "unchanged"
 
+    effective_description = preserve_enriched_description_on_upsert(
+        connection,
+        job_id=int(existing_job),
+        source_description=listing.description,
+        source_id=source_id,
+    )
     connection.execute(
         sa.text(
             """
             update jobs
             set title = :title,
                 employer = :employer,
-                description = :description,
+                description = coalesce(:effective_description, jobs.description),
                 location = :location,
                 published_at = :published_at,
                 status = 'active',
@@ -401,7 +447,7 @@ def upsert_listing(
             "job_id": existing_job,
             "title": listing.title,
             "employer": listing.employer,
-            "description": listing.description,
+            "effective_description": effective_description,
             "location": listing.location,
             "published_at": listing.published_at,
         },

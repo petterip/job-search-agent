@@ -1,10 +1,22 @@
 from datetime import datetime, timezone
 
+import pytest
+
 from app.adapters.base import collect_page_results, ensure_aware_utc, is_newer_than_watermark
 from app.adapters.duunitori import DuunitoriAdapter, DuunitoriFetchResult
 from app.adapters.eures import EuresAdapter, epoch_ms_to_datetime, eures_description_text, eures_portal_url
-from app.adapters.jobly import JoblyAdapter, jobly_external_id
+from app.adapters.jobly import (
+    JoblyAdapter,
+    extract_jobly_static_description,
+    jobly_external_id,
+)
 from app.adapters.kuntarekry import KuntarekryAdapter
+from app.adapters.talentech_org_shard import (
+    TalentechOrgShardAdapter,
+    TalentechOrgShardConfig,
+    parse_filters_organisation_ids,
+)
+from app.adapters.valtiolle import ValtiolleAdapter
 from app.adapters.laura import LauraAdapter, laura_content_text, laura_employer_from_link, laura_rendered
 from app.adapters.talentech import (
     extract_talentech_description,
@@ -13,6 +25,7 @@ from app.adapters.talentech import (
 )
 from app.adapters.tmt import TmtAdapter, tmt_description, tmt_employer_name, tmt_location, tmt_title
 from app.adapters.tmt_oulu import TmtOuluAdapter
+from app.config import get_settings
 from app.adapters.varbi import (
     OuluVarbiAdapter,
     extract_varbi_description,
@@ -355,6 +368,130 @@ def test_kuntarekry_adapter_metadata() -> None:
     adapter = KuntarekryAdapter()
     assert adapter.source_name == "kuntarekry"
     assert "oulu" in adapter.url
+
+
+def test_kuntarekry_adapter_org_shard_mode(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("KUNTAREKRY_COLLECTION_MODE", "org_shard")
+    get_settings.cache_clear()
+
+    adapter = KuntarekryAdapter()
+    assert adapter.source_method == "processwire_format_json_org_shard"
+    assert adapter.url.endswith("/fi/api/filters-data/")
+
+
+def test_valtiolle_adapter_metadata() -> None:
+    adapter = ValtiolleAdapter()
+    assert adapter.source_name == "valtiolle"
+    assert adapter.poll_interval_min == 360
+    assert adapter.url == "https://valtiolle.fi/fi/api/filters-data/"
+
+
+def test_parse_filters_organisation_ids_dedupes_and_preserves_order() -> None:
+    payload = {
+        "organisations": [
+            {"id": 12},
+            {"id": "7"},
+            {"id": 12},
+            {"name": "skip"},
+            {"id": "3"},
+        ]
+    }
+
+    assert parse_filters_organisation_ids(payload) == ["12", "7", "3"]
+
+
+@pytest.mark.asyncio
+async def test_talentech_org_shard_collect_dedupes_and_fetches_detail(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter = TalentechOrgShardAdapter(
+        TalentechOrgShardConfig(
+            source_name="valtiolle",
+            source_method="processwire_format_json_org_shard",
+            site_root="https://valtiolle.test",
+            shard_fetch_delay_s=0,
+        )
+    )
+
+    class FakeResponse:
+        def __init__(self, *, status_code: int, payload: object, text: str = "") -> None:
+            self.status_code = status_code
+            self._payload = payload
+            self.text = text
+
+        def raise_for_status(self) -> None:
+            if self.status_code >= 400:
+                raise RuntimeError(f"HTTP {self.status_code}")
+
+        def json(self) -> object:
+            return self._payload
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        async def get(self, url: str, headers: dict | None = None):
+            if url.endswith("/fi/api/filters-data/"):
+                return FakeResponse(
+                    status_code=200,
+                    payload={"organisations": [{"id": "1"}, {"id": "2"}]},
+                )
+            if "organisation=1" in url:
+                return FakeResponse(
+                    status_code=200,
+                    payload=[{"id": 10, "url": "/fi/tyopaikka/a-10/", "title": "A", "publication_date": "21.6.2026"}],
+                )
+            if "organisation=2" in url:
+                return FakeResponse(
+                    status_code=200,
+                    payload=[{"id": 10, "url": "/fi/tyopaikka/a-10/", "title": "A dup", "publication_date": "21.6.2026"}],
+                )
+            if url.endswith("/fi/tyopaikka/a-10/"):
+                return FakeResponse(
+                    status_code=200,
+                    payload={},
+                    text="<article><p>State role body.</p></article>",
+                )
+            raise AssertionError(f"unexpected url: {url}")
+
+    monkeypatch.setattr("httpx.AsyncClient", FakeClient)
+
+    result = await adapter.collect(watermark=None, max_pages=2)
+
+    assert len(result.listings) == 1
+    assert result.listings[0].external_id == "10"
+    assert result.listings[0].description == "State role body."
+
+
+def test_jobly_static_description_prefers_meta_and_opengraph() -> None:
+    html = """
+    <html><head>
+      <meta name="description" content="Short" />
+      <meta property="og:description" content="This is a long enough OpenGraph description for the Jobly listing body." />
+    </head><body></body></html>
+    """
+
+    assert extract_jobly_static_description(html) == (
+        "This is a long enough OpenGraph description for the Jobly listing body."
+    )
+
+
+def test_jobly_static_description_falls_back_to_visible_body() -> None:
+    html = """
+    <div class="job-description">
+      <p>We are hiring a library professional for municipal services in northern Finland.</p>
+    </div>
+    """
+
+    assert extract_jobly_static_description(html) == (
+        "We are hiring a library professional for municipal services in northern Finland."
+    )
 
 
 def test_varbi_helpers_parse_rss_and_description() -> None:

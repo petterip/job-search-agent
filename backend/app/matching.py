@@ -26,6 +26,11 @@ from app.llm import (
     minimized_profile_summary,
     normalized_evaluation_payload,
 )
+from app.transit_distance import (
+    apply_location_evidence_to_concerns,
+    build_location_evidence,
+    resolve_transit_for_locations,
+)
 
 logger = logging.getLogger("matcher")
 
@@ -530,6 +535,11 @@ def run_deterministic_recommendations(
     ]
 
     scored = rank_scored_candidates_for_review(scored)
+    transit_by_location = resolve_transit_for_locations(
+        connection,
+        [job.location for job, _result in scored],
+        max_lookups=min(len(scored), settings.llm_eval_max_jobs),
+    )
     connection.execute(
         sa.text(
             """
@@ -542,6 +552,19 @@ def run_deterministic_recommendations(
         {"profile_id": profile_id},
     )
     for rank, (job, result) in enumerate(scored, start=1):
+        transit = transit_by_location.get(job.location)
+        evidence = build_location_evidence(job.location, transit)
+        concerns = apply_location_evidence_to_concerns(result.concerns, evidence)
+        deterministic_result = dict(result.deterministic_result)
+        if transit is not None:
+            deterministic_result["transit_distance_km"] = transit.distance_km
+            deterministic_result["transit_duration_text"] = transit.duration_text
+            deterministic_result["transit_summary_text"] = transit.summary_text
+        if evidence is not None:
+            deterministic_result["location_evidence"] = {
+                "text": evidence.text,
+                "tone": evidence.tone,
+            }
         connection.execute(
             sa.text(
                 """
@@ -595,12 +618,12 @@ def run_deterministic_recommendations(
             {
                 "job_id": job.id,
                 "profile_id": profile_id,
-                "deterministic_result": json.dumps(result.deterministic_result, ensure_ascii=False),
+                "deterministic_result": json.dumps(deterministic_result, ensure_ascii=False),
                 "machine_score": result.machine_score,
                 "vector_score": result.vector_score,
                 "rank": rank,
                 "rationale": result.rationale,
-                "concerns": json.dumps(result.concerns, ensure_ascii=False),
+                "concerns": json.dumps(concerns, ensure_ascii=False),
             },
         )
 

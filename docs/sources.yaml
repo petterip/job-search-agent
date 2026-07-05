@@ -1,5 +1,7 @@
 # Finnish job board sources — machine-readable registry
 # Counts are snapshots from 2026-06-20; live totals drift. Run: make test-regression
+# Worker deployment currently schedules enabled sources once daily at 16:00 Europe/Helsinki.
+# poll_interval_min records the source-aware minimum interval, not the active Pi schedule.
 
 sources:
   duunitori:
@@ -139,6 +141,39 @@ sources:
       - "RSS returns complete Oulu university catalog"
       - "Description from .job-desc.mb on FI detail pages"
 
+  careerjet:
+    method: publisher_api_v4
+    scheduled_by_default: false
+    requires_api_key: true
+    url: https://search.api.careerjet.net/v4/query
+    poll_interval_min: 360
+    incremental: query_watermark
+    notes:
+      - "Optional aggregate source; skipped with warning when CAREERJET_API_KEY is absent"
+      - "Disabled by default; enable explicitly in COLLECTOR_ENABLED_SOURCES when adapter ships"
+
+  linkedin:
+    method: guest_http_search
+    scheduled_by_default: false
+    enabled_by_env: LINKEDIN_ENABLED
+    poll_interval_min: 360
+    incremental: search_watermark
+    notes:
+      - "Optional supplementary aggregate; disabled unless LINKEDIN_ENABLED=true"
+      - "Guest HTTP search first; short descriptions may route through enrichment queue"
+
+  valtiolle:
+    method: processwire_format_json_org_shard
+    scheduled_by_default: false
+    filters_url: https://valtiolle.fi/fi/api/filters-data/
+    listing_url: https://valtiolle.fi/fi/tyopaikat/?format=json&organisation={id}
+    snapshot_count_org_shard: 187
+    poll_interval_min: 360
+    incremental: organisation_watermark
+    notes:
+      - "Full catalog via organisation sharding; disabled by default until explicitly enabled"
+      - "Enable with COLLECTOR_ENABLED_SOURCES when adapter is verified in production"
+
 # Research candidates — probed but not in collector (see tyonhaku-rajapinnat.md §13)
 research:
   kuntarekry_national:
@@ -196,7 +231,5 @@ research:
 blocked:
   indeed:
     reason: HTTP 403 bot protection
-  careerjet:
-    reason: HTTP 401 requires API key
   kipa_p67:
     reason: KEHA contract + IP allowlist required

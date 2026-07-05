@@ -8,6 +8,12 @@ from pydantic import BaseModel
 from app.config import get_settings
 from app.db import get_engine
 from app.llm import configured_eval_model
+from app.location_evidence_service import (
+    LocationEvidenceView,
+    enrich_location_evidence,
+    location_evidence_from_deterministic_result,
+    resolve_location_evidence_for_job,
+)
 from app.logging import configure_logging
 
 configure_logging()
@@ -20,9 +26,11 @@ class HealthResponse(BaseModel):
     service: str
     checked_at: datetime
     llm_enabled: bool
+    transit_distance_enabled: bool
     embedding_model: str
     embedding_dimension: int
     eval_model: str
+
 
 
 class JobListItem(BaseModel):
@@ -92,6 +100,7 @@ class RecommendationListItem(BaseModel):
     title: str
     employer: str | None
     location: str | None
+    location_evidence: LocationEvidenceView | None = None
     published_at: datetime | None
     application_url: str | None
     source_names: list[str]
@@ -116,6 +125,7 @@ class JobDetailResponse(BaseModel):
     employer: str | None
     description: str | None
     location: str | None
+    location_evidence: LocationEvidenceView | None = None
     published_at: datetime | None
     status: str
     sources: list[JobSourceItem]
@@ -207,10 +217,12 @@ def recommendation_item_from_row(row: dict) -> RecommendationListItem:
         employer=row_data.get("employer"),
         deterministic_result=deterministic_result,
     )
+    stored_evidence = location_evidence_from_deterministic_result(deterministic_result)
     return RecommendationListItem(
         **row_data,
         recommendation_category=recommendation_category,
         hidden_opportunity=hidden_opportunity,
+        location_evidence=stored_evidence,
     )
 
 
@@ -286,6 +298,7 @@ async def health() -> HealthResponse:
         service=settings.app_name,
         checked_at=datetime.now(timezone.utc),
         llm_enabled=bool(settings.llm_provider),
+        transit_distance_enabled=get_settings().google_maps_configured(),
         embedding_model=settings.openai_embedding_model,
         embedding_dimension=settings.openai_embedding_dimension,
         eval_model=configured_eval_model(settings),
@@ -438,9 +451,19 @@ async def get_job(job_id: int) -> JobDetailResponse:
             if recommendation_row is not None
             else None
         )
+        job_evidence = resolve_location_evidence_for_job(
+            connection,
+            row["location"],
+            fallback=recommendation.location_evidence if recommendation is not None else None,
+            max_lookups=1,
+        )
+        if recommendation is not None:
+            recommendation = recommendation.model_copy(update={"location_evidence": job_evidence})
+        connection.commit()
 
     return JobDetailResponse(
         **row,
+        location_evidence=job_evidence,
         sources=sources,
         recommendation=recommendation,
     )
@@ -595,7 +618,12 @@ async def list_recommendations(
             ),
             {"limit": limit, "offset": offset},
         ).mappings()
-        items = [recommendation_item_from_row(row) for row in rows]
+        items = enrich_location_evidence(
+            connection,
+            [recommendation_item_from_row(row) for row in rows],
+            max_lookups=limit,
+        )
+        connection.commit()
     return RecommendationListResponse(items=items, limit=limit, offset=offset, total=total)
 
 

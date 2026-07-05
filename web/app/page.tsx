@@ -5,9 +5,15 @@ type HealthResponse = {
   service: string;
   checked_at: string;
   llm_enabled: boolean;
+  transit_distance_enabled: boolean;
   embedding_model: string;
   embedding_dimension: number;
   eval_model: string;
+};
+
+type LocationEvidence = {
+  text: string;
+  tone: "good" | "warning" | "bad";
 };
 
 type JobListItem = {
@@ -70,6 +76,7 @@ type RecommendationListItem = {
   title: string;
   employer: string | null;
   location: string | null;
+  location_evidence: LocationEvidence | null;
   published_at: string | null;
   application_url: string | null;
   source_names: string[];
@@ -293,11 +300,14 @@ export default async function Home({ searchParams }: PageProps) {
                         {item.hidden_opportunity ? <p className="recommendation-category">Piilo-osuma</p> : null}
                         <h2>{item.title}</h2>
                         <p className="job-employer">{item.employer ?? "Työnantaja ei tiedossa"}</p>
-                        <p className="job-location">{item.location ?? "Sijainti ei tiedossa"}</p>
+                        <p className="job-location">
+                          {item.location_evidence?.text ?? item.location ?? "Sijainti ei tiedossa"}
+                        </p>
                         <RecommendationEvidence
                           concerns={item.concerns}
                           idPrefix={`recommendation-${item.id}`}
                           location={item.location}
+                          locationEvidence={item.location_evidence}
                           rationale={item.rationale}
                           score={item.llm_score ?? item.machine_score}
                         />

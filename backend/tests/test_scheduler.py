@@ -26,6 +26,9 @@ def test_build_scheduler_registers_all_default_source_jobs(monkeypatch: pytest.M
         "collect_oulu_varbi",
         "match_recommendations",
     }
+    assert all("cron" in str(job.trigger) for job in jobs)
+    assert all("hour='16'" in str(job.trigger) for job in jobs)
+    assert all("minute='0'" in str(job.trigger) for job in jobs)
 
 
 def test_expected_scheduler_job_ids() -> None:

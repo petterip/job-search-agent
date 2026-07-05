@@ -1,4 +1,4 @@
-.PHONY: test test-regression test-smoke test-incremental test-eures test-spike-kuntarekry test-backend test-web audit-db backup-db restore-db docker-config help
+.PHONY: test test-regression test-smoke test-incremental test-eures test-spike-kuntarekry test-backend test-web audit-db backup-db restore-db docker-config browserbase-check transit-distance-check help
 
 help:
 	@echo "Targets:"
@@ -13,6 +13,8 @@ help:
 	@echo "  backup-db        Write PostgreSQL custom-format backup to backups/"
 	@echo "  restore-db       Restore BACKUP=backups/file.dump into PostgreSQL"
 	@echo "  docker-config    Validate compose.yaml"
+	@echo "  browserbase-check  Verify BROWSERBASE_API_KEY (loads .env)"
+	@echo "  transit-distance-check  Verify GOOGLE_MAPS_API_KEY transit routing (loads .env)"
 	@echo "  test             Alias for test-regression"
 
 test: test-regression
@@ -52,3 +54,9 @@ restore-db:
 
 docker-config:
 	docker compose config --no-interpolate
+
+browserbase-check:
+	set -a && . ./.env && set +a && cd backend && python3 -m app.browserbase_check
+
+transit-distance-check:
+	set -a && . ./.env && set +a && cd backend && python3 -m app.transit_distance_check
