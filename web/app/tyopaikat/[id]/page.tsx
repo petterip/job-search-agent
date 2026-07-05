@@ -9,6 +9,29 @@ type JobSourceItem = {
   last_seen_at: string;
 };
 
+type RecommendationFeedback = {
+  rating: number;
+  applied: boolean;
+  analysis_status: string;
+  comment?: string | null;
+  hypothesis_fi?: string | null;
+};
+
+function feedbackAnalysisNote(feedback: RecommendationFeedback): string | null {
+  switch (feedback.analysis_status) {
+    case "pending":
+      return "Analyysi valmistuu taustalla.";
+    case "completed":
+      return null;
+    case "failed":
+      return "Analyysin tuottaminen epäonnistui; yritä tallentaa arvio uudelleen.";
+    case "skipped":
+      return "Analyysi ohitettiin (esim. palveluntarjoaja ei käytettävissä).";
+    default:
+      return null;
+  }
+}
+
 type RecommendationItem = {
   id: number;
   rank: number | null;
@@ -18,11 +41,21 @@ type RecommendationItem = {
   suggested_action: string | null;
   rationale: string | null;
   concerns: string[];
+  is_active: boolean;
+  feedback: RecommendationFeedback | null;
   location_evidence: {
     text: string;
     tone: "good" | "warning" | "bad";
   } | null;
 };
+
+const RATING_OPTIONS = [
+  { value: 1, label: "Todella huono" },
+  { value: 2, label: "Huono" },
+  { value: 3, label: "Neutraali" },
+  { value: 4, label: "Hyvä" },
+  { value: 5, label: "Erittäin hyvä" },
+] as const;
 
 type JobDetailResponse = {
   id: number;
@@ -76,6 +109,9 @@ export default async function JobPage({ params }: PageProps) {
   const primaryApplicationUrl = job.sources.find((source) => source.application_url)?.application_url ?? null;
   const primaryExternalApplyUrl =
     job.sources.find((source) => source.external_apply_url)?.external_apply_url ?? null;
+  const feedbackStatusNote = job.recommendation?.feedback
+    ? feedbackAnalysisNote(job.recommendation.feedback)
+    : null;
 
   return (
     <main className="app-shell">
@@ -133,6 +169,11 @@ export default async function JobPage({ params }: PageProps) {
                 <RecommendationActionBadge value={job.recommendation.suggested_action} />
               </div>
             </div>
+            {!job.recommendation.is_active || job.recommendation.feedback?.rating === 1 ? (
+              <p className="feedback-hidden-note" role="status">
+                Piilotettu suosituksista
+              </p>
+            ) : null}
             <RecommendationEvidence
               concerns={job.recommendation.concerns}
               idPrefix={`recommendation-${job.recommendation.id}`}
@@ -141,17 +182,66 @@ export default async function JobPage({ params }: PageProps) {
               rationale={job.recommendation.rationale}
               score={job.recommendation.llm_score ?? job.recommendation.machine_score}
             />
-            <p className="job-meta">Oma merkintä</p>
-            <form className="feedback-actions" action={`/suositukset/${job.recommendation.id}/palaute`} method="post">
+            <p className="job-meta">Oma arvio</p>
+            <form className="feedback-form" action={`/suositukset/${job.recommendation.id}/palaute`} method="post">
               <input type="hidden" name="job_id" value={job.id} />
-              <button name="action" value="good_match" type="submit">
-                Merkitse sopivaksi
-              </button>
-              <button name="action" value="not_relevant" type="submit">
-                Piilota suosituksista
-              </button>
-              <button name="action" value="applied" type="submit">
-                Merkitse haetuksi
+              <fieldset className="feedback-rating-group">
+                <legend className="sr-only">Arvioi suositus asteikolla 1–5</legend>
+                {RATING_OPTIONS.map((option) => {
+                  const selected = job.recommendation?.feedback?.rating === option.value;
+                  return (
+                    <label
+                      className={`feedback-rating-option${selected ? " is-selected" : ""}`}
+                      key={option.value}
+                    >
+                      <input
+                        aria-label={option.label}
+                        checked={selected}
+                        name="rating"
+                        required={job.recommendation?.feedback === null}
+                        type="radio"
+                        value={option.value}
+                      />
+                      <span>{option.label}</span>
+                    </label>
+                  );
+                })}
+              </fieldset>
+              <label className="feedback-applied-toggle">
+                <input
+                  defaultChecked={job.recommendation.feedback?.applied ?? false}
+                  name="applied"
+                  type="checkbox"
+                />
+                <span>Merkitty haetuksi</span>
+              </label>
+              <label className="feedback-comment-field">
+                <span className="feedback-comment-label">Vapaaehtoinen kommentti</span>
+                <textarea
+                  className="feedback-comment-input"
+                  defaultValue={job.recommendation.feedback?.comment ?? ""}
+                  maxLength={1000}
+                  name="comment"
+                  placeholder="Miksi tämä arvio? (ei pakollinen)"
+                  rows={3}
+                />
+              </label>
+              {feedbackStatusNote ? (
+                <p className="job-meta" role="status">
+                  {feedbackStatusNote}
+                </p>
+              ) : null}
+              {job.recommendation.feedback?.hypothesis_fi ? (
+                <div className="feedback-analysis-note">
+                  <p className="feedback-analysis-label">Järjestelmän arvio palautteesta</p>
+                  <p className="feedback-analysis-text">{job.recommendation.feedback.hypothesis_fi}</p>
+                  <p className="feedback-analysis-disclaimer">
+                    Tämä on järjestelmän hypoteesi, ei vahvistettu käyttäjän lausuma.
+                  </p>
+                </div>
+              ) : null}
+              <button className="feedback-submit" type="submit">
+                Tallenna arvio
               </button>
             </form>
           </section>

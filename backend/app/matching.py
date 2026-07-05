@@ -13,7 +13,15 @@ from app.embeddings import (
     build_embedding_provider,
     ensure_job_embeddings,
     ensure_profile_embedding,
+    learned_centroid_similarity_scores,
     semantic_vector_scores,
+)
+from app.feedback_learning import (
+    SEMANTIC_ALPHA,
+    SEMANTIC_BETA,
+    effective_lane_quotas,
+    learned_boost_terms,
+    learned_exclusion_penalty,
 )
 from app.llm import (
     EvaluationProvider,
@@ -27,10 +35,12 @@ from app.llm import (
     normalized_evaluation_payload,
 )
 from app.transit_distance import (
+    LocationEvidence,
     apply_location_evidence_to_concerns,
-    build_location_evidence,
-    resolve_transit_for_locations,
+    format_duration_fi,
+    resolve_transit_for_queries,
 )
+from app.travel_policy import TravelAssessment, assess_travel, extract_destination_candidates
 
 logger = logging.getLogger("matcher")
 
@@ -252,6 +262,9 @@ def score_job(profile: dict[str, Any], job: JobForScoring) -> ScoreResult:
     application_title_terms = application_history_terms(profile, "boost_titles_fi")
     application_keyword_terms = application_history_terms(profile, "boost_keywords_fi")
     application_location_terms = application_history_terms(profile, "boost_locations")
+    learned_title_terms = learned_boost_terms(profile, "boost_titles_fi")
+    learned_keyword_terms = learned_boost_terms(profile, "boost_keywords_fi")
+    learned_location_terms = learned_boost_terms(profile, "boost_locations")
     sector_terms = preferred_sector_terms(profile)
     location_terms = allowed_locations(profile)
     negative_terms = exclusion_terms(profile)
@@ -267,6 +280,9 @@ def score_job(profile: dict[str, Any], job: JobForScoring) -> ScoreResult:
     application_title_matches = matching_terms(application_title_terms, job_title_terms)
     application_keyword_matches = matching_terms(application_keyword_terms, job_text_terms)
     application_location_matches = matching_terms(application_location_terms, job_location_terms)
+    learned_title_matches = matching_terms(learned_title_terms, job_title_terms)
+    learned_keyword_matches = matching_terms(learned_keyword_terms, job_text_terms)
+    learned_location_matches = matching_terms(learned_location_terms, job_location_terms)
     sector_matches = matching_terms(sector_terms, job_text_terms)
     negative_matches = sorted(term for term in negative_terms if term in job_text)
     caution_matches = sorted(term for term in caution_terms if term in job_text)
@@ -289,14 +305,33 @@ def score_job(profile: dict[str, Any], job: JobForScoring) -> ScoreResult:
     score += min(len(application_title_matches), 4) * 18
     score += min(len(application_keyword_matches), 6) * 5
     score += min(len(sector_matches), 3) * 4
+    score += min(len(learned_title_matches), 4) * 18
+    score += min(len(learned_keyword_matches), 6) * 5
     if location_matches:
         score += 15
     elif not job.location:
         score += 3
     if application_location_matches:
         score += 7
+    if learned_location_matches:
+        score += 7
+    exclusion_penalty, learned_exclusion_matches = learned_exclusion_penalty(
+        job_title=job.title,
+        job_employer=job.employer,
+        job_description=job.description,
+        profile=profile,
+    )
     if negative_matches or missing_qualification_matches:
         score -= 40
+
+    unpenalized_machine_score = max(0.0, min(100.0, score))
+    penalized_score = max(0.0, min(100.0, score - exclusion_penalty))
+    score = penalized_score
+    passes = (
+        unpenalized_machine_score >= 15
+        and not negative_matches
+        and not missing_qualification_matches
+    )
 
     candidate_lanes: list[str] = []
     if title_matches:
@@ -314,8 +349,6 @@ def score_job(profile: dict[str, Any], job: JobForScoring) -> ScoreResult:
     if hidden_opportunity:
         candidate_lanes.append("exploration")
 
-    score = max(0.0, min(100.0, score))
-    passes = score >= 15 and not negative_matches and not missing_qualification_matches
     rationale_parts = []
     if title_matches:
         rationale_parts.append(f"Nimike sopii hakijalle: {', '.join(title_matches[:4])}.")
@@ -325,6 +358,11 @@ def score_job(profile: dict[str, Any], job: JobForScoring) -> ScoreResult:
         application_matches = [*application_title_matches[:3], *application_keyword_matches[:4]]
         rationale_parts.append(
             f"Aiemmin kiinnostaviksi valitut tehtävät tukevat osumaa: {', '.join(application_matches[:5])}."
+        )
+    if learned_title_matches or learned_keyword_matches:
+        learned_matches = [*learned_title_matches[:3], *learned_keyword_matches[:4]]
+        rationale_parts.append(
+            f"Palautteen perusteella opitut signaalit tukevat osumaa: {', '.join(learned_matches[:5])}."
         )
     if hidden_opportunity:
         rationale_parts.append("Tehtävä voi olla ei-ilmeinen mutta siirrettävien taitojen perusteella kiinnostava osuma.")
@@ -348,6 +386,12 @@ def score_job(profile: dict[str, Any], job: JobForScoring) -> ScoreResult:
             "application_history_title_matches": application_title_matches,
             "application_history_keyword_matches": application_keyword_matches,
             "application_history_location_matches": application_location_matches,
+            "learned_title_matches": learned_title_matches,
+            "learned_keyword_matches": learned_keyword_matches,
+            "learned_location_matches": learned_location_matches,
+            "learned_exclusion_matches": learned_exclusion_matches,
+            "learned_exclusion_penalty": exclusion_penalty,
+            "unpenalized_machine_score": round(unpenalized_machine_score, 2),
             "sector_matches": sector_matches,
             "location_matches": location_matches,
             "negative_matches": negative_matches,
@@ -362,8 +406,15 @@ def score_job(profile: dict[str, Any], job: JobForScoring) -> ScoreResult:
 def merge_semantic_scores(
     scored: list[tuple[JobForScoring, ScoreResult]],
     vector_scores: dict[int, float],
+    *,
+    preference_scores: dict[int, float] | None = None,
+    anti_scores: dict[int, float] | None = None,
+    alpha: float = SEMANTIC_ALPHA,
+    beta: float = SEMANTIC_BETA,
 ) -> list[tuple[JobForScoring, ScoreResult]]:
     merged: list[tuple[JobForScoring, ScoreResult]] = []
+    preference_scores = preference_scores or {}
+    anti_scores = anti_scores or {}
     for job, result in scored:
         vector_score = vector_scores.get(job.id)
         if vector_score is None:
@@ -371,22 +422,39 @@ def merge_semantic_scores(
             continue
         deterministic_result = dict(result.deterministic_result)
         candidate_lanes = list(deterministic_result.get("candidate_lanes", []))
-        if vector_score >= SEMANTIC_VECTOR_THRESHOLD and "semantic_similarity" not in candidate_lanes:
+        is_exploration = "exploration" in candidate_lanes
+        adjusted_vector = float(vector_score)
+        if job.id in preference_scores:
+            adjusted_vector += alpha * preference_scores[job.id]
+        if job.id in anti_scores and not is_exploration:
+            adjusted_vector -= beta * anti_scores[job.id]
+        adjusted_vector = max(0.0, min(1.0, adjusted_vector))
+        if adjusted_vector >= SEMANTIC_VECTOR_THRESHOLD and "semantic_similarity" not in candidate_lanes:
             candidate_lanes.append("semantic_similarity")
         hidden_opportunity = bool(deterministic_result.get("hidden_opportunity")) or (
-            vector_score >= SEMANTIC_VECTOR_THRESHOLD and not deterministic_result.get("title_matches")
+            adjusted_vector >= SEMANTIC_VECTOR_THRESHOLD and not deterministic_result.get("title_matches")
         )
         if hidden_opportunity and "exploration" not in candidate_lanes:
             candidate_lanes.append("exploration")
-        semantic_score = 15 + max(0.0, min(1.0, vector_score)) * 20
+        semantic_score = 15 + max(0.0, min(1.0, adjusted_vector)) * 20
         machine_score = max(result.machine_score, round(semantic_score, 2))
+        unpenalized = result.deterministic_result.get("unpenalized_machine_score", result.machine_score)
+        unpenalized_machine_score = round(max(float(unpenalized), machine_score), 2)
         passes = result.passes or (
-            vector_score >= SEMANTIC_VECTOR_THRESHOLD
+            adjusted_vector >= SEMANTIC_VECTOR_THRESHOLD
             and not deterministic_result.get("negative_matches")
         )
         deterministic_result.update(
             {
-                "vector_score": round(vector_score, 4),
+                "vector_score": round(adjusted_vector, 4),
+                "base_vector_score": round(vector_score, 4),
+                "preference_similarity": round(preference_scores.get(job.id, 0.0), 4)
+                if job.id in preference_scores
+                else None,
+                "anti_preference_similarity": round(anti_scores[job.id], 4)
+                if job.id in anti_scores
+                else None,
+                "unpenalized_machine_score": unpenalized_machine_score,
                 "candidate_lanes": candidate_lanes,
                 "hidden_opportunity": hidden_opportunity,
                 "passes": passes,
@@ -402,7 +470,7 @@ def merge_semantic_scores(
                     result,
                     passes=passes,
                     machine_score=machine_score,
-                    vector_score=round(vector_score, 4),
+                    vector_score=round(adjusted_vector, 4),
                     rationale=rationale,
                     deterministic_result=deterministic_result,
                 ),
@@ -411,22 +479,32 @@ def merge_semantic_scores(
     return merged
 
 
-def score_sort_key(item: tuple[JobForScoring, ScoreResult]) -> tuple[float, int]:
+def score_sort_key(item: tuple[JobForScoring, ScoreResult], *, use_unpenalized: bool = False) -> tuple[float, int]:
     job, result = item
+    if use_unpenalized:
+        unpenalized = result.deterministic_result.get("unpenalized_machine_score")
+        if unpenalized is not None:
+            return (-float(unpenalized), job.id)
     return (-result.machine_score, job.id)
 
 
 def rank_scored_candidates_for_review(
     scored: list[tuple[JobForScoring, ScoreResult]],
+    *,
+    profile: dict[str, Any] | None = None,
 ) -> list[tuple[JobForScoring, ScoreResult]]:
     ranked_by_score = sorted(scored, key=score_sort_key)
     selected: list[tuple[JobForScoring, ScoreResult]] = []
     selected_ids: set[int] = set()
+    lane_quotas = effective_lane_quotas(profile or {})
 
-    for lane, quota in LANE_QUOTAS.items():
+    for lane, quota in lane_quotas.items():
         lane_items = [
             item
-            for item in ranked_by_score
+            for item in sorted(
+                scored,
+                key=lambda item: score_sort_key(item, use_unpenalized=lane == "exploration"),
+            )
             if item[0].id not in selected_ids
             and lane in item[1].deterministic_result.get("candidate_lanes", [])
         ]
@@ -439,6 +517,66 @@ def rank_scored_candidates_for_review(
             selected.append(item)
             selected_ids.add(item[0].id)
     return selected
+
+
+def apply_travel_to_scored_candidates(
+    scored: list[tuple[JobForScoring, ScoreResult]],
+    *,
+    profile: dict[str, Any],
+    connection: Connection,
+) -> list[tuple[JobForScoring, ScoreResult, TravelAssessment]]:
+    settings = get_settings()
+    maps_available = settings.google_maps_configured()
+    origin_address = settings.transit_origin_address
+    commute_limit_minutes = settings.recommendation_commute_limit_minutes
+
+    destination_queries: list[str] = []
+    seen_queries: set[str] = set()
+    for job, _result in scored:
+        for query in extract_destination_candidates(job.location):
+            if query not in seen_queries:
+                seen_queries.add(query)
+                destination_queries.append(query)
+
+    transit_by_destination = resolve_transit_for_queries(
+        connection,
+        destination_queries,
+        max_lookups=min(len(destination_queries), settings.recommendation_transit_lookup_budget),
+    )
+
+    travel_scored: list[tuple[JobForScoring, ScoreResult, TravelAssessment]] = []
+    for job, result in scored:
+        assessment = assess_travel(
+            profile=profile,
+            location=job.location,
+            transit_by_destination=transit_by_destination,
+            origin_address=origin_address,
+            commute_limit_minutes=commute_limit_minutes,
+            maps_available=maps_available,
+        )
+        deterministic_result = dict(result.deterministic_result)
+        if "unpenalized_machine_score" not in deterministic_result:
+            deterministic_result["unpenalized_machine_score"] = result.machine_score
+        pre_travel_score = result.machine_score
+        adjusted_score = max(0.0, min(100.0, pre_travel_score + assessment.score_adjustment))
+        deterministic_result["travel_assessment"] = assessment.to_audit_dict()
+        deterministic_result["location_evidence"] = {
+            "text": assessment.evidence_text,
+            "tone": assessment.tone,
+        }
+        if assessment.duration_seconds is not None:
+            deterministic_result["transit_duration_text"] = format_duration_fi(
+                assessment.duration_seconds
+            )
+        if assessment.distance_km is not None:
+            deterministic_result["transit_distance_km"] = assessment.distance_km
+        adjusted = replace(
+            result,
+            machine_score=round(adjusted_score, 2),
+            deterministic_result=deterministic_result,
+        )
+        travel_scored.append((job, adjusted, assessment))
+    return travel_scored
 
 
 def run_deterministic_recommendations(
@@ -519,7 +657,19 @@ def run_deterministic_recommendations(
                 dimension=provider.dimension,
                 limit=min(len(all_scored), max(50, settings.llm_eval_max_jobs * 3)),
             )
-            all_scored = merge_semantic_scores(all_scored, semantic_scores)
+            preference_scores, anti_scores = learned_centroid_similarity_scores(
+                connection,
+                profile_id=profile_id,
+                job_ids=[job.id for job, _result in all_scored],
+                model=provider.model,
+                dimension=provider.dimension,
+            )
+            all_scored = merge_semantic_scores(
+                all_scored,
+                semantic_scores,
+                preference_scores=preference_scores,
+                anti_scores=anti_scores,
+            )
             logger.info(
                 "event=semantic_matching_completed embedded_jobs=%s semantic_candidates=%s",
                 embedded_count,
@@ -534,37 +684,54 @@ def run_deterministic_recommendations(
         if result.passes
     ]
 
-    scored = rank_scored_candidates_for_review(scored)
-    transit_by_location = resolve_transit_for_locations(
-        connection,
-        [job.location for job, _result in scored],
-        max_lookups=min(len(scored), settings.llm_eval_max_jobs),
+    travel_scored = apply_travel_to_scored_candidates(
+        scored,
+        profile=profile,
+        connection=connection,
     )
+    assessment_by_job_id = {job.id: assessment for job, _result, assessment in travel_scored}
+    scored = rank_scored_candidates_for_review(
+        [(job, result) for job, result, _assessment in travel_scored],
+        profile=profile,
+    )
+
+    nationwide_rank_by_job_id: dict[int, int] = {}
+    commutable_rank_by_job_id: dict[int, int] = {}
+    commutable_or_full_remote_rank_by_job_id: dict[int, int] = {}
+    commutable_order = 0
+    commutable_or_full_remote_order = 0
+    for nationwide_rank, (job, _result) in enumerate(scored, start=1):
+        nationwide_rank_by_job_id[job.id] = nationwide_rank
+        assessment = assessment_by_job_id[job.id]
+        if assessment.commutable:
+            commutable_order += 1
+            commutable_rank_by_job_id[job.id] = commutable_order
+        if assessment.commutable_or_full_remote:
+            commutable_or_full_remote_order += 1
+            commutable_or_full_remote_rank_by_job_id[job.id] = commutable_or_full_remote_order
+
     connection.execute(
         sa.text(
             """
             update recommendations
             set is_active = false,
-                rank = null
+                rank = null,
+                commutable_rank = null,
+                commutable_or_full_remote_rank = null,
+                nationwide_rank = null
             where profile_id = :profile_id
             """
         ),
         {"profile_id": profile_id},
     )
-    for rank, (job, result) in enumerate(scored, start=1):
-        transit = transit_by_location.get(job.location)
-        evidence = build_location_evidence(job.location, transit)
+    for job, result in scored:
+        assessment = assessment_by_job_id[job.id]
+        evidence = LocationEvidence(text=assessment.evidence_text, tone=assessment.tone)
         concerns = apply_location_evidence_to_concerns(result.concerns, evidence)
         deterministic_result = dict(result.deterministic_result)
-        if transit is not None:
-            deterministic_result["transit_distance_km"] = transit.distance_km
-            deterministic_result["transit_duration_text"] = transit.duration_text
-            deterministic_result["transit_summary_text"] = transit.summary_text
-        if evidence is not None:
-            deterministic_result["location_evidence"] = {
-                "text": evidence.text,
-                "tone": evidence.tone,
-            }
+        nationwide_rank = nationwide_rank_by_job_id[job.id]
+        commutable_rank = commutable_rank_by_job_id.get(job.id)
+        commutable_or_full_remote_rank = commutable_or_full_remote_rank_by_job_id.get(job.id)
         connection.execute(
             sa.text(
                 """
@@ -575,6 +742,19 @@ def run_deterministic_recommendations(
                     machine_score,
                     vector_score,
                     rank,
+                    commutable,
+                    full_remote,
+                    commutable_or_full_remote,
+                    commutable_rank,
+                    commutable_or_full_remote_rank,
+                    nationwide_rank,
+                    travel_status,
+                    travel_reason_code,
+                    travel_duration_seconds,
+                    travel_distance_km,
+                    travel_origin_address,
+                    travel_commute_limit_minutes,
+                    travel_routing_profile,
                     rationale,
                     concerns,
                     is_active
@@ -586,6 +766,19 @@ def run_deterministic_recommendations(
                     :machine_score,
                     :vector_score,
                     :rank,
+                    :commutable,
+                    :full_remote,
+                    :commutable_or_full_remote,
+                    :commutable_rank,
+                    :commutable_or_full_remote_rank,
+                    :nationwide_rank,
+                    :travel_status,
+                    :travel_reason_code,
+                    :travel_duration_seconds,
+                    :travel_distance_km,
+                    :travel_origin_address,
+                    :travel_commute_limit_minutes,
+                    :travel_routing_profile,
                     :rationale,
                     CAST(:concerns AS jsonb),
                     true
@@ -600,18 +793,58 @@ def run_deterministic_recommendations(
                             select 1
                             from recommendation_feedback rf
                             where rf.recommendation_id = recommendations.id
-                              and rf.action = 'not_relevant'
+                              and (rf.rating = 1 or rf.action = 'not_relevant')
                         )
                         then null
                         else excluded.rank
                     end,
+                    commutable = excluded.commutable,
+                    full_remote = excluded.full_remote,
+                    commutable_or_full_remote = excluded.commutable_or_full_remote,
+                    commutable_rank = case
+                        when exists (
+                            select 1
+                            from recommendation_feedback rf
+                            where rf.recommendation_id = recommendations.id
+                              and (rf.rating = 1 or rf.action = 'not_relevant')
+                        )
+                        then null
+                        else excluded.commutable_rank
+                    end,
+                    commutable_or_full_remote_rank = case
+                        when exists (
+                            select 1
+                            from recommendation_feedback rf
+                            where rf.recommendation_id = recommendations.id
+                              and (rf.rating = 1 or rf.action = 'not_relevant')
+                        )
+                        then null
+                        else excluded.commutable_or_full_remote_rank
+                    end,
+                    nationwide_rank = case
+                        when exists (
+                            select 1
+                            from recommendation_feedback rf
+                            where rf.recommendation_id = recommendations.id
+                              and (rf.rating = 1 or rf.action = 'not_relevant')
+                        )
+                        then null
+                        else excluded.nationwide_rank
+                    end,
+                    travel_status = excluded.travel_status,
+                    travel_reason_code = excluded.travel_reason_code,
+                    travel_duration_seconds = excluded.travel_duration_seconds,
+                    travel_distance_km = excluded.travel_distance_km,
+                    travel_origin_address = excluded.travel_origin_address,
+                    travel_commute_limit_minutes = excluded.travel_commute_limit_minutes,
+                    travel_routing_profile = excluded.travel_routing_profile,
                     rationale = excluded.rationale,
                     concerns = excluded.concerns,
                     is_active = not exists (
                         select 1
                         from recommendation_feedback rf
                         where rf.recommendation_id = recommendations.id
-                          and rf.action = 'not_relevant'
+                          and (rf.rating = 1 or rf.action = 'not_relevant')
                     )
                 """
             ),
@@ -621,7 +854,20 @@ def run_deterministic_recommendations(
                 "deterministic_result": json.dumps(deterministic_result, ensure_ascii=False),
                 "machine_score": result.machine_score,
                 "vector_score": result.vector_score,
-                "rank": rank,
+                "rank": nationwide_rank,
+                "commutable": assessment.commutable,
+                "full_remote": assessment.full_remote,
+                "commutable_or_full_remote": assessment.commutable_or_full_remote,
+                "commutable_rank": commutable_rank,
+                "commutable_or_full_remote_rank": commutable_or_full_remote_rank,
+                "nationwide_rank": nationwide_rank,
+                "travel_status": assessment.status,
+                "travel_reason_code": assessment.reason_code,
+                "travel_duration_seconds": assessment.duration_seconds,
+                "travel_distance_km": assessment.distance_km,
+                "travel_origin_address": assessment.origin_address,
+                "travel_commute_limit_minutes": assessment.commute_limit_minutes,
+                "travel_routing_profile": assessment.routing_profile,
                 "rationale": result.rationale,
                 "concerns": json.dumps(concerns, ensure_ascii=False),
             },
@@ -651,13 +897,29 @@ def run_llm_evaluations(
         return {"llm_evaluated": 0, "llm_failed": 0}
 
     profile_id = int(profile_row["id"])
-    profile_summary = minimized_profile_summary(dict(profile_row["profile"]))
+    profile = dict(profile_row["profile"])
+    learned = profile.get("learned", {})
+    if not isinstance(learned, dict):
+        learned = {}
+    learned_version = int(learned.get("version") or 0)
+    profile_summary = minimized_profile_summary(profile)
+    augmented_profile_summary = profile_summary
+    few_shot_examples = learned.get("few_shot_examples") or []
+    eval_hints = learned.get("eval_hints") or []
+    if few_shot_examples:
+        augmented_profile_summary += (
+            "\n\nPalauteeseen perustuvat esimerkit:\n"
+            + json.dumps(few_shot_examples, ensure_ascii=False)
+        )
+    if eval_hints:
+        augmented_profile_summary += "\n\nArviointivihjeet:\n" + "\n".join(str(hint) for hint in eval_hints)
     rows = connection.execute(
         sa.text(
             """
             select
                 r.id as recommendation_id,
                 r.job_id,
+                r.deterministic_result,
                 j.title,
                 j.employer,
                 j.description,
@@ -674,7 +936,10 @@ def run_llm_evaluations(
                     when current_eval.prompt_version is distinct from :prompt_version then 1
                     else 2
                 end,
-                r.rank asc nulls last,
+                case when r.commutable then 0 when r.commutable_or_full_remote then 1 else 2 end,
+                r.commutable_rank asc nulls last,
+                r.commutable_or_full_remote_rank asc nulls last,
+                r.nationwide_rank asc nulls last,
                 r.machine_score desc,
                 r.id desc
             limit :max_jobs
@@ -686,13 +951,31 @@ def run_llm_evaluations(
     evaluated = 0
     failed = 0
     eval_model = configured_eval_model(settings, provider.provider_name)
+    skipped = 0
     for row in rows:
+        deterministic_result = row.get("deterministic_result") or {}
+        if isinstance(deterministic_result, str):
+            deterministic_result = json.loads(deterministic_result)
+        anti_similarity = deterministic_result.get("anti_preference_similarity")
+        learned_exclusion_matches = deterministic_result.get("learned_exclusion_matches") or []
+        if (
+            anti_similarity is not None
+            and float(anti_similarity) >= 0.75
+            and learned_exclusion_matches
+        ):
+            skipped += 1
+            logger.info(
+                "event=llm_evaluation_skipped reason=feedback_prefilter job_id=%s",
+                row["job_id"],
+            )
+            continue
         job_summary_text = job_summary(dict(row))
         request_hash = evaluation_request_hash(
-            profile_summary=profile_summary,
+            profile_summary=augmented_profile_summary,
             job_summary_text=job_summary_text,
             model=eval_model,
             prompt_version=settings.llm_prompt_version,
+            learned_version=learned_version,
         )
         existing = connection.execute(
             sa.text(
@@ -707,7 +990,7 @@ def run_llm_evaluations(
         try:
             if existing is None:
                 evaluation, metadata = provider.evaluate_job_fit(
-                    profile_summary=profile_summary,
+                    profile_summary=augmented_profile_summary,
                     job_summary=job_summary_text,
                     model=eval_model,
                     prompt_version=settings.llm_prompt_version,
@@ -787,7 +1070,7 @@ def run_llm_evaluations(
             if isinstance(exc, EvaluationProviderUnavailable):
                 mark_provider_unavailable(settings, str(exc))
                 break
-    return {"llm_evaluated": evaluated, "llm_failed": failed}
+    return {"llm_evaluated": evaluated, "llm_failed": failed, "llm_skipped": skipped}
 
 
 def refresh_active_recommendation_ranks(
@@ -802,7 +1085,10 @@ def refresh_active_recommendation_ranks(
             """
             update recommendations r
             set is_active = false,
-                rank = null
+                rank = null,
+                commutable_rank = null,
+                commutable_or_full_remote_rank = null,
+                nationwide_rank = null
             where r.profile_id = :profile_id
               and (
                   r.suggested_action = 'skip'
@@ -819,6 +1105,12 @@ def refresh_active_recommendation_ranks(
                             and e.prompt_version is distinct from :prompt_version
                       )
                   )
+                  or exists (
+                      select 1
+                      from recommendation_feedback rf
+                      where rf.recommendation_id = r.id
+                        and (rf.rating = 1 or rf.action = 'not_relevant')
+                  )
               )
             """
         ),
@@ -831,7 +1123,7 @@ def refresh_active_recommendation_ranks(
     connection.execute(
         sa.text(
             """
-            with ranked as (
+            with nationwide as (
                 select
                     id,
                     row_number() over (
@@ -850,9 +1142,94 @@ def refresh_active_recommendation_ranks(
                   and is_active = true
             )
             update recommendations r
-            set rank = ranked.new_rank
-            from ranked
-            where r.id = ranked.id
+            set nationwide_rank = nationwide.new_rank,
+                rank = nationwide.new_rank
+            from nationwide
+            where r.id = nationwide.id
+            """
+        ),
+        {"profile_id": profile_id},
+    )
+    connection.execute(
+        sa.text(
+            """
+            update recommendations
+            set commutable_rank = null
+            where profile_id = :profile_id
+              and is_active = true
+              and commutable = false
+            """
+        ),
+        {"profile_id": profile_id},
+    )
+    connection.execute(
+        sa.text(
+            """
+            update recommendations
+            set commutable_or_full_remote_rank = null
+            where profile_id = :profile_id
+              and is_active = true
+              and commutable_or_full_remote = false
+            """
+        ),
+        {"profile_id": profile_id},
+    )
+    connection.execute(
+        sa.text(
+            """
+            with commutable as (
+                select
+                    id,
+                    row_number() over (
+                        order by
+                            case suggested_action
+                                when 'apply' then 0
+                                when 'consider' then 1
+                                else 2
+                            end,
+                            llm_score desc nulls last,
+                            machine_score desc,
+                            id desc
+                    ) as new_rank
+                from recommendations
+                where profile_id = :profile_id
+                  and is_active = true
+                  and commutable = true
+            )
+            update recommendations r
+            set commutable_rank = commutable.new_rank
+            from commutable
+            where r.id = commutable.id
+            """
+        ),
+        {"profile_id": profile_id},
+    )
+    connection.execute(
+        sa.text(
+            """
+            with commutable_or_full_remote as (
+                select
+                    id,
+                    row_number() over (
+                        order by
+                            case suggested_action
+                                when 'apply' then 0
+                                when 'consider' then 1
+                                else 2
+                            end,
+                            llm_score desc nulls last,
+                            machine_score desc,
+                            id desc
+                    ) as new_rank
+                from recommendations
+                where profile_id = :profile_id
+                  and is_active = true
+                  and commutable_or_full_remote = true
+            )
+            update recommendations r
+            set commutable_or_full_remote_rank = commutable_or_full_remote.new_rank
+            from commutable_or_full_remote
+            where r.id = commutable_or_full_remote.id
             """
         ),
         {"profile_id": profile_id},

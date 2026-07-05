@@ -63,6 +63,8 @@ type SourceStatusResponse = {
   sources: SourceStatusItem[];
 };
 
+type RecommendationScope = "commutable" | "commutable_or_full_remote" | "nationwide";
+
 type RecommendationListItem = {
   id: number;
   rank: number | null;
@@ -89,6 +91,7 @@ type RecommendationListResponse = {
   limit: number;
   offset: number;
   total: number;
+  scope: RecommendationScope;
 };
 
 type PageProps = {
@@ -112,6 +115,35 @@ function firstParam(value: string | string[] | undefined): string {
     return value[0] ?? "";
   }
   return value ?? "";
+}
+
+const RECOMMENDATION_SCOPES: { value: RecommendationScope; label: string }[] = [
+  { value: "commutable", label: "Enintään 2 h" },
+  { value: "commutable_or_full_remote", label: "2 h + etä" },
+  { value: "nationwide", label: "Koko maa" },
+];
+
+function recommendationScopeLabel(scope: RecommendationScope): string {
+  return RECOMMENDATION_SCOPES.find((item) => item.value === scope)?.label ?? "Enintään 2 h";
+}
+
+function buildHomePath(filters: {
+  q: string;
+  source: string;
+  employer: string;
+  location: string;
+  offset: number;
+  scope: RecommendationScope;
+}): string {
+  const params = new URLSearchParams();
+  if (filters.q) params.set("q", filters.q);
+  if (filters.source) params.set("source", filters.source);
+  if (filters.employer) params.set("employer", filters.employer);
+  if (filters.location) params.set("location", filters.location);
+  if (filters.offset > 0) params.set("offset", String(filters.offset));
+  if (filters.scope !== "commutable") params.set("scope", filters.scope);
+  const query = params.toString();
+  return query ? `/?${query}` : "/";
 }
 
 function buildJobsPath(filters: {
@@ -216,13 +248,20 @@ export default async function Home({ searchParams }: PageProps) {
     location: firstParam(resolvedSearchParams.location).trim(),
   };
   const offset = Number(firstParam(resolvedSearchParams.offset)) || 0;
+  const scopeParam = firstParam(resolvedSearchParams.scope).trim();
+  const scope: RecommendationScope =
+    scopeParam === "commutable_or_full_remote" || scopeParam === "nationwide"
+      ? scopeParam
+      : "commutable";
 
   const [health, jobs, sourceList, sourceStatus, recommendations] = await Promise.all([
     getJson<HealthResponse>("/health"),
     getJson<JobListResponse>(buildJobsPath({ ...filters, offset })),
     getJson<SourceListResponse>("/sources"),
     getJson<SourceStatusResponse>("/sources/status"),
-    getJson<RecommendationListResponse>(`/recommendations?limit=${RECOMMENDATION_LIMIT}`),
+    getJson<RecommendationListResponse>(
+      `/recommendations?scope=${scope}&limit=${RECOMMENDATION_LIMIT}`,
+    ),
   ]);
 
   const items = jobs?.items ?? [];
@@ -247,6 +286,7 @@ export default async function Home({ searchParams }: PageProps) {
         </header>
 
         <form className="filter-bar" action="/" aria-label="Työpaikkahaku">
+          <input type="hidden" name="scope" value={scope} />
           <label>
             <span>Hakusana</span>
             <input name="q" defaultValue={filters.q} placeholder="esim. data, opettaja" />
@@ -279,9 +319,20 @@ export default async function Home({ searchParams }: PageProps) {
               <h2 id="recommendations-title">Suositukset</h2>
               <p>
                 {recommendations
-                  ? `${recommendations.total.toLocaleString("fi-FI")} tallennettua osumaa`
+                  ? `${recommendations.total.toLocaleString("fi-FI")} osumaa · ${recommendationScopeLabel(scope)}`
                   : "Suosituksia ei voitu ladata"}
               </p>
+            </div>
+            <div className="scope-toggle" role="group" aria-label="Suositusten laajuus">
+              {RECOMMENDATION_SCOPES.map((item) => (
+                <Link
+                  key={item.value}
+                  className={scope === item.value ? "scope-toggle-option is-active" : "scope-toggle-option"}
+                  href={buildHomePath({ ...filters, offset, scope: item.value })}
+                >
+                  {item.label}
+                </Link>
+              ))}
             </div>
           </div>
           {recommendationGroups.length > 0 ? (
@@ -321,8 +372,31 @@ export default async function Home({ searchParams }: PageProps) {
             </div>
           ) : (
             <div className="empty-state">
-              <h2>Ei suosituksia vielä</h2>
-              <p>Suorita suosittelupipeline, kun profiili on tallennettu tietokantaan.</p>
+              <h2>Ei suosituksia tällä rajauksella</h2>
+              <p>
+                {scope === "commutable"
+                  ? "Kokeile laajempaa näkymää, esimerkiksi kokopäiväisiä etätyöpaikkoja tai koko maan listaa."
+                  : scope === "commutable_or_full_remote"
+                    ? "Kokeile koko maan näkymää, jos haluat nähdä myös kaukaiset työpaikat."
+                    : "Suorita suosittelupipeline, kun profiili on tallennettu tietokantaan."}
+              </p>
+              {scope === "commutable" ? (
+                <p>
+                  <Link href={buildHomePath({ ...filters, offset, scope: "commutable_or_full_remote" })}>
+                    Näytä 2 h + etä
+                  </Link>
+                  {" · "}
+                  <Link href={buildHomePath({ ...filters, offset, scope: "nationwide" })}>
+                    Näytä koko maa
+                  </Link>
+                </p>
+              ) : scope !== "nationwide" ? (
+                <p>
+                  <Link href={buildHomePath({ ...filters, offset, scope: "nationwide" })}>
+                    Näytä koko maa
+                  </Link>
+                </p>
+              ) : null}
             </div>
           )}
         </section>

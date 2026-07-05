@@ -5,6 +5,7 @@ import sqlalchemy as sa
 from sqlalchemy.engine import Connection
 
 from app.db import get_engine
+from app.feedback_benchmark import latest_learned_profile_summary, run_feedback_benchmark
 
 
 def scalar_int(connection: Connection, sql: str) -> int:
@@ -138,6 +139,48 @@ def run_database_audit(connection: Connection) -> dict[str, Any]:
             connection,
             "select count(*) from recommendation_feedback",
         ),
+        "feedback_by_rating": {
+            int(row["rating"]): int(row["count"])
+            for row in connection.execute(
+                sa.text(
+                    """
+                    select rating, count(*) as count
+                    from recommendation_feedback
+                    group by rating
+                    order by rating
+                    """
+                )
+            ).mappings()
+        },
+        "feedback_analysis_status": {
+            str(row["analysis_status"]): int(row["count"])
+            for row in connection.execute(
+                sa.text(
+                    """
+                    select analysis_status, count(*) as count
+                    from recommendation_feedback
+                    group by analysis_status
+                    order by analysis_status
+                    """
+                )
+            ).mappings()
+        },
+        "feedback_llm_analyses": scalar_int(
+            connection,
+            "select count(*) from feedback_llm_analyses",
+        ),
+        "latest_learning_run": connection.execute(
+            sa.text(
+                """
+                select id, status, learned_version, started_at, finished_at
+                from learning_runs
+                order by id desc
+                limit 1
+                """
+            )
+        ).mappings().one_or_none(),
+        "learned_profile": latest_learned_profile_summary(connection),
+        "feedback_benchmark": run_feedback_benchmark(connection),
         "broken_duunitori_urls": scalar_int(
             connection,
             """

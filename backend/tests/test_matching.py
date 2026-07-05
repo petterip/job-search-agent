@@ -1,7 +1,9 @@
 from typing import Any
 
+from app.config import Settings
 from app.matching import (
     JobForScoring,
+    apply_travel_to_scored_candidates,
     expanded_tokens,
     exclusion_terms,
     merge_semantic_scores,
@@ -398,7 +400,141 @@ class RecordingConnection:
         return FakeResult()
 
 
-def test_deterministic_recommendations_deactivate_and_upsert_without_deleting_feedback_targets() -> None:
+def test_score_job_learned_exclusion_penalizes_rank_but_keeps_eligible() -> None:
+    profile = {
+        "location": {"home_city": "Oulu"},
+        "role_clusters": [
+            {
+                "titles_fi": ["myyntiedustaja"],
+                "keywords_fi": ["myynti", "asiakaspalvelu"],
+            }
+        ],
+        "learned": {
+            "exclusions": {"terms_fi": ["myynti"], "employers": [], "sectors": []},
+        },
+    }
+    job = JobForScoring(
+        id=1,
+        title="Myyntiedustaja",
+        employer="Retail",
+        description="Myynti ja asiakaspalvelu.",
+        location="Oulu",
+    )
+
+    result = score_job(profile, job)
+
+    assert result.passes
+    assert result.deterministic_result["learned_exclusion_penalty"] > 0
+    assert result.machine_score < result.deterministic_result["unpenalized_machine_score"]
+
+
+def test_merge_semantic_scores_updates_unpenalized_machine_score() -> None:
+    job = JobForScoring(id=1, title="Test", employer="X", description="d", location="Oulu")
+    base = score_job(
+        {
+            "location": {"home_city": "Oulu"},
+            "role_clusters": [{"titles_fi": ["test"], "keywords_fi": ["data"]}],
+        },
+        job,
+    )
+    merged = merge_semantic_scores([(job, base)], {1: 0.9})
+    _, result = merged[0]
+
+    assert result.deterministic_result["unpenalized_machine_score"] >= result.machine_score
+
+
+def test_apply_travel_preserves_learned_exclusion_penalty(monkeypatch: Any) -> None:
+    monkeypatch.setattr(
+        "app.matching.resolve_transit_for_queries",
+        lambda _connection, _queries, max_lookups=20: {},
+    )
+    profile = {
+        "location": {"home_city": "Oulu"},
+        "role_clusters": [{"titles_fi": ["myyntiedustaja"], "keywords_fi": ["myynti"]}],
+        "learned": {"exclusions": {"terms_fi": ["myynti"], "employers": [], "sectors": []}},
+    }
+    job = JobForScoring(
+        id=1,
+        title="Myyntiedustaja",
+        employer="Retail",
+        description="Myynti ja asiakaspalvelu.",
+        location="Oulu",
+    )
+    base = score_job(profile, job)
+    penalized_before_travel = base.machine_score
+
+    travel_scored = apply_travel_to_scored_candidates(
+        [(job, base)],
+        profile=profile,
+        connection=RecordingConnection(),  # type: ignore[arg-type]
+    )
+    _, adjusted, assessment = travel_scored[0]
+    expected = max(0.0, min(100.0, penalized_before_travel + assessment.score_adjustment))
+
+    assert adjusted.machine_score == round(expected, 2)
+    assert base.deterministic_result["learned_exclusion_penalty"] > 0
+    assert penalized_before_travel < base.deterministic_result["unpenalized_machine_score"]
+
+
+def test_apply_travel_uses_recommendation_transit_lookup_budget(monkeypatch: Any) -> None:
+    captured: dict[str, Any] = {}
+
+    def fake_resolve_transit(
+        _connection: Any,
+        queries: list[str],
+        *,
+        max_lookups: int = 20,
+    ) -> dict[str, Any]:
+        captured["queries"] = queries
+        captured["max_lookups"] = max_lookups
+        return {}
+
+    monkeypatch.setattr(
+        "app.matching.get_settings",
+        lambda: Settings(
+            google_maps_api_key="configured",
+            llm_eval_max_jobs=1,
+            recommendation_transit_lookup_budget=3,
+        ),
+    )
+    monkeypatch.setattr("app.matching.resolve_transit_for_queries", fake_resolve_transit)
+    profile = {
+        "location": {"home_city": "Oulu"},
+        "role_clusters": [{"titles_fi": ["asiantuntija"], "keywords_fi": ["palvelu"]}],
+    }
+    scored = []
+    for job_id, location in enumerate(["Ylivieska", "Kemi", "Rovaniemi", "Kajaani"], start=1):
+        job = JobForScoring(
+            id=job_id,
+            title="Asiantuntija",
+            employer="Työnantaja",
+            description="Palvelu ja asiantuntijatyö.",
+            location=location,
+        )
+        scored.append((job, score_job(profile, job)))
+
+    apply_travel_to_scored_candidates(
+        scored,
+        profile=profile,
+        connection=RecordingConnection(),  # type: ignore[arg-type]
+    )
+
+    assert captured["queries"] == [
+        "Ylivieska, Finland",
+        "Kemi, Finland",
+        "Rovaniemi, Finland",
+        "Kajaani, Finland",
+    ]
+    assert captured["max_lookups"] == 3
+
+
+def test_deterministic_recommendations_deactivate_and_upsert_without_deleting_feedback_targets(
+    monkeypatch: Any,
+) -> None:
+    monkeypatch.setattr(
+        "app.matching.resolve_transit_for_queries",
+        lambda _connection, _queries, max_lookups=20: {},
+    )
     connection = RecordingConnection()
 
     result = run_deterministic_recommendations(connection, max_jobs=10)  # type: ignore[arg-type]
@@ -411,6 +547,24 @@ def test_deterministic_recommendations_deactivate_and_upsert_without_deleting_fe
     assert "on conflict (profile_id, job_id)" in executed_sql
     assert "s.enabled = true" in executed_sql
     assert "recommendation_feedback rf" in executed_sql
+    assert "rf.rating = 1" in executed_sql
+    assert "commutable_or_full_remote" in executed_sql
+    assert "full_remote" in executed_sql
+
+
+def test_refresh_active_recommendation_ranks_honors_rating_one_feedback() -> None:
+    connection = RecordingConnection()
+
+    refresh_active_recommendation_ranks(
+        connection,
+        profile_id=1,
+        require_llm_review=False,
+        prompt_version=5,
+    )  # type: ignore[arg-type]
+
+    executed_sql = "\n".join(connection.statements).lower()
+    assert "rf.rating = 1" in executed_sql
+    assert "commutable_or_full_remote_rank = null" in executed_sql
 
 
 def test_refresh_active_recommendation_ranks_deactivates_weak_llm_rows() -> None:
@@ -443,13 +597,61 @@ class UnusedProvider:
         raise AssertionError("provider should not be called without candidate rows")
 
 
+class PrefilterSkipConnection:
+    def __init__(self) -> None:
+        self.statements: list[str] = []
+
+    def execute(self, statement: Any, params: dict[str, Any] | None = None) -> FakeResult:
+        sql = str(statement)
+        self.statements.append(sql)
+        if "from job_seeker_profiles" in sql:
+            return FakeResult(
+                [
+                    {
+                        "id": 1,
+                        "profile": {
+                            "location": {"home_city": "Oulu"},
+                            "role_clusters": [{"titles_fi": ["kirjastonhoitaja"], "keywords_fi": ["kirjasto"]}],
+                            "learned": {"version": 3, "few_shot_examples": [], "eval_hints": []},
+                        },
+                    }
+                ]
+            )
+        if "from recommendations r" in sql:
+            return FakeResult(
+                [
+                    {
+                        "recommendation_id": 99,
+                        "job_id": 42,
+                        "deterministic_result": {
+                            "anti_preference_similarity": 0.82,
+                            "learned_exclusion_matches": ["myynti"],
+                        },
+                        "title": "Myyntiedustaja",
+                        "employer": "Retail",
+                        "description": "Myynti",
+                        "location": "Oulu",
+                    }
+                ]
+            )
+        return FakeResult()
+
+
+def test_llm_evaluations_skip_high_anti_similarity_with_learned_exclusions() -> None:
+    connection = PrefilterSkipConnection()
+
+    result = run_llm_evaluations(connection, provider=UnusedProvider(), max_jobs=10)  # type: ignore[arg-type]
+
+    assert result == {"llm_evaluated": 0, "llm_failed": 0, "llm_skipped": 1}
+
+
 def test_llm_evaluations_do_not_skip_rows_just_because_old_evaluation_id_exists() -> None:
     connection = RecordingConnection()
 
     result = run_llm_evaluations(connection, provider=UnusedProvider(), max_jobs=10)  # type: ignore[arg-type]
 
     executed_sql = "\n".join(connection.statements).lower()
-    assert result == {"llm_evaluated": 0, "llm_failed": 0}
+    assert result == {"llm_evaluated": 0, "llm_failed": 0, "llm_skipped": 0}
     assert "from recommendations r" in executed_sql
     assert "where r.llm_evaluation_id is null" not in executed_sql
     assert "current_eval.prompt_version is distinct from :prompt_version" in executed_sql

@@ -72,6 +72,35 @@ def test_job_summary_limits_description() -> None:
     assert len(data["description_excerpt"]) == 4000
 
 
+def test_job_summary_includes_travel_assessment_and_changes_request_hash() -> None:
+    without_travel = job_summary({"title": "Test", "location": "Oulu", "description": "d"})
+    with_travel = job_summary(
+        {
+            "title": "Test",
+            "location": "Oulu",
+            "description": "d",
+            "deterministic_result": {
+                "travel_assessment": {"commutable": True, "status": "exact_home_city"},
+            },
+        }
+    )
+    without_hash = evaluation_request_hash(
+        profile_summary="{}",
+        job_summary_text=without_travel,
+        model="model",
+        prompt_version=8,
+    )
+    with_hash = evaluation_request_hash(
+        profile_summary="{}",
+        job_summary_text=with_travel,
+        model="model",
+        prompt_version=8,
+    )
+
+    assert json.loads(with_travel)["travel_assessment"]["commutable"] is True
+    assert without_hash != with_hash
+
+
 def test_evaluation_request_hash_is_stable() -> None:
     first = evaluation_request_hash(
         profile_summary='{"a": 1}',

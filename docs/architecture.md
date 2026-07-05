@@ -1,6 +1,6 @@
 # System Architecture
 
-**Updated:** 2026-06-21  
+**Updated:** 2026-07-05
 **Scope:** current local-server architecture and the target recommendation pipeline for finding direct matches, transferable matches, and hidden opportunities for one job seeker.
 
 This document complements [`goal.md`](goal.md), [`tech-stack-plan.md`](tech-stack-plan.md), [`llm-hosted.md`](llm-hosted.md), [`sources.yaml`](sources.yaml), and [`implementation-journal.md`](implementation-journal.md). The north star remains: collect Finnish open jobs reliably, normalize them into one dataset, and automatically surface the jobs that are genuinely worth the job seeker's attention.
@@ -170,10 +170,10 @@ Recommended improvements:
 2. **Keep improving Finnish-aware text normalization.** The current implementation handles a curated set of common job-listing inflections such as `hallinto` vs. `hallinnon`, `tapahtuma` vs. `tapahtumien`, and `opastus` vs. `opastusta`. This should later expand into a tested synonym/lemmatization layer.
 3. **Continue expanding multi-lane candidate selection.** Direct, application-history, semantic similarity, transferable-duty, sector-context, and exploration lanes exist; stronger structured duty extraction should become an additional lane.
 4. **Use embeddings as retrieval, not final truth.** Embeddings should recover semantically similar jobs that keywords miss, then deterministic and LLM stages decide whether they are actually suitable.
-5. **Add feedback learning.** `good_match`, `not_relevant`, and `applied` feedback should update future ranking features. `not_relevant` should suppress repeated recommendations; `applied` and `good_match` should strengthen similar future patterns.
+5. **Feedback learning (implemented).** Five-point ratings, optional `applied`, async LLM feedback analysis, deterministic learned boosts/exclusions, preference centroids, and learned discovery queries feed the daily pipeline before matching. Rating 1 hides immediately; re-rating ≥2 un-hides. Learned state is auditable via `learning_runs`, `term_provenance`, and `feedback_llm_analyses`.
 6. **Escalate only ambiguous high-value cases.** Routine jobs go to the cheap evaluator. Borderline high-potential hidden opportunities can go to a stronger model or second-pass prompt.
 7. **Track per-stage rejection reasons.** Store why each candidate was filtered or demoted so tuning can target real failure modes.
-8. **Benchmark with known-interest examples.** Use real past applications as positive examples and clearly unsuitable listings as negatives. Measure Recall@30, precision of top recommendations, and hidden-opportunity discovery rate.
+8. **Benchmark with known-interest examples.** Offline recall@30 and exploration-hit-rate metrics run after each learning pass and surface in `make audit-db`.
 
 ## Candidate Selection Policy
 
@@ -219,6 +219,23 @@ Every automatic run should leave enough evidence to answer:
 
 The architecture should treat logs, run events, and stored intermediate scoring data as product features. Recommendation quality cannot be improved if failures and rejection reasons are invisible.
 
+## Feedback Learning Pipeline
+
+```text
+User rates recommendation (1–5, applied)
+  -> recommendation_feedback upsert + scoring_snapshot
+  -> optional async feedback_llm_analyses (grounded hypotheses)
+Daily pipeline (16:45 Europe/Helsinki by default)
+  -> enrichment
+  -> drain pending feedback analyses (bounded)
+  -> learn_from_feedback (stateless recompute, centroids, benchmark)
+  -> location backfill
+  -> deterministic matching + learned boosts/exclusions/semantic nudges
+  -> LLM job-fit with few-shot examples + eval hints (hash includes learned.version)
+```
+
+Collection still runs at 16:00; matching no longer races collectors because it runs inside `run_daily_pipeline` after learning.
+
 ## Current Gaps
 
 The current system is aligned with the staged architecture, but these gaps remain:
@@ -227,9 +244,8 @@ The current system is aligned with the staged architecture, but these gaps remai
 - Embeddings are stored in PostgreSQL/pgvector and used as retrieval, not final truth. The profile embedding uses positive matching signals rather than raw profile files or exclusion text, so semantic search looks for attractive opportunities instead of jobs similar to disqualifying terms.
 - Finnish inflection handling exists for common job-listing terms, but synonym and broader lemmatization coverage is still limited.
 - Work-mode extraction should become a first-class field so remote/hybrid/on-site fit is reliable.
-- Feedback is stored and can hide irrelevant recommendations, but it does not yet train future ranking weights.
+- k-NN positive similarity over rated jobs (multi-cluster interests) is planned as a Phase D stretch upgrade over the single preference centroid.
 - Candidate generation should add richer structured duty extraction lanes.
-- Recommendation quality should be measured with a small labelled benchmark built from real known-interest applications and unsuitable negatives.
 
 ## Target End State
 

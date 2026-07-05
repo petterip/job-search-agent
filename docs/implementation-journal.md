@@ -2,11 +2,31 @@
 
 Concise record of what is actually implemented. Keep this file current when code, runnable services, or verified behavior changes.
 
+## 2026-07-05
+
+### Implemented
+
+- Five-point recommendation feedback (`rating` 1–5, optional `applied`) with upsert semantics, `scoring_snapshot`, and Finnish UI on job detail pages.
+- Rating 1 hides a recommendation immediately; re-rating ≥2 un-hides. Job detail pages show inactive recommendations so hidden verdicts can be revised.
+- Async feedback LLM analysis (`feedback_analysis.py`, `feedback_llm_analyses` table) on a 5-minute poll; grounded term suggestions with confidence weighting.
+- Deterministic feedback learning (`feedback_learning.py`): decay-weighted net terms, hysteresis thresholds, caps, learned boosts/exclusions, lane quota overrides, few-shot examples, eval hints, and `learning_runs` audit rows.
+- Learned preference/anti centroids in `learned_preference_embeddings`; semantic nudges in `merge_semantic_scores()`; exploration lane exempt from anti-penalty.
+- Learned discovery queries merged into Duunitori/TMT/Laura collection via `effective_discovery_queries()`.
+- Daily pipeline ordering: enrichment → drain analyses → learn → locations → match (scheduler job `run_daily_pipeline` at `LEARNER_DAILY_HOUR:MINUTE`, default 16:45).
+- LLM job-fit prompt augmented with feedback few-shot examples and eval hints; `evaluation_request_hash` includes `learned.version`; pre-filter skips high anti-similarity jobs with learned exclusions.
+- `make audit-db` reports feedback counts by rating, analysis status, latest learning run, learned profile summary, and offline benchmark (recall@30, exploration hit rate).
+
+### Verified
+
+- `make test-regression` passes.
+- Backend pytest passes with `pytest --timeout=10` (167 tests).
+- Senior review fixes (2026-07-05): learned exclusions are soft penalties only; comment name sanitization at analysis and API write; LLM sector suggestions wired; lane overrides recomputed statelessly; optional feedback comment + analysis hypothesis echo in UI; failed analysis re-queued on resubmit.
+
 ## 2026-06-21
 
 ### Implemented
 
-- Worker scheduling for Raspberry Pi deployment now runs enabled source collection once daily at 16:00 Europe/Helsinki by default. Matching and hosted LLM evaluation are likewise limited to one scheduled run per day at 16:00, with `COLLECTOR_DAILY_HOUR`, `COLLECTOR_DAILY_MINUTE`, `MATCHER_DAILY_HOUR`, and `MATCHER_DAILY_MINUTE` available for deploy-time adjustment.
+- Worker scheduling for Raspberry Pi deployment runs enabled source collection once daily at 16:00 Europe/Helsinki by default. The ordered enrichment/learning/matching pipeline runs after collection through `run_daily_pipeline`, with `COLLECTOR_DAILY_HOUR`, `COLLECTOR_DAILY_MINUTE`, `LEARNER_DAILY_HOUR`, and `LEARNER_DAILY_MINUTE` available for deploy-time adjustment.
 - Recommendation candidate ordering now uses multi-lane selection before LLM review:
   - `direct_title` for obvious title matches.
   - `application_history` for roles and duties similar to real past applications.
@@ -69,6 +89,10 @@ Concise record of what is actually implemented. Keep this file current when code
   - **Kuntarekry** — regional ProcessWire JSON shards + detail HTML
   - **Kirkkorekry** — regional ProcessWire JSON shards + detail HTML
   - **Oulu Varbi** — RSS + detail HTML
+- Optional disabled-by-default sources are registered:
+  - **Careerjet** — Publisher API v4 with `CAREERJET_API_KEY`; skips without a key
+  - **LinkedIn** — guest HTTP search behind `LINKEDIN_ENABLED=false`
+  - **Valtiolle** — Talentech organisation-shard harvest behind explicit `COLLECTOR_ENABLED_SOURCES`
 - Shared collection runner persists `sources`, `source_runs`, `raw_listings`, `jobs`, `job_sources` idempotently.
 - Durable harvester run event log in PostgreSQL:
   - `source_run_events` records start, success, failure, and skipped-run events.
@@ -76,8 +100,9 @@ Concise record of what is actually implemented. Keep this file current when code
 - Worker scheduler:
   - APScheduler + PostgreSQL `SQLAlchemyJobStore`
   - One daily cron job per enabled source, defaulting to 16:00 Europe/Helsinki
-  - Automatic deterministic recommendation refresh and hosted LLM evaluation via `match_recommendations` once daily, defaulting to 16:00 Europe/Helsinki
+  - Automatic daily pipeline via `run_daily_pipeline`, defaulting to 16:30 Europe/Helsinki, with enrichment skip/plan, location enrichment, deterministic matching, and hosted LLM evaluation in sequence
   - Overlap guard via `source_runs.status = running`
+  - Pipeline overlap guard via `pipeline_runs.status = running`
   - Stale runs abandoned after `COLLECTOR_STALE_RUN_MINUTES`
 - Manual CLI: `python -m app.collect <source|all>` with `--page-size`, `--max-pages`, `--max-urls`, `--force`
 - Manual single-profile loader: `python -m app.profile <profile.yaml|profile.json> --name default`
@@ -96,9 +121,10 @@ Concise record of what is actually implemented. Keep this file current when code
   - Evaluates only active recommendations without an existing LLM evaluation.
   - Provider quota/unavailable failures create a provider-scoped local cooldown marker in `/storage` so scheduled matching does not repeat failing hosted calls every run.
 - Recommendation feedback:
-  - `recommendation_feedback` stores `good_match`, `not_relevant`, and `applied` actions.
-  - `POST /recommendations/{recommendation_id}/feedback?action=...`
-  - Finnish job detail pages expose feedback buttons for stored recommendations.
+  - `recommendation_feedback` stores five-point `rating` (1–5), optional `applied`, legacy `action`, `scoring_snapshot`, and `analysis_status`.
+  - `POST /recommendations/{recommendation_id}/feedback` (JSON body or legacy `?action=`)
+  - `GET /recommendations/{recommendation_id}/feedback` and job-detail echo for inactive recommendations.
+  - Finnish job detail pages expose the five-point control and applied toggle.
 - Recommendations are refreshed with `(profile_id, job_id)` upserts and `is_active` state so feedback history survives matching re-runs while stale recommendations disappear from active API/UI results.
 - Location enrichment:
   - Source adapters normalize city/region/country scope where available.
@@ -125,8 +151,7 @@ Concise record of what is actually implemented. Keep this file current when code
 - Conservative removal handling marks missing source-only jobs removed only after uncapped, non-watermark, non-empty refreshes.
 - Deterministic single-profile recommendations are stored in `recommendations` and exposed through `GET /recommendations`; Finnish portal shows the recommendation section above the all-jobs feed.
 - Laura employer enrichment derives employer names from the stable company slug in Laura listing URLs and fills missing normalized employer values on unchanged rows.
-- Worker registers all nine default scheduled jobs without serialization errors.
-- Worker registers the `match_recommendations` job alongside all nine default source collection jobs.
+- Worker registers all nine default source collection jobs plus `analyze_feedback` and `run_daily_pipeline` without serialization errors.
 - Worker prunes stale persisted scheduler jobs and syncs `sources.enabled` to the configured source set.
 - `GET /jobs/{job_id}` and Finnish `/tyopaikat/{id}` verified with a stored recommendation, source attribution, and external application link.
 - `GET /sources/status` verified against the live database; the Finnish home page renders source health, recommendations, and latest listings from the running stack.
@@ -164,10 +189,10 @@ Concise record of what is actually implemented. Keep this file current when code
 - Expiration/removal handling is conservative and source-refresh based; source-provided deadlines are not fully normalized yet.
 - Jobly runs cap URL fetches per poll (`JOBLY_MAX_URLS_PER_RUN`); first backfill is incremental-by-`lastmod`, not full 13k import in one run.
 - EURES incremental relies on `creationDate` filtering, not API sort order.
-- Deterministic scoring and stored recommendations are implemented and scheduled; OpenAI LLM evaluation is implemented but currently blocked by provider quota; recommendation feedback is implemented; OpenAI embeddings are generated when `OPENAI_API_KEY` is configured (see Current Capabilities above).
+- Deterministic scoring, feedback learning, and stored recommendations are implemented and scheduled; OpenAI LLM evaluation is implemented but may be blocked by provider quota; recommendation feedback trains learned boosts/exclusions and semantic centroids when the daily pipeline runs.
 - Three active Jobly rows still lack descriptions because their stored JSON-LD/detail payloads do not contain usable body text.
-- Browserbase cloud session bootstrap is implemented (`browserbase_client.py`, `make browserbase-check`); Playwright CDP helper and `ENRICHMENT_ENABLED` gating ship in Phase A. Durable enrichment tables, repository merge rules, `python -m app.enrich --dry-run`, and upsert provenance preservation ship in Phase C core; worker lease, HTTP enricher execution, and browser extraction remain open.
+- Browserbase cloud session bootstrap is implemented (`browserbase_client.py`, `make browserbase-check`); Playwright CDP helper and `ENRICHMENT_ENABLED` gating are implemented for shipped browser/session paths. Durable occurrence-keyed enrichment tables, repository merge rules, `python -m app.enrich` queue/execution, upsert provenance preservation, attempt-level Browserbase metadata, Jobly browser fallback, and the daily pipeline lease are implemented. Local Playwright mode and Stagehand remain unimplemented by design.
 
 ### Blocked Sources (not implemented)
 
-- Indeed and KIPA P67 remain blocked in `sources.yaml`. Careerjet and LinkedIn are optional registry entries (`scheduled_by_default: false`) without adapters yet.
+- Indeed and KIPA P67 remain blocked in `sources.yaml`. Careerjet, LinkedIn, and Valtiolle are optional registry entries (`scheduled_by_default: false`) with adapters available only when explicitly enabled/configured.

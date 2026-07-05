@@ -1,7 +1,7 @@
 # Feedback Learning and Five-Point Rating Plan
 
 **Updated:** 2026-07-05 (second review pass against live codebase; findings integrated in §17, research grounding in §18)
-**Status:** planned — feedback is stored today, but learning from feedback is not implemented.
+**Status:** implemented (Phases A–F shipped 2026-07-05; k-NN positive similarity remains a stretch upgrade)
 **Related:** [`goal.md`](goal.md), [`architecture.md`](architecture.md), [`tech-stack-plan.md`](tech-stack-plan.md), [`llm-hosted.md`](llm-hosted.md), [`implementation-journal.md`](implementation-journal.md), [`browser-enrichment-plan.md`](browser-enrichment-plan.md)
 
 This document defines how user feedback evolves from coarse action buttons into a five-point rating scale, how each rating triggers an LLM analysis of why the user likely rated the job that way, and how feedback plus that analysis improve collection recall, deterministic scoring, semantic retrieval, and LLM evaluation on later pipeline runs — without replacing the existing staged matching architecture.
@@ -12,15 +12,14 @@ This document defines how user feedback evolves from coarse action buttons into 
 
 The product already collects jobs, scores them deterministically, retrieves semantic candidates with pgvector, and sends a bounded set to an LLM classifier. Users can currently submit coarse feedback (`good_match`, `not_relevant`, `applied`), and `not_relevant` hides a recommendation from active results.
 
-That feedback is not yet used to:
+That feedback now drives a closed learning loop on each daily pipeline run:
 
-- strengthen future ranking for jobs similar to positively rated listings
-- suppress repeated mistakes after negative ratings
-- sharpen discovery search terms used during collection
-- improve LLM review context on the next run
-- explain **why** the user's rating diverged from the system's recommendation rationale
+- learned boosts and soft exclusions in deterministic scoring
+- async LLM analysis of rating intent with grounded tuning actions
+- sharpened discovery search terms during collection
+- few-shot examples and eval hints in job-fit LLM review
 
-The goal is a closed learning loop: **rate a recommendation → LLM analyzes the likely reason for the rating → next daily run produces better matches**.
+The goal remains: **rate a recommendation → LLM analyzes the likely reason for the rating → next daily run produces better matches**.
 
 ---
 
@@ -32,22 +31,22 @@ The goal is a closed learning loop: **rate a recommendation → LLM analyzes the
 | `POST /recommendations/{id}/feedback?action=...` | Done | Query-param action, plain insert (`backend/app/main.py`) |
 | Finnish detail-page feedback buttons | Done | `web/app/tyopaikat/[id]/page.tsx` |
 | `not_relevant` suppresses active recommendation | Done | POST sets `is_active=false`; matching upsert re-checks `rf.action = 'not_relevant'` |
-| Append-only feedback rows | Gap | Each POST inserts a new row; no upsert or uniqueness on `recommendation_id`; any historical `not_relevant` row keeps the recommendation hidden forever |
-| Hidden recommendation invisible to UI | Gap | `GET /jobs/{job_id}` selects only `r.is_active = true` recommendations — after hiding, the detail page loses the recommendation panel, so the user cannot see or change their rating |
+| Append-only feedback rows | Done | Upsert on `recommendation_id` (`20260705_0011`); legacy rows collapsed |
+| Hidden recommendation invisible to UI | Done | Job detail returns latest recommendation even when `is_active=false` |
 | Nightly full reset of recommendations | Constraint | `run_deterministic_recommendations()` deactivates **all** recommendations for the profile, then re-upserts only currently scored jobs; feedback effects must survive this reset via the upsert's feedback checks |
-| `refresh_active_recommendation_ranks()` feedback-unaware | Gap | Re-ranking after LLM eval never consults feedback; hide enforcement lives only in the upsert path |
-| Feedback learning worker job | Missing | No pre-matching learning stage |
-| Discovery query tuning from feedback | Missing | `DISCOVERY_SEARCH_QUERIES` is static; adapters read `get_settings().discovery_search_queries` only |
-| LLM few-shot examples from feedback | Missing | Prompt uses profile facts only |
-| LLM feedback analysis on submit | Missing | No structured "why did the user rate this?" evaluation |
-| Feedback read API / job detail echo | Missing | UI cannot show current rating; only POST exists |
-| Scheduler pipeline ordering | Gap | All `collect_*` jobs and `match_recommendations` fire at the same cron (default 16:00); no collect → learn → match sequence |
-| `pipeline_runs` orchestration | Missing | Table exists (migration `20260620_0001`) but the worker does not use it |
+| `refresh_active_recommendation_ranks()` feedback-unaware | Done | Re-ranking SQL honors `rf.rating = 1` and legacy `not_relevant` |
+| Feedback learning worker job | Done | `analyze_feedback` is scheduled and `run_daily_pipeline` drains analysis, runs `learn_from_feedback`, then matches |
+| Discovery query tuning from feedback | Done | `effective_discovery_queries()` merged into Duunitori/TMT/Laura adapters |
+| LLM few-shot examples from feedback | Done | Stored in `profile.learned` and injected in `run_llm_evaluations()` |
+| LLM feedback analysis on submit | Partial | Structured analysis exists asynchronously in the worker; submit path stores pending rows |
+| Feedback read API / job detail echo | Done | `GET /recommendations/{id}/feedback` and job detail feedback echo exist |
+| Scheduler pipeline ordering | Done | `match_recommendations` has been replaced by `run_daily_pipeline`; the pipeline runs enrichment → location enrichment → feedback analysis → `learn_from_feedback` → matching |
+| `pipeline_runs` orchestration | Done | Worker records a running/completed/failed daily pipeline lease and reclaims stale running pipeline rows |
 | `profile_embeddings` shape | Constraint | One row per profile (`ON CONFLICT (profile_id)`); no slot for preference/anti centroids without a new table |
 | Embeddings provider | OpenAI only | Semantic learning requires `OPENAI_API_KEY`; the eval provider (`LLM_PROVIDER`) is separate and may be Gemini |
 | LLM cooldown scope | Risk | `provider_in_cooldown()` uses a single `llm_provider_unavailable.json`; provider-scoped, not task-scoped — feedback analysis and job-fit eval would block each other |
 | Feedback on non-recommended jobs | Not supported | Detail page shows feedback only when `job.recommendation` exists |
-| Portal feedback proxy | Gap | `web/app/suositukset/[id]/palaute/route.ts` forwards form `action` as query params only |
+| Portal feedback proxy | Done | `palaute/route.ts` forwards JSON `{rating, applied, comment}` |
 | Enrichment stage in daily run | Not shipped | See [`browser-enrichment-plan.md`](browser-enrichment-plan.md); pipeline slot reserved |
 
 The staged matching pipeline described in [`architecture.md`](architecture.md) remains the correct foundation. Feedback learning attaches to that pipeline, not replaces it.
@@ -76,7 +75,7 @@ Keep one optional action separate from the rating:
 
 | Signal | Purpose |
 |---|---|
-| `applied` (boolean) | User actually submitted an application; strongest positive ground truth |
+| `applied` (boolean) | User actually submitted an application; strongest positive ground truth — its learning weight **replaces** the rating weight, it does not stack (§6.1) |
 
 **Validation rule (resolved):** `rating` is required for ordinary submissions. If `applied=true` and the client omits `rating`, the API defaults `rating=5` before persisting. Reject `applied=true` with an explicit `rating` ≤ 2 (422).
 
@@ -136,7 +135,7 @@ The portal never runs learning LLM calls on page load. Feedback persistence is s
 |---|---|
 | `web` | Rating UI, applied toggle, comment |
 | `api` | Validate and persist feedback, echo current rating, assemble snapshot |
-| `worker` | `analyze_feedback` for pending rows; `learn_from_feedback` before `match_recommendations`; daily pipeline order |
+| `worker` | `analyze_feedback` for pending rows; `learn_from_feedback` before matching inside `run_daily_pipeline`; daily pipeline order |
 | `db` | Feedback rows, snapshots, LLM analyses, learned profile fields, learning run audit |
 
 No Redis, Celery, or separate ML service is required for MVP learning.
@@ -218,6 +217,8 @@ Persist enough context to explain and reuse the label even after the nightly rec
 ```
 
 `rank` and `is_active` at feedback time are recorded deliberately: they let later analysis correct for position/presentation bias — the user only rates what the current policy chose to show (§6.7, §18). The API assembles the snapshot from the recommendation row at POST time (`backend/app/main.py`).
+
+**`recommendation_id` is audit context only.** Recommendation rows are reset/upserted nightly and their contents are volatile, so all learning and analysis keys off `feedback.id`, the denormalized `job_id`, and the immutable `scoring_snapshot` — never off the live recommendation row. `recommendation_id` remains for UI round-trips and audit joins.
 
 ### 5.3 Learned Profile Fields
 
@@ -335,16 +336,16 @@ Add to `.env.example` (development placeholders only):
 |---|---|---|
 | `LEARNER_DAILY_HOUR` / `LEARNER_DAILY_MINUTE` | `16` / `45` | Learn + match pipeline step (after collection) |
 | `FEEDBACK_ANALYSIS_POLL_MINUTES` | `5` | Interval for `analyze_feedback` |
-| `LEARNER_ANALYSIS_WAIT_MINUTES` | `30` | Max wait for pending analyses before rating-only fallback |
+| `LEARNER_ANALYSIS_DRAIN_BUDGET_MINUTES` | `5` | Time budget for the single pre-learn analysis drain batch (§7.5) — never a blocking pipeline wait |
 | `LEARNED_DISCOVERY_QUERY_CAP` | `12` | Max learned discovery terms |
 | `LEARNED_EXCLUSION_CAP` | `40` | Max learned exclusion terms (§6.7) |
 | `FEEDBACK_DECAY_HALF_LIFE_DAYS` | `60` | Exponential decay half-life for feedback weight (§6.7) |
 
-Keep existing `DISCOVERY_SEARCH_QUERIES`, `MATCHER_DAILY_*`, `COLLECTOR_DAILY_*`. With approach B (single pipeline job), `MATCHER_DAILY_*` is superseded by `LEARNER_DAILY_*` for steps 3–5.
+Keep existing `DISCOVERY_SEARCH_QUERIES` and `COLLECTOR_DAILY_*`. With approach B (single pipeline job), `LEARNER_DAILY_*` schedules steps 3–5.
 
 ### 5.8 Data Lifecycle and Deletion
 
-- Feedback rows FK `recommendations.id` with `ON DELETE CASCADE`.
+- Feedback rows FK `recommendations.id` with **`ON DELETE RESTRICT`** — feedback is learning ground truth and must survive recommendation lifecycle events. Recommendations are only ever deactivated (`is_active=false`), never deleted; RESTRICT enforces that any future pruning cannot silently erase labels and analyses. The denormalized `job_id` (NOT NULL) plus `scoring_snapshot` already make learning independent of the recommendation row's contents. If recommendation pruning is ever needed, the migration path is: make `recommendation_id` nullable with `ON DELETE SET NULL` — never CASCADE.
 - Profile delete/reset removes together: `recommendation_feedback`, `feedback_llm_analyses`, `learned_preference_embeddings`, and the `profile.learned` / `preferences.learned_boosts` JSON fields.
 - `make audit-db` reports: feedback count by rating, pending/completed analyses, latest `learning_runs` status, current `learned.version`, learned term list with provenance.
 
@@ -361,7 +362,9 @@ Keep existing `DISCOVERY_SEARCH_QUERIES`, `MATCHER_DAILY_*`, `COLLECTOR_DAILY_*`
 | 3 | 0.0 |
 | 4 | +0.5 |
 | 5 | +1.0 |
-| `applied=true` | +1.5 (replaces the rating weight; strongest label) |
+| `applied=true` | +1.5 — **replaces** the rating weight (not additive): `row_weight = +1.5 if applied else rating_weight`. Rating 5 + applied is +1.5, never +2.5 |
+
+This replace rule is the single source of truth for learning math; §3.2's "stronger label" means exactly this: the applied weight (+1.5) supersedes any rating weight. Tests must encode the replace rule.
 
 ### 6.2 Deterministic Term Learning (stateless recompute)
 
@@ -380,7 +383,7 @@ Each daily `learn_from_feedback` run:
 Integration in `score_job()`:
 
 - add learned title/keyword/location/sector matches using the same helpers as `application_history_signals`
-- apply `learned.exclusions` as a **soft penalty and lane demotion** before candidate lane selection — except the exploration lane (§6.7)
+- apply `learned.exclusions` as a **score penalty inside `score_job()`** (subtract from `machine_score`, record `learned_exclusion_matches` in `deterministic_result`). Candidates are **never removed or filtered before lane assignment** — a pre-lane filter would defeat the degeneracy protection (§6.7). Lane assignment runs on the full candidate set; the penalty lowers ordering within `rank_scored_candidates_for_review()`'s per-lane ranking, and the exploration lane selects using the **unpenalized** score
 - read lane quotas as `LANE_QUOTAS` merged with `profile.learned.lane_quota_overrides`
 - store `learned_*_matches` in `deterministic_result` for portal/debug visibility
 
@@ -395,7 +398,7 @@ Integration in `score_job()`:
 Required code changes:
 
 - `backend/app/matching.py` upsert: replace both `rf.action = 'not_relevant'` subqueries with `(rf.rating = 1 OR rf.action = 'not_relevant')`.
-- `backend/app/main.py` POST: hide on rating 1 only; **re-rating from 1 to ≥ 3 must immediately set `is_active = true` again** (rank stays null until the next matching run re-ranks) — otherwise upsert-based un-hiding waits a day and looks broken.
+- `backend/app/main.py` POST: hide on rating 1 only; **re-rating from 1 to ≥ 2 must immediately set `is_active = true` again** (rank stays null until the next matching run re-ranks) — otherwise upsert-based un-hiding waits a day and looks broken. Rating 2 un-hides because rating 2 is defined as visible (§6.3 table); only the current rating being 1 keeps a recommendation hidden.
 - `refresh_active_recommendation_ranks()` should include a guard that never re-activates or ranks a recommendation whose latest feedback rating is 1 (defense in depth; today hide enforcement exists only in the deterministic upsert path).
 - `GET /jobs/{job_id}`: the recommendation subquery must drop the `r.is_active = true` filter (return the latest recommendation regardless, with an `is_active` flag) so a hidden recommendation still shows its panel and current rating.
 
@@ -446,7 +449,7 @@ This section defines how the system behaves once feedback is plentiful and parti
 **Feedback-loop degeneracy protection.** Learned exclusions reduce exposure, which prevents the very feedback that could rehabilitate a term — the classic self-reinforcing loop (§18). Mitigations, all MVP-mandatory:
 
 1. The **exploration lane is exempt** from learned exclusions and the anti-centroid penalty. It remains the system's unbiased sample; its quota may never be overridden below 1.
-2. Learned exclusions are **soft penalties**, never hard filters; only profile hard-exclusions and qualification rejects filter absolutely.
+2. Learned exclusions are **soft penalties**, never hard filters, and are applied only as in-scoring penalties after all candidates exist (§6.2) — never as a pre-lane candidate filter; only profile hard-exclusions and qualification rejects filter absolutely.
 3. Exclusion **cap** (`LEARNED_EXCLUSION_CAP`, default 40): when full, keep the strongest net weights; the rest demote to zero.
 4. Decay itself retires stale exclusions: with no fresh negative evidence, a term drifts back above the exit threshold and is retested.
 
@@ -532,7 +535,8 @@ analyze_feedback (worker, every FEEDBACK_ANALYSIS_POLL_MINUTES):
   -> store feedback_llm_analyses; set analysis_status = completed | failed | skipped
 
 learn_from_feedback (daily, before matching):
-  -> wait for pending analyses up to LEARNER_ANALYSIS_WAIT_MINUTES, then proceed with rating-only fallback
+  -> run ONE bounded drain batch of pending analyses (cap: LEARNER_ANALYSIS_DRAIN_BUDGET_MINUTES)
+  -> then proceed immediately; rows still pending fall back to rating-only THIS run
   -> consume completed analyses
 ```
 
@@ -557,7 +561,7 @@ MVP: analyses visible via `python -m app.audit`. Post-MVP: read-only portal pane
 
 ### 8.1 Current Scheduler Gap
 
-`backend/app/scheduler.py` registers every `collect_*` job **and** `match_recommendations` on the same daily cron (`collector_daily_*` / `matcher_daily_*`, both default 16:00). They run concurrently; the planned collect → analyze → learn → match order does not exist yet.
+`backend/app/scheduler.py` now registers every `collect_*` job at `COLLECTOR_DAILY_*`, `analyze_feedback` on `FEEDBACK_ANALYSIS_POLL_MINUTES`, and a separate `run_daily_pipeline` job at `LEARNER_DAILY_*`. The pipeline records a stale-reclaiming `pipeline_runs` lease and runs enrichment, location enrichment, feedback analysis, `learn_from_feedback`, and matching sequentially.
 
 ### 8.2 Target Daily Order
 
@@ -566,18 +570,18 @@ MVP: analyses visible via `python -m app.audit`. Post-MVP: read-only portal pane
 2. enrichment (when shipped; see browser-enrichment-plan)
 3. analyze_feedback (drain pending rows)
 4. learn_from_feedback
-5. match_recommendations (deterministic + semantic + LLM)
+5. matching (deterministic + semantic + LLM)
 ```
 
 ### 8.3 Recommended Orchestration
 
 | Approach | Description |
 |---|---|
-| **A. Staggered cron (minimal)** | Collectors 16:00; `analyze_feedback` + `learn_from_feedback` + `match_recommendations` 16:45 via `LEARNER_DAILY_*` |
+| **A. Staggered cron (minimal)** | Collectors 16:00; `analyze_feedback` + `learn_from_feedback` + matching 16:45 via `LEARNER_DAILY_*` |
 | **B. Single pipeline job (preferred)** | Replace the separate match trigger with `run_daily_pipeline` that records `pipeline_runs`, runs steps 3–5 sequentially with an overlap guard |
 | **C. Continuous analysis** | `analyze_feedback` every 5 minutes; learn + match once daily |
 
-Regardless of choice, also run `analyze_feedback` between daily batches (5-minute poll) so feedback submitted hours before the match job already has completed analysis. `learn_from_feedback` must finish before matching so the same day's run uses fresh learned state; pending analyses older than `LEARNER_ANALYSIS_WAIT_MINUTES` fall back to rating-only. Update `expected_scheduler_job_ids()` and the stale-job pruning pattern in `scheduler.py` for every new job id.
+Regardless of choice, also run `analyze_feedback` between daily batches (5-minute poll) so feedback submitted hours before the match job already has completed analysis. `learn_from_feedback` must finish before matching so the same day's run uses fresh learned state. It never blocks the pipeline waiting for analyses: it runs one drain batch capped at `LEARNER_ANALYSIS_DRAIN_BUDGET_MINUTES`, then proceeds — still-pending rows contribute rating-only this run and full analysis on the next run (harmless under stateless recompute, §6.2). Update `expected_scheduler_job_ids()` and the stale-job pruning pattern in `scheduler.py` for every new job id.
 
 ---
 
@@ -662,8 +666,9 @@ Store benchmark results in `learning_runs.changes_applied` or an operator note; 
 
 **Goal:** rate 1–5 with optional applied, auditable snapshot, correct hide/unhide.
 
-1. Alembic migration: add `rating`, `applied`, `job_id`, `scoring_snapshot`, `analysis_status`, `updated_at`; collapse legacy rows to latest verdict; map actions per §3.3; add `UNIQUE (recommendation_id)`.
-2. `POST` → JSON body with upsert; legacy `?action` mapping for one cycle; hide on rating 1; **re-activate on re-rate ≥ 3** (§6.3).
+0. Tooling: add `pytest-timeout` to `requirements-dev.txt` and `--timeout=10` to the Make test targets (§16 requires per-test timeouts; the plugin is not yet a dependency).
+1. Alembic migration: add `rating`, `applied`, `job_id`, `scoring_snapshot`, `analysis_status`, `updated_at`; collapse legacy rows to latest verdict; map actions per §3.3; add `UNIQUE (recommendation_id)`; FK to `recommendations.id` becomes `ON DELETE RESTRICT` (§5.8).
+2. `POST` → JSON body with upsert; legacy `?action` mapping for one cycle; hide on rating 1; **re-activate on re-rate ≥ 2** (§6.3).
 3. `GET /recommendations/{id}/feedback`; feedback echo + inactive-recommendation visibility on `GET /jobs/{job_id}` (§9.1).
 4. Assemble `scoring_snapshot` on submit (required by Phase B).
 5. Five-point UI + applied toggle; fix `palaute/route.ts` to JSON.
@@ -752,13 +757,13 @@ Verification: learned discovery term appears in collector logs; fixture test sho
 | Legacy `action` column | Keep nullable after migration | Drop in a later migration |
 | Learned caps / decay half-life | Env vars per §5.7 defaults | Hard-coded constants |
 | Analysis poll interval | 5 minutes | Daily-only before learn job |
-| Learn waits for analysis | 30 min max, then rating-only fallback | Block until complete |
+| Learn vs pending analyses | One bounded drain batch (≤ 5 min), then rating-only fallback | Blocking wait (rejected — would stall matching) |
 | Pipeline orchestration | Single `run_daily_pipeline` (B) | Staggered cron (A) |
 | `applied` without explicit rating | Default rating 5 | Require rating always |
 | Positive semantic signal | Single centroid MVP, k-NN upgrade in Phase D stretch | k-NN from day one |
 | Feedback on all-jobs list | Defer post-MVP | Job-level feedback table |
 
-Resolved: rating 1 hides immediately (and un-hides on re-rate ≥ 3); rating 2 stays visible as a down-rank signal only.
+Resolved: rating 1 hides immediately and any re-rate ≥ 2 un-hides immediately; rating 2 stays visible as a down-rank signal only (so a 1→2 re-rate un-hides — visibility follows the current rating, always).
 
 ---
 
@@ -782,39 +787,7 @@ Resolved: rating 1 hides immediately (and un-hides on re-rate ≥ 3); rating 2 s
 | Tests | `backend/tests/test_jobs_api.py`, `test_matching.py`, new learning tests | Per-phase coverage |
 | Docs | `docs/architecture.md`, `implementation-journal.md` | Keep in sync |
 
-Run `make test-regression` before adapter changes; `make test-backend` for all backend phases. Always run tests with an explicit per-test timeout (`pytest --timeout=10`).
-
----
-
-## 17. Plan Review Resolution Log
-
-Senior review (2026-07-05, two passes against the live codebase). Findings and where each is resolved:
-
-| # | Severity | Finding | Resolution |
-|---|---|---|---|
-| 1 | Critical | Scheduler runs collect + match concurrently at 16:00 | §8, Phase C task 4 |
-| 2 | Critical | Feedback append-only; any historical `not_relevant` row hides forever | §5.1 collapse + `UNIQUE(recommendation_id)`, Phase A |
-| 3 | Critical | `profile_embeddings` allows one row per profile; centroids don't fit | §5.6 new table |
-| 4 | Critical | Discovery reads env only, not profile | §6.5, Phase D |
-| 5 | Critical | Snapshot needed by analysis but was deferred | Phase A task 4 |
-| 6 | Critical | Hide logic keyed to legacy `action` only | §6.3, Phase A task 6 |
-| 7 | High | Rating-2 UX contradicted hide rules | §3.4/§6.3 aligned |
-| 8 | High | No GET/feedback echo for UI | §9.1, Phase A task 3 |
-| 9 | High | Provider cooldown not task-scoped | §7.5 separate cooldown file |
-| 10 | High | Eval provider ≠ embedding provider | §6.4 OpenAI note |
-| 11 | High | Exclusions must not enter the profile embedding | §5.3 |
-| 12 | High | Stale job-fit eval cache after learned state changes | §11 hash includes `learned.version` |
-| 13–33 | Medium | First-pass findings: snapshot fields, lane overrides, comment sanitizer, env vars, module boundaries, audit CLI, section ordering, loopback security note, migration mapping, `applied`-without-rating default, `job_id` denormalization, portal proxy still action-based, enrichment pipeline slot, regression test gate | Integrated throughout §3–§16 |
-| 34 | **Critical** | `GET /jobs/{job_id}` filters `r.is_active = true` — after rating 1, the recommendation panel and rating control disappear, so a hidden verdict can never be revised | §6.3, §9.1, Phase A tasks 3/7 |
-| 35 | **High** | No immediate un-hide path: upsert-only re-activation would delay un-hiding until the next daily run | §6.3 re-activate on re-rate ≥ 3, Phase A task 2 |
-| 36 | High | `refresh_active_recommendation_ranks()` is feedback-unaware; hide enforcement exists only in the deterministic upsert path | §6.3 guard, Phase A task 6 |
-| 37 | High | No design for conflicting/aging feedback: last-write-wins, term flapping, and self-reinforcing exclusion loops were unaddressed | §6.7 (net weights, decay, hysteresis, caps, exploration exemption), §14 item 8 |
-| 38 | High | LLM-suggested terms could inject hallucinated tokens into learned state | §7.4 grounding guard |
-| 39 | Medium | Incremental learning cursor (`learning_processed_at`) adds drift risk for no benefit at this data scale | §5.1/§6.2 stateless recompute; cursor dropped |
-| 40 | Medium | Centroids lacked model/dimension binding and min-support; single centroid blurs multimodal interests | §5.6, §6.4 k-NN upgrade path |
-| 41 | Medium | Snapshot lacked `rank`/`is_active` (position bias unobservable) and `rationale`/`concerns` (overwritten nightly by the full recommendation reset) | §5.2 |
-| 42 | Medium | Few-shot examples could overfit one theme | §6.6 diversity rule |
-| 43 | Low | Generic high-frequency tokens could dominate learned terms | §6.7 document-frequency cap + `GENERIC_MATCH_TERMS` |
+Run `make test-regression` before adapter changes; `make test-backend` for all backend phases. Always run tests with an explicit per-test timeout (`pytest --timeout=10`); `pytest-timeout` is included in the dev requirements and wired into the Make test target.
 
 ---
 

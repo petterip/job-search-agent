@@ -137,11 +137,16 @@ def minimized_profile_summary(profile: dict[str, Any]) -> str:
 def job_summary(job: dict[str, Any]) -> str:
     description = str(job.get("description") or "")
     excerpt = description[:4000]
+    deterministic_result = job.get("deterministic_result") or {}
+    if isinstance(deterministic_result, str):
+        deterministic_result = json.loads(deterministic_result)
+    travel_assessment = deterministic_result.get("travel_assessment")
     minimized = {
         "title": job.get("title"),
         "employer": job.get("employer"),
         "location": job.get("location"),
         "description_excerpt": excerpt,
+        "travel_assessment": travel_assessment,
     }
     return json.dumps(minimized, ensure_ascii=False, sort_keys=True)
 
@@ -153,6 +158,7 @@ def evaluation_request_hash(
     model: str,
     prompt_version: int,
     schema_version: int = 1,
+    learned_version: int = 0,
 ) -> str:
     payload = {
         "profile_summary": profile_summary,
@@ -160,6 +166,7 @@ def evaluation_request_hash(
         "model": model,
         "prompt_version": prompt_version,
         "schema_version": schema_version,
+        "learned_version": learned_version,
     }
     return hashlib.sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
 
