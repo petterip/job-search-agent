@@ -57,8 +57,10 @@ def resolve_location_evidence_for_job(
     fallback: LocationEvidenceView | None = None,
     max_lookups: int = 1,
 ) -> LocationEvidenceView | None:
-    if not location:
+    if fallback is not None:
         return fallback
+    if not location:
+        return None
     transit_map = resolve_transit_for_locations(
         connection,
         [location],
@@ -87,15 +89,17 @@ def enrich_location_evidence(
     )
     enriched: list[T] = []
     for item in items:
+        if item.location_evidence is not None:
+            enriched.append(item)
+            continue
         if not item.location:
             enriched.append(item)
             continue
         fresh = to_location_evidence_view(
             build_location_evidence(item.location, transit_map.get(item.location))
         )
-        payload = fresh or item.location_evidence
-        if payload is item.location_evidence:
+        if fresh is None:
             enriched.append(item)
         else:
-            enriched.append(item.model_copy(update={"location_evidence": payload}))
+            enriched.append(item.model_copy(update={"location_evidence": fresh}))
     return enriched

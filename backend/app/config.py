@@ -19,11 +19,16 @@ class Settings(BaseModel):
     llm_eval_max_jobs: int = 50
     llm_provider_failure_cooldown_min: int = 360
     storage_dir: str = "/storage"
-    llm_prompt_version: int = 7
+    llm_prompt_version: int = 8
+    feedback_analysis_poll_minutes: int = 5
+    learner_analysis_drain_budget_minutes: int = 5
+    learner_daily_hour: int = 16
+    learner_daily_minute: int = 45
+    learned_discovery_query_cap: int = 12
+    learned_exclusion_cap: int = 40
+    feedback_decay_half_life_days: int = 60
     collector_daily_hour: int = 16
     collector_daily_minute: int = 0
-    matcher_daily_hour: int = 16
-    matcher_daily_minute: int = 0
     matcher_max_jobs: int = 1000
     discovery_search_queries: list[str] = Field(
         default_factory=lambda: [
@@ -79,11 +84,19 @@ class Settings(BaseModel):
     browserbase_api_key: str = ""
     google_maps_api_key: str = ""
     transit_origin_address: str = "Jalkatie 2, Oulu, Finland"
+    recommendation_commute_limit_minutes: int = 120
+    recommendation_transit_lookup_budget: int = 100
     enrichment_enabled: bool = False
     enrichment_provider: str = "browserbase"
     enrichment_max_jobs_per_run: int = 50
     enrichment_short_description_chars: int = 200
     jobly_browser_enrich_max_per_run: int = 20
+    careerjet_api_key: str = ""
+    careerjet_max_results_per_run: int = 50
+    careerjet_user_ip: str = "127.0.0.1"
+    linkedin_enabled: bool = False
+    linkedin_max_results_per_run: int = 100
+    linkedin_browser_enrich_max_per_run: int = 10
 
     def browserbase_configured(self) -> bool:
         return bool(self.browserbase_api_key.strip())
@@ -152,13 +165,30 @@ def get_settings() -> Settings:
         ),
         storage_dir=getenv("STORAGE_DIR", defaults.storage_dir),
         llm_prompt_version=_int_env("LLM_PROMPT_VERSION", defaults.llm_prompt_version),
+        feedback_analysis_poll_minutes=_int_env(
+            "FEEDBACK_ANALYSIS_POLL_MINUTES",
+            defaults.feedback_analysis_poll_minutes,
+        ),
+        learner_analysis_drain_budget_minutes=_int_env(
+            "LEARNER_ANALYSIS_DRAIN_BUDGET_MINUTES",
+            defaults.learner_analysis_drain_budget_minutes,
+        ),
+        learner_daily_hour=_int_env("LEARNER_DAILY_HOUR", defaults.learner_daily_hour),
+        learner_daily_minute=_int_env("LEARNER_DAILY_MINUTE", defaults.learner_daily_minute),
+        learned_discovery_query_cap=_int_env(
+            "LEARNED_DISCOVERY_QUERY_CAP",
+            defaults.learned_discovery_query_cap,
+        ),
+        learned_exclusion_cap=_int_env("LEARNED_EXCLUSION_CAP", defaults.learned_exclusion_cap),
+        feedback_decay_half_life_days=_int_env(
+            "FEEDBACK_DECAY_HALF_LIFE_DAYS",
+            defaults.feedback_decay_half_life_days,
+        ),
         collector_daily_hour=_int_env("COLLECTOR_DAILY_HOUR", defaults.collector_daily_hour),
         collector_daily_minute=_int_env(
             "COLLECTOR_DAILY_MINUTE",
             defaults.collector_daily_minute,
         ),
-        matcher_daily_hour=_int_env("MATCHER_DAILY_HOUR", defaults.matcher_daily_hour),
-        matcher_daily_minute=_int_env("MATCHER_DAILY_MINUTE", defaults.matcher_daily_minute),
         matcher_max_jobs=_int_env("MATCHER_MAX_JOBS", defaults.matcher_max_jobs),
         discovery_search_queries=discovery_search_queries,
         collector_enabled_sources=collector_enabled_sources,
@@ -184,6 +214,14 @@ def get_settings() -> Settings:
         browserbase_api_key=getenv("BROWSERBASE_API_KEY", ""),
         google_maps_api_key=getenv("GOOGLE_MAPS_API_KEY", ""),
         transit_origin_address=getenv("TRANSIT_ORIGIN_ADDRESS", defaults.transit_origin_address),
+        recommendation_commute_limit_minutes=_int_env(
+            "RECOMMENDATION_COMMUTE_LIMIT_MINUTES",
+            defaults.recommendation_commute_limit_minutes,
+        ),
+        recommendation_transit_lookup_budget=_int_env(
+            "RECOMMENDATION_TRANSIT_LOOKUP_BUDGET",
+            defaults.recommendation_transit_lookup_budget,
+        ),
         enrichment_enabled=_bool_env("ENRICHMENT_ENABLED", defaults.enrichment_enabled),
         enrichment_provider=getenv("ENRICHMENT_PROVIDER", defaults.enrichment_provider),
         enrichment_max_jobs_per_run=_int_env(
@@ -197,5 +235,20 @@ def get_settings() -> Settings:
         jobly_browser_enrich_max_per_run=_int_env(
             "JOBLY_BROWSER_ENRICH_MAX_PER_RUN",
             defaults.jobly_browser_enrich_max_per_run,
+        ),
+        careerjet_api_key=getenv("CAREERJET_API_KEY", defaults.careerjet_api_key),
+        careerjet_max_results_per_run=_int_env(
+            "CAREERJET_MAX_RESULTS_PER_RUN",
+            defaults.careerjet_max_results_per_run,
+        ),
+        careerjet_user_ip=getenv("CAREERJET_USER_IP", defaults.careerjet_user_ip),
+        linkedin_enabled=_bool_env("LINKEDIN_ENABLED", defaults.linkedin_enabled),
+        linkedin_max_results_per_run=_int_env(
+            "LINKEDIN_MAX_RESULTS_PER_RUN",
+            defaults.linkedin_max_results_per_run,
+        ),
+        linkedin_browser_enrich_max_per_run=_int_env(
+            "LINKEDIN_BROWSER_ENRICH_MAX_PER_RUN",
+            defaults.linkedin_browser_enrich_max_per_run,
         ),
     )

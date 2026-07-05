@@ -36,7 +36,7 @@ test-spike-kuntarekry:
 	SPIKE_ORG_SAMPLE=50 python3 scrape-test/11_kuntarekry_valtiolle_spike.py
 
 test-backend:
-	cd backend && python3 -m pytest
+	cd backend && python3 -m pytest --timeout=10
 
 test-web:
 	cd web && npm ci && npm run typecheck && npm run build

@@ -47,9 +47,17 @@ def load_description_state(connection: Connection, job_id: int) -> dict[str, Any
     row = connection.execute(
         sa.text(
             """
-            select job_id, provenance, source_id, enricher, input_hash, confidence
-            from job_description_state
-            where job_id = :job_id
+            select
+                jds.job_id,
+                jds.provenance,
+                jds.job_source_id,
+                jds.job_enrichment_id,
+                je.enricher,
+                je.input_hash,
+                jds.confidence
+            from job_description_state jds
+            left join job_enrichments je on je.id = jds.job_enrichment_id
+            where jds.job_id = :job_id
             """
         ),
         {"job_id": job_id},
@@ -61,25 +69,24 @@ def record_source_provenance(
     connection: Connection,
     *,
     job_id: int,
-    source_id: int,
+    job_source_id: int,
 ) -> None:
     connection.execute(
         sa.text(
             """
             insert into job_description_state (
-                job_id, provenance, source_id, enricher, input_hash, confidence, applied_at
+                job_id, provenance, job_source_id, job_enrichment_id, confidence, applied_at
             )
-            values (:job_id, 'source', :source_id, null, null, null, now())
+            values (:job_id, 'source', :job_source_id, null, null, now())
             on conflict (job_id) do update set
                 provenance = 'source',
-                source_id = excluded.source_id,
-                enricher = null,
-                input_hash = null,
+                job_source_id = excluded.job_source_id,
+                job_enrichment_id = null,
                 confidence = null,
                 applied_at = now()
             """
         ),
-        {"job_id": job_id, "source_id": source_id},
+        {"job_id": job_id, "job_source_id": job_source_id},
     )
 
 
@@ -87,10 +94,10 @@ def mark_source_description(
     connection: Connection,
     *,
     job_id: int,
-    source_id: int,
+    job_source_id: int,
     description: str,
 ) -> None:
-    record_source_provenance(connection, job_id=job_id, source_id=source_id)
+    record_source_provenance(connection, job_id=job_id, job_source_id=job_source_id)
     connection.execute(
         sa.text(
             """
@@ -120,12 +127,12 @@ def preserve_enriched_description_on_upsert(
     *,
     job_id: int,
     source_description: str | None,
-    source_id: int,
+    job_source_id: int,
 ) -> str | None:
     existing_description = _load_job_description(connection, job_id)
 
     if source_description and source_description.strip():
-        record_source_provenance(connection, job_id=job_id, source_id=source_id)
+        record_source_provenance(connection, job_id=job_id, job_source_id=job_source_id)
         return source_description.strip()
 
     return existing_description
@@ -137,11 +144,29 @@ def apply_enrichment_result(
     *,
     short_description_threshold: int,
 ) -> bool:
-    connection.execute(
+    occurrence = connection.execute(
+        sa.text(
+            """
+            select js.job_id, js.raw_listing_id, j.status
+            from job_sources js
+            join jobs j on j.id = js.job_id
+            where js.id = :job_source_id
+            """
+        ),
+        {"job_source_id": result.job_source_id},
+    ).mappings().one_or_none()
+    if occurrence is None or occurrence["status"] != "active":
+        return False
+    job_id = int(occurrence["job_id"])
+    raw_listing_id = int(occurrence["raw_listing_id"])
+
+    enrichment_id = connection.execute(
         sa.text(
             """
             insert into job_enrichments (
                 job_id,
+                job_source_id,
+                raw_listing_id,
                 enricher,
                 input_hash,
                 description,
@@ -152,6 +177,8 @@ def apply_enrichment_result(
             )
             values (
                 :job_id,
+                :job_source_id,
+                :raw_listing_id,
                 :enricher,
                 :input_hash,
                 :description,
@@ -160,15 +187,20 @@ def apply_enrichment_result(
                 :confidence,
                 false
             )
-            on conflict (job_id, enricher, input_hash) do update set
+            on conflict (job_source_id, enricher, input_hash) do update set
+                job_id = excluded.job_id,
+                raw_listing_id = excluded.raw_listing_id,
                 description = excluded.description,
                 structured_fields = excluded.structured_fields,
                 method = excluded.method,
                 confidence = excluded.confidence
+            returning id
             """
         ),
         {
-            "job_id": result.job_id,
+            "job_id": job_id,
+            "job_source_id": result.job_source_id,
+            "raw_listing_id": raw_listing_id,
             "enricher": result.enricher,
             "input_hash": result.input_hash,
             "description": result.description,
@@ -176,16 +208,16 @@ def apply_enrichment_result(
             "method": result.method.value,
             "confidence": result.confidence,
         },
-    )
+    ).scalar_one()
 
     if not result.description or not result.description.strip():
         return False
 
     current = connection.execute(
         sa.text("select description from jobs where id = :job_id"),
-        {"job_id": result.job_id},
+        {"job_id": job_id},
     ).scalar_one_or_none()
-    state = load_description_state(connection, result.job_id)
+    state = load_description_state(connection, job_id)
     current_text = (current or "").strip()
     new_text = result.description.strip()
 
@@ -218,28 +250,26 @@ def apply_enrichment_result(
             where id = :job_id
             """
         ),
-        {"job_id": result.job_id, "description": new_text},
+        {"job_id": job_id, "description": new_text},
     )
     connection.execute(
         sa.text(
             """
             insert into job_description_state (
-                job_id, provenance, source_id, enricher, input_hash, confidence, applied_at
+                job_id, provenance, job_source_id, job_enrichment_id, confidence, applied_at
             )
-            values (:job_id, 'enriched', null, :enricher, :input_hash, :confidence, now())
+            values (:job_id, 'enriched', null, :job_enrichment_id, :confidence, now())
             on conflict (job_id) do update set
                 provenance = 'enriched',
-                source_id = null,
-                enricher = excluded.enricher,
-                input_hash = excluded.input_hash,
+                job_source_id = null,
+                job_enrichment_id = excluded.job_enrichment_id,
                 confidence = excluded.confidence,
                 applied_at = now()
             """
         ),
         {
-            "job_id": result.job_id,
-            "enricher": result.enricher,
-            "input_hash": result.input_hash,
+            "job_id": job_id,
+            "job_enrichment_id": enrichment_id,
             "confidence": result.confidence,
         },
     )
@@ -248,16 +278,10 @@ def apply_enrichment_result(
             """
             update job_enrichments
             set applied_to_job = true
-            where job_id = :job_id
-              and enricher = :enricher
-              and input_hash = :input_hash
+            where id = :job_enrichment_id
             """
         ),
-        {
-            "job_id": result.job_id,
-            "enricher": result.enricher,
-            "input_hash": result.input_hash,
-        },
+        {"job_enrichment_id": enrichment_id},
     )
     return True
 
@@ -271,11 +295,13 @@ def list_enrichment_candidates(
     limit: int | None = None,
 ) -> list[EnrichmentInput]:
     source_filter = ""
+    source_priority_order = "s.name,"
     params: dict[str, Any] = {
         "threshold": short_description_threshold,
     }
     if source_names:
         source_filter = "and s.name = any(:source_names)"
+        source_priority_order = "array_position(:source_names, s.name),"
         params["source_names"] = list(source_names)
 
     limit_sql = ""
@@ -288,6 +314,8 @@ def list_enrichment_candidates(
             f"""
             select distinct on (j.id)
                 j.id as job_id,
+                js.id as job_source_id,
+                rl.id as raw_listing_id,
                 s.id as source_id,
                 s.name as source_name,
                 js.last_content_hash,
@@ -308,7 +336,7 @@ def list_enrichment_candidates(
                 j.description is null
                 or length(trim(j.description)) < :threshold
               )
-            order by j.id, js.last_seen_at desc nulls last, js.id desc
+            order by j.id, {source_priority_order} js.last_seen_at desc nulls last, js.id desc
             {limit_sql}
             """
         ),
@@ -331,12 +359,16 @@ def list_enrichment_candidates(
                 """
                 select 1
                 from job_enrichments
-                where job_id = :job_id
+                where job_source_id = :job_source_id
                   and enricher = :enricher
                   and input_hash = :input_hash
                 """
             ),
-            {"job_id": row["job_id"], "enricher": enricher, "input_hash": input_hash},
+            {
+                "job_source_id": row["job_source_id"],
+                "enricher": enricher,
+                "input_hash": input_hash,
+            },
         ).scalar_one_or_none():
             continue
         if connection.execute(
@@ -344,18 +376,24 @@ def list_enrichment_candidates(
                 """
                 select 1
                 from enrichment_queue
-                where job_id = :job_id
+                where job_source_id = :job_source_id
                   and enricher = :enricher
                   and input_hash = :input_hash
                   and status in ('queued', 'running', 'retry')
                 """
             ),
-            {"job_id": row["job_id"], "enricher": enricher, "input_hash": input_hash},
+            {
+                "job_source_id": row["job_source_id"],
+                "enricher": enricher,
+                "input_hash": input_hash,
+            },
         ).scalar_one_or_none():
             continue
         candidates.append(
             EnrichmentInput(
                 job_id=int(row["job_id"]),
+                job_source_id=int(row["job_source_id"]),
+                raw_listing_id=int(row["raw_listing_id"]),
                 source_id=int(row["source_id"]),
                 source_name=str(row["source_name"]),
                 last_content_hash=str(row["last_content_hash"]),
@@ -370,6 +408,365 @@ def list_enrichment_candidates(
             )
         )
     return candidates
+
+
+def enqueue_enrichment_candidates(
+    connection: Connection,
+    candidates: list[EnrichmentInput],
+) -> int:
+    queued = 0
+    for candidate in candidates:
+        input_hash = compute_enrichment_input_hash(
+            last_content_hash=candidate.last_content_hash,
+            application_url=candidate.application_url,
+            canonical_source_url=candidate.canonical_source_url,
+            title=candidate.title,
+            employer=candidate.employer,
+            published_at=candidate.published_at,
+            enricher=candidate.enricher,
+            enricher_version=candidate.enricher_version,
+        )
+        result = connection.execute(
+            sa.text(
+                """
+                insert into enrichment_queue (
+                    job_id,
+                    job_source_id,
+                    raw_listing_id,
+                    enricher,
+                    input_hash,
+                    status,
+                    priority,
+                    next_attempt_at
+                )
+                values (
+                    :job_id,
+                    :job_source_id,
+                    :raw_listing_id,
+                    :enricher,
+                    :input_hash,
+                    'queued',
+                    0,
+                    now()
+                )
+                on conflict (job_source_id, enricher, input_hash)
+                where status in ('queued', 'running', 'retry')
+                do nothing
+                """
+            ),
+            {
+                "job_id": candidate.job_id,
+                "job_source_id": candidate.job_source_id,
+                "raw_listing_id": candidate.raw_listing_id,
+                "enricher": candidate.enricher,
+                "input_hash": input_hash,
+            },
+        )
+        queued += int(result.rowcount or 0)
+    return queued
+
+
+def cancel_inactive_queue_items(connection: Connection) -> int:
+    result = connection.execute(
+        sa.text(
+            """
+            update enrichment_queue eq
+            set status = 'cancelled',
+                last_error = 'source occurrence no longer resolves to an active job',
+                updated_at = now()
+            from job_sources js
+            join jobs j on j.id = js.job_id
+            where eq.job_source_id = js.id
+              and eq.status in ('queued', 'running', 'retry')
+              and j.status <> 'active'
+            """
+        )
+    )
+    return int(result.rowcount or 0)
+
+
+def requeue_stale_running_items(connection: Connection, *, stale_minutes: int = 60) -> int:
+    result = connection.execute(
+        sa.text(
+            """
+            update enrichment_queue
+            set status = 'retry',
+                next_attempt_at = now(),
+                last_error = coalesce(last_error, 'requeued stale running enrichment item'),
+                updated_at = now()
+            where status = 'running'
+              and updated_at < now() - (:stale_minutes * interval '1 minute')
+            """
+        ),
+        {"stale_minutes": stale_minutes},
+    )
+    return int(result.rowcount or 0)
+
+
+def create_enrichment_run(connection: Connection, *, metadata: dict[str, Any]) -> int:
+    return int(
+        connection.execute(
+            sa.text(
+                """
+                insert into enrichment_runs (status, metadata)
+                values ('running', CAST(:metadata AS jsonb))
+                returning id
+                """
+            ),
+            {"metadata": json.dumps(metadata, ensure_ascii=False, sort_keys=True)},
+        ).scalar_one()
+    )
+
+
+def finish_enrichment_run(
+    connection: Connection,
+    *,
+    run_id: int,
+    status: str,
+    queued_count: int,
+    processed_count: int,
+    applied_count: int,
+    failed_count: int,
+    error_summary: str | None = None,
+) -> None:
+    connection.execute(
+        sa.text(
+            """
+            update enrichment_runs
+            set status = :status,
+                finished_at = now(),
+                queued_count = :queued_count,
+                processed_count = :processed_count,
+                applied_count = :applied_count,
+                failed_count = :failed_count,
+                error_summary = :error_summary
+            where id = :run_id
+            """
+        ),
+        {
+            "run_id": run_id,
+            "status": status,
+            "queued_count": queued_count,
+            "processed_count": processed_count,
+            "applied_count": applied_count,
+            "failed_count": failed_count,
+            "error_summary": error_summary,
+        },
+    )
+
+
+def claim_due_queue_items(
+    connection: Connection,
+    *,
+    enricher: str,
+    source_names: tuple[str, ...] | None = None,
+    limit: int | None = None,
+) -> list[dict[str, Any]]:
+    source_filter = ""
+    params: dict[str, Any] = {"enricher": enricher}
+    if source_names:
+        source_filter = "and s.name = any(:source_names)"
+        params["source_names"] = list(source_names)
+    limit_sql = ""
+    if limit is not None:
+        limit_sql = "limit :limit"
+        params["limit"] = limit
+    rows = connection.execute(
+        sa.text(
+            f"""
+            with due as (
+                select eq.id
+                from enrichment_queue eq
+                join job_sources js on js.id = eq.job_source_id
+                join sources s on s.id = js.source_id
+                join jobs j on j.id = js.job_id
+                where eq.enricher = :enricher
+                  and eq.status in ('queued', 'retry')
+                  and eq.next_attempt_at <= now()
+                  and j.status = 'active'
+                  {source_filter}
+                order by eq.priority desc, eq.next_attempt_at, eq.id
+                {limit_sql}
+                for update skip locked
+            )
+            update enrichment_queue eq
+            set status = 'running',
+                attempts = eq.attempts + 1,
+                updated_at = now()
+            from due
+            where eq.id = due.id
+            returning
+                eq.id as queue_id,
+                eq.job_id,
+                eq.job_source_id,
+                eq.raw_listing_id,
+                eq.enricher,
+                eq.input_hash,
+                eq.attempts
+            """
+        ),
+        params,
+    ).mappings()
+    return [dict(row) for row in rows]
+
+
+def load_queue_input(connection: Connection, *, queue_id: int) -> EnrichmentInput | None:
+    row = connection.execute(
+        sa.text(
+            """
+            select
+                eq.job_id,
+                eq.job_source_id,
+                eq.raw_listing_id,
+                s.id as source_id,
+                s.name as source_name,
+                js.last_content_hash,
+                js.application_url,
+                rl.canonical_source_url,
+                j.title,
+                j.employer,
+                j.published_at,
+                j.description as current_description,
+                eq.enricher,
+                :enricher_version as enricher_version
+            from enrichment_queue eq
+            join job_sources js on js.id = eq.job_source_id
+            join sources s on s.id = js.source_id
+            join raw_listings rl on rl.id = eq.raw_listing_id
+            join jobs j on j.id = js.job_id
+            where eq.id = :queue_id
+              and j.status = 'active'
+            """
+        ),
+        {"queue_id": queue_id, "enricher_version": ENRICHMENT_VERSION},
+    ).mappings().one_or_none()
+    if row is None:
+        return None
+    return EnrichmentInput(
+        job_id=int(row["job_id"]),
+        job_source_id=int(row["job_source_id"]),
+        raw_listing_id=int(row["raw_listing_id"]),
+        source_id=int(row["source_id"]),
+        source_name=str(row["source_name"]),
+        last_content_hash=str(row["last_content_hash"]),
+        application_url=row["application_url"],
+        canonical_source_url=row["canonical_source_url"],
+        title=str(row["title"]),
+        employer=row["employer"],
+        published_at=row["published_at"],
+        current_description=row["current_description"],
+        enricher=str(row["enricher"]),
+        enricher_version=str(row["enricher_version"]),
+    )
+
+
+def load_raw_listing_payload(connection: Connection, *, raw_listing_id: int) -> dict[str, Any]:
+    payload = connection.execute(
+        sa.text("select payload from raw_listings where id = :raw_listing_id"),
+        {"raw_listing_id": raw_listing_id},
+    ).scalar_one()
+    return dict(payload)
+
+
+def create_enrichment_attempt(
+    connection: Connection,
+    *,
+    queue_id: int,
+    run_id: int,
+    provider: str | None,
+) -> int:
+    return int(
+        connection.execute(
+            sa.text(
+                """
+                insert into enrichment_attempts (queue_id, run_id, status, provider)
+                values (:queue_id, :run_id, 'running', :provider)
+                returning id
+                """
+            ),
+            {"queue_id": queue_id, "run_id": run_id, "provider": provider},
+        ).scalar_one()
+    )
+
+
+def finish_enrichment_attempt(
+    connection: Connection,
+    *,
+    attempt_id: int,
+    status: str,
+    error: str | None = None,
+    browser_session_id: str | None = None,
+    browser_dashboard_url: str | None = None,
+    artifact_paths: list[str] | None = None,
+) -> None:
+    connection.execute(
+        sa.text(
+            """
+            update enrichment_attempts
+            set status = :status,
+                finished_at = now(),
+                error = :error,
+                browser_session_id = :browser_session_id,
+                browser_dashboard_url = :browser_dashboard_url,
+                artifact_paths = CAST(:artifact_paths AS jsonb)
+            where id = :attempt_id
+            """
+        ),
+        {
+            "attempt_id": attempt_id,
+            "status": status,
+            "error": error,
+            "browser_session_id": browser_session_id,
+            "browser_dashboard_url": browser_dashboard_url,
+            "artifact_paths": json.dumps(artifact_paths or [], ensure_ascii=False),
+        },
+    )
+
+
+def complete_queue_item(connection: Connection, *, queue_id: int) -> None:
+    connection.execute(
+        sa.text(
+            """
+            update enrichment_queue
+            set status = 'completed',
+                updated_at = now(),
+                last_error = null
+            where id = :queue_id
+            """
+        ),
+        {"queue_id": queue_id},
+    )
+
+
+def retry_or_fail_queue_item(
+    connection: Connection,
+    *,
+    queue_id: int,
+    error: str,
+    max_attempts: int = 3,
+) -> str:
+    row = connection.execute(
+        sa.text("select attempts from enrichment_queue where id = :queue_id"),
+        {"queue_id": queue_id},
+    ).mappings().one()
+    next_status = "failed" if int(row["attempts"]) >= max_attempts else "retry"
+    connection.execute(
+        sa.text(
+            """
+            update enrichment_queue
+            set status = :status,
+                next_attempt_at = case
+                    when :status = 'retry' then now() + interval '30 minutes'
+                    else next_attempt_at
+                end,
+                last_error = :error,
+                updated_at = now()
+            where id = :queue_id
+            """
+        ),
+        {"queue_id": queue_id, "status": next_status, "error": error[:2000]},
+    )
+    return next_status
 
 
 def latest_enrichment_run_summary(connection: Connection) -> dict[str, Any] | None:

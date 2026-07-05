@@ -15,6 +15,8 @@ class EnrichmentMethod(str, Enum):
 @dataclass(frozen=True)
 class EnrichmentInput:
     job_id: int
+    job_source_id: int
+    raw_listing_id: int
     source_id: int
     source_name: str
     last_content_hash: str
@@ -31,6 +33,8 @@ class EnrichmentInput:
 @dataclass(frozen=True)
 class EnrichmentResult:
     job_id: int
+    job_source_id: int
+    raw_listing_id: int
     enricher: str
     input_hash: str
     description: str | None

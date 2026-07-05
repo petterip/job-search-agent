@@ -1,7 +1,7 @@
 # Browser Enrichment and Extended Collection Implementation Plan
 
-**Updated:** 2026-07-05 (review pass: source-occurrence granularity, provenance FKs, scheduler cutover; findings in §14)  
-**Status:** partial: Browserbase bootstrap **and a first cut of the enrichment tables/repository have shipped** (migration `20260705_0009`, `app/enrichers/repository.py`, `upsert_listing()` provenance hooks). The shipped schema is keyed by `job_id` only and must be corrected to source-occurrence granularity (§4.2, Phase C.0) before any worker job is enabled. Playwright extraction and new sources are not shipped.  
+**Updated:** 2026-07-05 (implemented and verified review pass: source-occurrence granularity, provenance FKs, scheduler cutover)
+**Status:** implemented for the planned MVP path: Browserbase bootstrap, occurrence-keyed enrichment schema (`20260705_0010`), durable queue/run/attempt persistence, repository merge/provenance helpers, `python -m app.enrich`, scheduler cutover to `run_daily_pipeline`, HTTP/static detail enrichment, Jobly browser fallback, and optional Careerjet/LinkedIn adapters have shipped. Local Playwright mode and Stagehand remain non-goals/default-off extensions.
 **Related:** [`goal.md`](goal.md), [`architecture.md`](architecture.md), [`tyonhaku-rajapinnat.md`](tyonhaku-rajapinnat.md), [`sources.yaml`](sources.yaml), [`implementation-journal.md`](implementation-journal.md)
 
 HTTP-first collection remains the default. Browser automation is only a bounded detail-enrichment fallback for rows that HTTP, JSON-LD, metadata, or source APIs cannot describe well enough.
@@ -16,20 +16,20 @@ HTTP-first collection remains the default. Browser automation is only a bounded 
 | `browserbase` SDK dependency | Done | Currently required in `backend/pyproject.toml`; decide in Phase A whether it stays required or moves to an enrichment extra |
 | `browserbase_client.py` | Done | Creates/releases sessions; sync SDK calls |
 | `make browserbase-check` | Done | Creates/releases one live cloud session |
-| `app/enrichers/browser.py` | Partial | Creates a cloud session only; no Playwright CDP connection or page extraction |
-| `ENRICHMENT_ENABLED` | Unused | Parsed by config, not enforced by browser/session/worker code |
-| `python -m app.enrich` | Missing | No unified enrichment CLI |
-| DB `enrichment_*` tables | **Shipped with defect** | Migration `20260705_0009` created `enrichment_runs/queue/attempts`, `job_enrichments`, `job_description_state` — all keyed by `job_id` only; no `job_source_id`/`raw_listing_id` (§4.2) |
-| `app/enrichers/repository.py` | **Shipped with defect** | Queue/candidate/apply/provenance helpers exist; `list_enrichment_candidates()` picks a source occurrence with `DISTINCT ON (j.id) … ORDER BY js.last_seen_at DESC`, so the chosen URL and `input_hash` flap between sources across runs |
+| `app/enrichers/browser.py` | Done | Gates on `ENRICHMENT_ENABLED`, wraps Browserbase sync SDK calls, and exposes Playwright CDP connection helper |
+| `ENRICHMENT_ENABLED` | Done for shipped paths | `browser_session()` and `run_enrichment()` skip/raise before browser or queue side effects when disabled |
+| `python -m app.enrich` | Done | Unified CLI exists with `--dry-run`, `--enqueue-only`, `--source`, `--enricher`, `--max-jobs`; enabled runs enqueue and process due queue rows |
+| DB `enrichment_*` tables | Corrected | Migration `20260705_0010` keys queue/results by `job_source_id`/`raw_listing_id` and switches description provenance to `job_source_id` XOR `job_enrichment_id` |
+| `app/enrichers/repository.py` | Done | Per-occurrence candidates, input hashes, queue creation, run/attempt helpers, apply helper, provenance helpers, and inactive-job queue cancellation exist |
 | `upsert_listing()` provenance hooks | Shipped | `record_source_provenance()` / `preserve_enriched_description_on_upsert()` already called from `backend/app/collection/runner.py` |
-| Cross-source dedupe/relink | Constraint | `upsert_listing()` relinks `job_sources` rows to a cross-source canonical job and marks the orphaned job `superseded` — queue/state rows keyed by `job_id` can be left pointing at superseded jobs |
-| Worker enrichment job | Missing | Scheduler currently registers source collection and matching at the same configured time; post-Phase-C shape defined in §5 |
-| Kuntarekry org-shard | Missing | Current adapter uses regional shards; research proves `organisation={id}` org loop has much higher coverage |
-| Valtiolle adapter | Missing | Documented as research only |
-| Jobly HTML fallback | Missing | JSON-LD miss falls back to title-only payload |
-| Careerjet / LinkedIn | Missing | Careerjet is still under `blocked`; LinkedIn is not registered |
-| Registry/doc sync | Missing | `sources.yaml`, `tyonhaku-rajapinnat.md`, scheduler, adapter registry, and tests are not aligned for new sources |
-| `implementation-journal.md` | Stale | Current limits still say embeddings are not implemented, while embedding code and schema exist |
+| Cross-source dedupe/relink | Corrected for shipped enrichment state | Occurrence-keyed queue/results/state rows follow `job_source_id`; apply-time code resolves the current canonical `job_id` through `job_sources` |
+| Worker enrichment job | Done | Scheduler registers source collection plus `run_daily_pipeline` with stale-reclaiming `pipeline_runs` lease; `run_enrichment()` skips side effects when disabled and processes HTTP/browser enrichers when enabled |
+| Kuntarekry org-shard | Done | `KuntarekryAdapter` supports `KUNTAREKRY_COLLECTION_MODE=org_shard` while retaining the regional fast path |
+| Valtiolle adapter | Done | `ValtiolleAdapter` uses the shared Talentech org-shard adapter and is disabled by default |
+| Jobly HTML fallback | Done | JSON-LD miss falls back to meta/OpenGraph/microdata/visible body extraction |
+| Careerjet / LinkedIn | Done | Optional disabled-by-default adapters are registered; Careerjet requires `CAREERJET_API_KEY`; LinkedIn requires `LINKEDIN_ENABLED=true` |
+| Registry/doc sync | Done | `sources.yaml`, `tyonhaku-rajapinnat.md`, scheduler, adapter registry, and tests are aligned for the shipped sources |
+| `implementation-journal.md` | Updated | Notes occurrence-keyed enrichment state, `run_daily_pipeline`, optional sources, and default-off browser extensions |
 
 ---
 
@@ -54,18 +54,18 @@ Build the plan under these constraints:
 
 | Source | Implementation status | Method |
 |---|---|---|
-| `careerjet` | Add as optional source requiring `CAREERJET_API_KEY` | Publisher API v4; skip with warning when key is absent |
-| `linkedin` | Add as disabled-by-default supplementary source | Guest HTTP search first; browser detail only through enrichment queue for short descriptions |
+| `careerjet` | Optional source requiring `CAREERJET_API_KEY` | Publisher API v4; skip with warning when key is absent |
+| `linkedin` | Disabled-by-default supplementary source | Guest HTTP search first; browser detail only through enrichment queue for short descriptions |
 | `indeed` | Remains blocked | No adapter |
 | `kipa_p67` | Remains blocked | No adapter |
 
 Registry tasks:
 
-1. Move `careerjet` from `blocked` to `sources` with `scheduled_by_default: false`, `requires_api_key: true`, and conservative `poll_interval_min`.
-2. Add `linkedin` under `sources` with `scheduled_by_default: false`, `enabled_by_env: LINKEDIN_ENABLED`, and conservative `poll_interval_min`.
-3. Update `tyonhaku-rajapinnat.md` sections that still describe Careerjet as “not MVP” or blocked.
-4. Add tests that compare `SOURCE_NAMES`, adapter factories, scheduled-source registry, and docs registry entries for enabled/default sources.
-5. Journal source-status changes when an adapter ships.
+1. `careerjet` is listed under `sources` with `scheduled_by_default: false`, `requires_api_key: true`, and a conservative `poll_interval_min`.
+2. `linkedin` is listed under `sources` with `scheduled_by_default: false`, `enabled_by_env: LINKEDIN_ENABLED`, and a conservative `poll_interval_min`.
+3. `tyonhaku-rajapinnat.md` documents Careerjet as an optional API-key source instead of a blocked/default MVP source.
+4. Tests compare `SOURCE_NAMES`, adapter factories, scheduled-source registry, and docs registry entries for enabled/default sources.
+5. `implementation-journal.md` records the source-status changes shipped with the adapters.
 
 ---
 
@@ -194,12 +194,13 @@ scheduled or manual pipeline
   └─ matching + embeddings + LLM evaluation
 ```
 
-**Scheduler shape after Phase C (decided, not optional).** Today `build_scheduler()` registers one cron per source plus `match_recommendations`, all at the same configured time (`backend/app/scheduler.py`). After Phase C:
+**Scheduler shape after Phase C.** `build_scheduler()` now registers one cron per enabled source plus `analyze_feedback` and `run_daily_pipeline` (`backend/app/scheduler.py`):
 
 - The per-source `collect_<source>` cron jobs are **retained** at `COLLECTOR_DAILY_*` (they already have per-source overlap guards via `has_active_run()`).
-- `match_recommendations` is **removed** and replaced by a single `run_daily_pipeline` job (id: `run_daily_pipeline`) scheduled at `ENRICHMENT_DAILY_*` / learner time, which runs sequentially: enqueue enrichment → HTTP/static enrichers → bounded browser enrichers → `enrich_locations` → feedback learning (per [`feedback-learning-plan.md`](feedback-learning-plan.md) §8.3 approach B) → matching.
-- `run_daily_pipeline` takes a **DB-backed lease** recorded in `pipeline_runs` (row with `status='running'`, stale-reclaim after a timeout, mirroring `reconcile_stale_runs()`); it skips matching with a logged event if any source collection run is still `running`.
-- `expected_scheduler_job_ids()` and `prune_stale_scheduler_jobs()` are updated for the new id set (`collect_*` + `run_daily_pipeline`); the stale `match_recommendations` APScheduler row is pruned on startup.
+- `match_recommendations` is **removed** and replaced by a single `run_daily_pipeline` job (id: `run_daily_pipeline`) scheduled at `LEARNER_DAILY_*`; `analyze_feedback` remains a separate periodic worker for pending feedback rows.
+- `run_daily_pipeline` takes a **DB-backed lease** recorded in `pipeline_runs`, marks stale running pipeline rows failed before acquiring a new lease, and skips with a logged event if any source collection run is still `running`.
+- The shipped pipeline currently runs `run_enrichment()` (skips when disabled; enqueues/processes when enabled) → `enrich_locations` → feedback analysis → `learn_from_feedback` → matching.
+- `expected_scheduler_job_ids()` and `prune_stale_scheduler_jobs()` are updated for the new id set (`collect_*` + `analyze_feedback` + `run_daily_pipeline`); stale `match_recommendations`, `run_daily_pipeline`, and `analyze_feedback` APScheduler rows are pruned on startup before the current jobs are registered.
 
 Splitting steps into separate cron jobs without the lease is rejected — it recreates the current collect/match race.
 
@@ -230,8 +231,8 @@ ENRICHMENT_ENABLED=false
 ENRICHMENT_PROVIDER=browserbase    # browserbase | local | off
 ENRICHMENT_MAX_JOBS_PER_RUN=50
 ENRICHMENT_SHORT_DESCRIPTION_CHARS=200
-ENRICHMENT_DAILY_HOUR=16
-ENRICHMENT_DAILY_MINUTE=30
+LEARNER_DAILY_HOUR=16
+LEARNER_DAILY_MINUTE=45
 JOBLY_BROWSER_ENRICH_MAX_PER_RUN=20
 APPLICATION_ENRICH_MAX_PER_RUN=10
 CAREERJET_API_KEY=
@@ -349,7 +350,7 @@ A (safe browser bootstrap)
   -> H (ops docs)
 ```
 
-Do not set `ENRICHMENT_ENABLED=true` in production until Phase C and the relevant Phase D browser smoke pass.
+Keep `ENRICHMENT_ENABLED=false` in production unless the relevant source/detail enrichment path has been smoke-tested with the target provider and run caps.
 
 Do not run matching immediately after collection once enrichment is enabled. Matching should run only after the ordered pipeline finishes or a lease proves enrichment was skipped.
 
@@ -423,16 +424,3 @@ Regression invariants:
 - `implementation-journal.md`, `sources.yaml`, and `tyonhaku-rajapinnat.md` are updated when each phase ships.
 
 ---
-
-## 14. Plan Review Resolution Log
-
-Review (2026-07-05) against the live codebase. The reviewed schema had already shipped (`20260705_0009`), so fixes are specified as a corrective migration rather than plan-only wording:
-
-| # | Severity | Finding | Resolution |
-|---|---|---|---|
-| 1 | High | Enrichment modeled at `job_id` level, but `job_sources` stores multiple source occurrences per canonical job and `upsert_listing()` dedupes/relinks across sources (`backend/app/collection/runner.py`). Queue/results could enrich the wrong URL, collapse distinct source attempts, and produce unstable input hashes. Confirmed shipped: `list_enrichment_candidates()` picks the occurrence via `DISTINCT ON (j.id) … last_seen_at DESC`, so the hash flaps between sources | §4.2 `job_source_id` + `raw_listing_id` on queue/results, uniqueness on `(job_source_id, enricher, input_hash)`; §4.3 per-occurrence hash; §4.5 deterministic occurrence selection; Phase C.0 migration `20260705_0010` |
-| 2 | Medium | `job_description_state.source_id` cannot audit or preserve a description when one source has multiple raw listings or an enrichment result is superseded | §4.2: `job_source_id` XOR `job_enrichment_id` provenance FKs with CHECK constraint; backfill rules; Phase C.0 |
-| 3 | Medium | C.1 acceptance ("no existing table semantics changed") contradicted C.2/§4.4, which require changing `upsert_listing()` description behavior — implementers could use C.1 to skip the required change | C.1 reworded to scope the invariant to table DDL only; C.2 explicitly owns the `upsert_listing()` behavior change with upsert-preservation tests |
-| 4 | Medium | Scheduler cutover underspecified: plan said "prefer ordered pipeline" without defining the post-Phase-C job set vs the current per-source crons + `match_recommendations` | §5: collect crons retained, `match_recommendations` replaced by `run_daily_pipeline` with a `pipeline_runs` DB lease; `expected_scheduler_job_ids()`/pruning updated; split-without-lease explicitly rejected; Phase C.4 |
-| 5 | Medium (found this pass) | Cross-source relink leaves `job_id`-keyed enrichment rows pointing at superseded jobs | §4.2 relink/supersede semantics: rows follow `job_source_id`, `job_id` resolved by join at apply time, cancellation at runner start |
-| 6 | Low (found this pass) | Plan's §1 claimed enrichment tables/repository were missing although migration `20260705_0009` and `app/enrichers/repository.py` shipped | §1 table corrected to "shipped with defect" states |

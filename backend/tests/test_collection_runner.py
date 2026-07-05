@@ -155,8 +155,8 @@ class UpsertUnchangedConnection:
             return ScalarResult(self.existing_hash)
         if "returning id" in sql:
             return ScalarResult(123)
-        if "select js.job_id" in sql:
-            return ScalarResult(self.existing_job_id)
+        if "select js.id as job_source_id, js.job_id" in sql:
+            return ScalarResult({"job_source_id": 11, "job_id": self.existing_job_id})
         if "from job_description_state" in sql:
             return ScalarResult()
         return ScalarResult()
@@ -175,8 +175,8 @@ class RelinkCrossSourceConnection(UpsertUnchangedConnection):
             return ScalarResult(self.existing_hash)
         if "returning id" in sql:
             return ScalarResult(123)
-        if "select js.job_id" in sql:
-            return ScalarResult(self.existing_job_id)
+        if "select js.id as job_source_id, js.job_id" in sql:
+            return ScalarResult({"job_source_id": 11, "job_id": self.existing_job_id})
         if "select j.id" in sql:
             return ScalarResult(self.cross_source_job_id)
         if "from job_description_state" in sql:

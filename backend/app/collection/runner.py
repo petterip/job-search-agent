@@ -230,16 +230,20 @@ def upsert_listing(
 
     application_url = listing.application_url or listing.canonical_source_url
 
-    existing_job = connection.execute(
+    existing_source_row = connection.execute(
         sa.text(
             """
-            select js.job_id
+            select js.id as job_source_id, js.job_id
             from job_sources js
             where js.source_id = :source_id and js.external_id = :external_id
             """
         ),
         {"source_id": source_id, "external_id": listing.external_id},
-    ).scalar_one_or_none()
+    ).mappings().one_or_none()
+    existing_job = existing_source_row["job_id"] if existing_source_row is not None else None
+    existing_job_source_id = (
+        int(existing_source_row["job_source_id"]) if existing_source_row is not None else None
+    )
 
     relinked_to_cross_source = False
     if existing_job is not None:
@@ -299,40 +303,7 @@ def upsert_listing(
                     "published_at": listing.published_at,
                 },
             ).scalar_one()
-            if listing.description and listing.description.strip():
-                record_source_provenance(
-                    connection,
-                    job_id=int(job_id),
-                    source_id=source_id,
-                )
-        elif listing.description and listing.description.strip():
-            effective_description = preserve_enriched_description_on_upsert(
-                connection,
-                job_id=int(job_id),
-                source_description=listing.description,
-                source_id=source_id,
-            )
-            connection.execute(
-                sa.text(
-                    """
-                    update jobs
-                    set description = coalesce(:effective_description, jobs.description),
-                        employer = coalesce(jobs.employer, :employer),
-                        updated_at = case
-                            when jobs.description is null and :effective_description is not null then now()
-                            when jobs.employer is null and :employer is not null then now()
-                            else jobs.updated_at
-                        end
-                    where id = :job_id
-                    """
-                ),
-                {
-                    "job_id": job_id,
-                    "effective_description": effective_description,
-                    "employer": listing.employer,
-                },
-            )
-        connection.execute(
+        inserted_job_source_id = connection.execute(
             sa.text(
                 """
                 insert into job_sources (
@@ -355,6 +326,7 @@ def upsert_listing(
                     :last_content_hash,
                     now()
                 )
+                returning id
                 """
             ),
             {
@@ -366,15 +338,51 @@ def upsert_listing(
                 "attribution": listing.attribution,
                 "last_content_hash": listing.content_hash,
             },
-        )
+        ).scalar_one()
+        if listing.description and listing.description.strip():
+            if result == "inserted":
+                record_source_provenance(
+                    connection,
+                    job_id=int(job_id),
+                    job_source_id=int(inserted_job_source_id),
+                )
+            elif job_id is not None:
+                effective_description = preserve_enriched_description_on_upsert(
+                    connection,
+                    job_id=int(job_id),
+                    source_description=listing.description,
+                    job_source_id=int(inserted_job_source_id),
+                )
+                connection.execute(
+                    sa.text(
+                        """
+                        update jobs
+                        set description = coalesce(:effective_description, jobs.description),
+                            employer = coalesce(jobs.employer, :employer),
+                            updated_at = case
+                                when jobs.description is null and :effective_description is not null then now()
+                                when jobs.employer is null and :employer is not null then now()
+                                else jobs.updated_at
+                            end
+                        where id = :job_id
+                        """
+                    ),
+                    {
+                        "job_id": job_id,
+                        "effective_description": effective_description,
+                        "employer": listing.employer,
+                    },
+                )
         return result
 
     if existing_hash == listing.content_hash:
+        if existing_job_source_id is None:
+            raise RuntimeError("existing job_sources row is missing id")
         effective_description = preserve_enriched_description_on_upsert(
             connection,
             job_id=int(existing_job),
             source_description=listing.description,
-            source_id=source_id,
+            job_source_id=existing_job_source_id,
         )
         connection.execute(
             sa.text(
@@ -429,11 +437,13 @@ def upsert_listing(
         )
         return "deduplicated" if relinked_to_cross_source else "unchanged"
 
+    if existing_job_source_id is None:
+        raise RuntimeError("existing job_sources row is missing id")
     effective_description = preserve_enriched_description_on_upsert(
         connection,
         job_id=int(existing_job),
         source_description=listing.description,
-        source_id=source_id,
+        job_source_id=existing_job_source_id,
     )
     connection.execute(
         sa.text(

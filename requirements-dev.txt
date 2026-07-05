@@ -1,3 +1,6 @@
+# Backend test tooling (also declared in backend/pyproject.toml dev extras)
+pytest-timeout>=2.3,<3
+
 # Optional dependencies for exploratory scrape-test scripts (not required for regression_test.py)
 playwright>=1.40
 cloudscraper>=1.2.71

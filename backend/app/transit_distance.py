@@ -491,9 +491,9 @@ def store_transit_failure(
         logger.warning("event=transit_distance_failure_cache_write_failed")
 
 
-def resolve_transit_for_locations(
+def resolve_transit_for_queries(
     connection: Connection,
-    locations: list[str | None],
+    destination_queries: list[str],
     *,
     max_lookups: int = 20,
 ) -> dict[str, TransitDistanceResult | None]:
@@ -502,6 +502,62 @@ def resolve_transit_for_locations(
         return {}
 
     origin = settings.transit_origin_address or DEFAULT_ORIGIN
+    unique_queries: list[str] = []
+    seen: set[str] = set()
+    for query in destination_queries:
+        if query and query not in seen:
+            seen.add(query)
+            unique_queries.append(query)
+
+    if not unique_queries:
+        return {}
+
+    cached = fetch_cached_transit_distances(
+        connection,
+        origin_address=origin,
+        destination_queries=unique_queries,
+    )
+    recent_failures = fetch_recent_transit_failures(
+        connection,
+        origin_address=origin,
+        destination_queries=unique_queries,
+    )
+    results: dict[str, TransitDistanceResult | None] = {}
+    lookups = 0
+    for query in unique_queries:
+        if query in cached:
+            results[query] = cached[query]
+            continue
+        if query in recent_failures:
+            results[query] = None
+            continue
+        if lookups >= max_lookups:
+            results[query] = None
+            continue
+        try:
+            transit = compute_transit_distance(query.removesuffix(", Finland"), origin=origin)
+        except TransitDistanceError as exc:
+            logger.info("event=transit_distance_lookup_failed query=%s error=%s", query, exc)
+            store_transit_failure(
+                connection,
+                origin_address=origin,
+                destination_query=query,
+                reason=str(exc),
+            )
+            results[query] = None
+            continue
+        store_cached_transit_distance(connection, transit)
+        results[query] = transit
+        lookups += 1
+    return results
+
+
+def resolve_transit_for_locations(
+    connection: Connection,
+    locations: list[str | None],
+    *,
+    max_lookups: int = 20,
+) -> dict[str, TransitDistanceResult | None]:
     query_to_location: dict[str, str] = {}
     for location in locations:
         if not location:
@@ -513,42 +569,13 @@ def resolve_transit_for_locations(
     if not query_to_location:
         return {}
 
-    cached = fetch_cached_transit_distances(
+    by_query = resolve_transit_for_queries(
         connection,
-        origin_address=origin,
-        destination_queries=list(query_to_location.keys()),
+        list(query_to_location.keys()),
+        max_lookups=max_lookups,
     )
-    recent_failures = fetch_recent_transit_failures(
-        connection,
-        origin_address=origin,
-        destination_queries=list(query_to_location.keys()),
-    )
-    results: dict[str, TransitDistanceResult | None] = {}
-    lookups = 0
-    for query, location in query_to_location.items():
-        if query in cached:
-            results[location] = cached[query]
-            continue
-        if query in recent_failures:
-            results[location] = None
-            continue
-        if lookups >= max_lookups:
-            results[location] = None
-            continue
-        try:
-            transit = compute_transit_distance(location, origin=origin)
-        except TransitDistanceError as exc:
-            logger.info("event=transit_distance_lookup_failed location=%s error=%s", location, exc)
-            store_transit_failure(
-                connection,
-                origin_address=origin,
-                destination_query=query,
-                reason=str(exc),
-            )
-            results[location] = None
-            continue
-        store_cached_transit_distance(connection, transit)
-        results[location] = transit
-        lookups += 1
-    return results
+    return {
+        query_to_location[query]: transit
+        for query, transit in by_query.items()
+    }
 

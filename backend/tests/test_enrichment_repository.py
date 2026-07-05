@@ -10,6 +10,7 @@ from app.enrichers.repository import (
     preserve_enriched_description_on_upsert,
 )
 from app.enrichers.runner import run_enrichment
+from app.enrichers import runner as runner_module
 
 
 class ScalarResult:
@@ -55,14 +56,19 @@ class ProvenanceConnection:
                 {
                     "job_id": params["job_id"] if params else None,
                     "provenance": self.provenance,
-                    "source_id": 1,
+                    "job_source_id": 10,
+                    "job_enrichment_id": None,
                     "enricher": None,
                     "input_hash": None,
                     "confidence": None,
                 }
             )
+        if "from job_sources" in sql and "join jobs" in sql:
+            return ScalarResult({"job_id": 42, "raw_listing_id": 99, "status": "active"})
         if "select description from jobs" in sql:
             return ScalarResult(self.description)
+        if "insert into job_enrichments" in sql:
+            return ScalarResult(777)
         return ScalarResult()
 
 
@@ -107,7 +113,7 @@ def test_preserve_enriched_keeps_existing_when_source_has_no_body() -> None:
         connection,  # type: ignore[arg-type]
         job_id=42,
         source_description=None,
-        source_id=3,
+        job_source_id=10,
     )
 
     assert preserved == "Enriched body that must survive source re-collection."
@@ -121,7 +127,7 @@ def test_preserve_enriched_records_source_provenance_when_source_provides_body()
         connection,  # type: ignore[arg-type]
         job_id=42,
         source_description="New source-provided description.",
-        source_id=3,
+        job_source_id=10,
     )
 
     assert preserved == "New source-provided description."
@@ -135,6 +141,8 @@ def test_apply_enrichment_result_does_not_replace_adequate_source_description() 
     )
     result = EnrichmentResult(
         job_id=42,
+        job_source_id=10,
+        raw_listing_id=99,
         enricher="detail_http",
         input_hash="hash-1",
         description="Much longer enriched body that should not replace an adequate source description.",
@@ -172,3 +180,25 @@ def test_run_enrichment_enqueue_only_skips_when_disabled(monkeypatch: pytest.Mon
     result = run_enrichment(enqueue_only=True)
 
     assert result["status"] == "skipped"
+
+
+def test_jobly_browser_dry_run_uses_browser_cap_and_jobly_source(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("ENRICHMENT_ENABLED", "false")
+    monkeypatch.setenv("JOBLY_BROWSER_ENRICH_MAX_PER_RUN", "7")
+    from app.config import get_settings
+
+    get_settings.cache_clear()
+    calls: list[dict[str, object]] = []
+
+    def fake_plan(**kwargs: object) -> dict[str, object]:
+        calls.append(kwargs)
+        return {"candidate_count": 0, "actions": []}
+
+    monkeypatch.setattr(runner_module, "plan_enrichment_actions", fake_plan)
+
+    result = run_enrichment(dry_run=True, enricher="jobly_browser", max_jobs=50)
+
+    assert result["status"] == "dry_run"
+    assert calls == [{"enricher": "jobly_browser", "source": "jobly", "max_jobs": 7}]

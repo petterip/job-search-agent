@@ -5,6 +5,7 @@ import sqlalchemy as sa
 from app.location_evidence_service import (
     LocationEvidenceView,
     enrich_location_evidence,
+    resolve_location_evidence_for_job,
 )
 from app.transit_distance import (
     LocationEvidence,
@@ -52,12 +53,46 @@ def test_build_location_evidence_remote_skips_transit_lookup_message():
     assert "joustava" in evidence.text
 
 
-def test_enrich_location_evidence_prefers_fresh_transit_over_stored(monkeypatch):
+def test_enrich_location_evidence_respects_stored_travel_policy_evidence(monkeypatch):
     connection = MagicMock()
     stored = LocationEvidenceView(
-        text="Helsinki · julkisen liikenteen matka Oulusta ei tiedossa",
-        tone="warning",
+        text="Oulu · kotikaupunki",
+        tone="good",
     )
+    monkeypatch.setattr(
+        "app.location_evidence_service.resolve_transit_for_locations",
+        lambda *_args, **_kwargs: {
+            "Oulu": TransitDistanceResult(
+                origin="Jalkatie 2, Oulu, Finland",
+                destination="Oulu",
+                destination_query="Oulu, Finland",
+                distance_meters=9_000,
+                distance_km=9,
+                duration_seconds=2_100,
+                duration_text="35 min",
+                summary_text="9 km · 35 min (julkiset)",
+            )
+        },
+    )
+    monkeypatch.setattr(
+        "app.location_evidence_service.build_location_evidence",
+        lambda _location, _transit: LocationEvidence(
+            text="should not override",
+            tone="warning",
+        ),
+    )
+
+    enriched = enrich_location_evidence(
+        connection,
+        [_RecommendationStub(location="Oulu", location_evidence=stored)],
+        max_lookups=1,
+    )
+
+    assert enriched[0].location_evidence == stored
+
+
+def test_enrich_location_evidence_fills_missing_stored_evidence(monkeypatch):
+    connection = MagicMock()
     fresh = LocationEvidence(
         text="Helsinki · 687 km · 7 h 18 min (julkiset)",
         tone="bad",
@@ -84,7 +119,7 @@ def test_enrich_location_evidence_prefers_fresh_transit_over_stored(monkeypatch)
 
     enriched = enrich_location_evidence(
         connection,
-        [_RecommendationStub(location="Helsinki", location_evidence=stored)],
+        [_RecommendationStub(location="Helsinki", location_evidence=None)],
         max_lookups=1,
     )
 
@@ -92,6 +127,16 @@ def test_enrich_location_evidence_prefers_fresh_transit_over_stored(monkeypatch)
         text=fresh.text,
         tone=fresh.tone,
     )
+
+
+def test_resolve_location_evidence_for_job_prefers_travel_policy_fallback() -> None:
+    fallback = LocationEvidenceView(text="Helsinki · kokopäiväinen etätyö", tone="good")
+    evidence = resolve_location_evidence_for_job(
+        MagicMock(),
+        "Helsinki / Etä",
+        fallback=fallback,
+    )
+    assert evidence == fallback
 
 
 def test_fetch_cached_transit_distances_uses_savepoint_instead_of_full_rollback():
