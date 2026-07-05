@@ -1,4 +1,4 @@
-.PHONY: test test-regression test-smoke test-incremental test-eures test-spike-kuntarekry test-backend test-web audit-db backup-db restore-db docker-config browserbase-check transit-distance-check help
+.PHONY: test test-regression test-smoke test-incremental test-eures test-spike-kuntarekry test-backend test-web audit-db repair-urls backup-db restore-db docker-config browserbase-check transit-distance-check help
 
 help:
 	@echo "Targets:"
@@ -10,6 +10,7 @@ help:
 	@echo "  test-backend     Backend pytest suite"
 	@echo "  test-web         Web typecheck and build"
 	@echo "  audit-db         Run database consistency audit in the API container"
+	@echo "  repair-urls      Backfill broken Duunitori/TMT announcement URLs in the DB"
 	@echo "  backup-db        Write PostgreSQL custom-format backup to backups/"
 	@echo "  restore-db       Restore BACKUP=backups/file.dump into PostgreSQL"
 	@echo "  docker-config    Validate compose.yaml"
@@ -42,6 +43,9 @@ test-web:
 
 audit-db:
 	docker compose exec api python -m app.audit
+
+repair-urls:
+	docker compose exec api python -m app.repair_urls
 
 backup-db:
 	mkdir -p backups

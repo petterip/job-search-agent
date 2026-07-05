@@ -1,3 +1,5 @@
+import Link from "next/link";
+
 import { RecommendationActionBadge, RecommendationEvidence, ScoreBadge } from "./ui";
 
 type HealthResponse = {
@@ -292,7 +294,7 @@ export default async function Home({ searchParams }: PageProps) {
                   </div>
                   <div className="recommendation-grid">
                     {categoryItems.map((item) => (
-                      <article className="recommendation-card" key={item.id}>
+                      <Link className="recommendation-card" href={`/tyopaikat/${item.job_id}`} key={item.id}>
                         <div className="recommendation-card-topline">
                           <ScoreBadge rank={item.rank} score={item.llm_score ?? item.machine_score} />
                           <RecommendationActionBadge value={item.suggested_action} />
@@ -311,10 +313,7 @@ export default async function Home({ searchParams }: PageProps) {
                           rationale={item.rationale}
                           score={item.llm_score ?? item.machine_score}
                         />
-                        <a className="apply-link" href={`/tyopaikat/${item.job_id}`}>
-                          Katso
-                        </a>
-                      </article>
+                      </Link>
                     ))}
                   </div>
                 </section>
@@ -356,23 +355,25 @@ export default async function Home({ searchParams }: PageProps) {
           ) : (
             items.map((job) => (
               <article className="job-row" key={job.id}>
-                <div>
+                <Link className="job-row-link" href={`/tyopaikat/${job.id}`}>
                   <p className="job-meta">{formatDate(job.published_at)}</p>
                   <h2>{job.title}</h2>
                   <p className="job-employer">{job.employer ?? "Työnantaja ei tiedossa"}</p>
                   <p className="job-location">{job.location ?? "Sijainti ei tiedossa"}</p>
                   <p className="job-sources">{job.source_names.join(", ")}</p>
-                </div>
-                <div className="job-row-actions">
-                  {job.application_url ? (
-                    <a className="apply-link apply-link-primary" href={job.application_url} rel="noreferrer" target="_blank">
+                </Link>
+                {job.application_url ? (
+                  <div className="job-row-actions">
+                    <a
+                      className="apply-link apply-link-primary"
+                      href={job.application_url}
+                      rel="noreferrer"
+                      target="_blank"
+                    >
                       Ilmoitus
                     </a>
-                  ) : null}
-                  <a className="apply-link" href={`/tyopaikat/${job.id}`}>
-                    Katso
-                  </a>
-                </div>
+                  </div>
+                ) : null}
               </article>
             ))
           )}

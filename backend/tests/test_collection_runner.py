@@ -202,6 +202,7 @@ def test_upsert_unchanged_listing_reactivates_removed_job() -> None:
     assert result == "unchanged"
     assert "status = 'active'" in executed_sql
     assert "sijainti ei tiedossa" in executed_sql
+    assert "application_url = :application_url" in executed_sql
 
 
 def test_upsert_existing_source_listing_relinks_to_cross_source_duplicate() -> None:

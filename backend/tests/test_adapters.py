@@ -23,7 +23,7 @@ from app.adapters.talentech import (
     normalize_talentech_summary,
     parse_talentech_publication,
 )
-from app.adapters.tmt import TmtAdapter, tmt_description, tmt_employer_name, tmt_location, tmt_title
+from app.adapters.tmt import TmtAdapter, tmt_description, tmt_detail_url, tmt_employer_name, tmt_location, tmt_title
 from app.adapters.tmt_oulu import TmtOuluAdapter
 from app.config import get_settings
 from app.adapters.varbi import (
@@ -53,6 +53,8 @@ def test_duunitori_normalize_maps_listing_fields() -> None:
     assert listing.location == "Oulu"
     assert listing.published_at is not None
     assert listing.content_hash
+    assert listing.application_url == "https://duunitori.fi/tyopaikat/tyo/test-slug"
+    assert listing.canonical_source_url == listing.application_url
 
 
 def test_duunitori_normalize_falls_back_to_scope_and_remote_mode() -> None:
@@ -160,6 +162,8 @@ def test_tmt_normalize_maps_listing_fields() -> None:
     assert listing.employer == "RM Two Oy"
     assert listing.location == "Tampere"
     assert listing.attribution == "Lähde: Työmarkkinatorin asiakastietojärjestelmä"
+    assert listing.application_url == tmt_detail_url("abc-123")
+    assert listing.canonical_source_url == listing.application_url
     assert tmt_title({"en": "Developer"}) == "Developer"
 
 

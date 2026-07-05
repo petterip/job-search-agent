@@ -23,6 +23,13 @@ def tmt_title(title_obj: dict) -> str:
     )
 
 
+def tmt_detail_url(external_id: str) -> str:
+    return (
+        "https://tyomarkkinatori.fi/henkiloasiakkaat/avoimet-tyopaikat/details/"
+        f"?id={external_id}"
+    )
+
+
 def tmt_localized(values_obj: dict | None) -> str | None:
     if not values_obj:
         return None
@@ -201,15 +208,11 @@ class TmtAdapter:
         external_id = str(payload["id"])
         published_raw = payload.get("publishDate") or payload.get("created")
         published_at = isoparse(published_raw) if published_raw else None
-        application_url = tmt_localized(payload.get("applicationUrl"))
-        canonical_source_url = (
-            application_url
-            or f"https://tyomarkkinatori.fi/henkiloasiakkaat/avoimet-tyopaikat/details/?id={external_id}"
-        )
+        detail_url = tmt_detail_url(external_id)
 
         return NormalizedListing(
             external_id=external_id,
-            canonical_source_url=canonical_source_url,
+            canonical_source_url=detail_url,
             title=str(tmt_title(payload.get("title", {}))).strip(),
             employer=tmt_employer_name(payload.get("employer")),
             description=tmt_description(payload),
@@ -218,5 +221,5 @@ class TmtAdapter:
             content_hash=payload_content_hash(payload),
             payload=payload,
             attribution=self.attribution,
-            application_url=application_url,
+            application_url=detail_url,
         )

@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+import json
 from typing import Any, Literal
 
 import sqlalchemy as sa
@@ -15,6 +16,7 @@ from app.location_evidence_service import (
     resolve_location_evidence_for_job,
 )
 from app.logging import configure_logging
+from app.source_links import source_external_apply_url
 
 configure_logging()
 
@@ -54,6 +56,7 @@ class JobListResponse(BaseModel):
 class JobSourceItem(BaseModel):
     source_name: str
     application_url: str | None
+    external_apply_url: str | None = None
     attribution: str | None
     last_seen_at: datetime
 
@@ -395,9 +398,11 @@ async def get_job(job_id: int) -> JobDetailResponse:
                     s.name as source_name,
                     js.application_url,
                     js.attribution,
-                    js.last_seen_at
+                    js.last_seen_at,
+                    rl.payload
                 from job_sources js
                 join sources s on s.id = js.source_id
+                join raw_listings rl on rl.id = js.raw_listing_id
                 where js.job_id = :job_id
                   and s.enabled = true
                 order by js.last_seen_at desc, s.name
@@ -405,7 +410,24 @@ async def get_job(job_id: int) -> JobDetailResponse:
             ),
             {"job_id": job_id},
         ).mappings()
-        sources = [JobSourceItem(**source_row) for source_row in source_rows]
+        sources = []
+        for source_row in source_rows:
+            payload = source_row["payload"]
+            if isinstance(payload, str):
+                payload = json.loads(payload)
+            sources.append(
+                JobSourceItem(
+                    source_name=source_row["source_name"],
+                    application_url=source_row["application_url"],
+                    external_apply_url=source_external_apply_url(
+                        source_row["source_name"],
+                        payload if isinstance(payload, dict) else None,
+                        source_row["application_url"],
+                    ),
+                    attribution=source_row["attribution"],
+                    last_seen_at=source_row["last_seen_at"],
+                )
+            )
 
         recommendation_row = connection.execute(
             sa.text(

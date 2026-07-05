@@ -15,6 +15,10 @@ from app.config import get_settings
 from app.location import append_work_mode, detect_work_mode, infer_city_from_text
 
 
+def duunitori_job_url(slug: str) -> str:
+    return f"https://duunitori.fi/tyopaikat/tyo/{slug}"
+
+
 @dataclass(frozen=True)
 class DuunitoriFetchResult:
     payloads: list[dict]
@@ -134,9 +138,11 @@ class DuunitoriAdapter:
         published_raw = payload.get("date_posted")
         published_at = isoparse(published_raw) if published_raw else None
 
+        job_url = duunitori_job_url(slug)
+
         return NormalizedListing(
             external_id=slug,
-            canonical_source_url=f"https://duunitori.fi/tyopaikat/{slug}",
+            canonical_source_url=job_url,
             title=str(payload.get("heading") or "").strip(),
             employer=(payload.get("company_name") or None),
             description=(payload.get("descr") or None),
@@ -149,5 +155,5 @@ class DuunitoriAdapter:
             published_at=published_at,
             content_hash=payload_content_hash(payload),
             payload=payload,
-            application_url=f"https://duunitori.fi/tyopaikat/{slug}",
+            application_url=job_url,
         )

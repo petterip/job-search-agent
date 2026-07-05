@@ -4,6 +4,7 @@ import { JobDescription, RecommendationActionBadge, RecommendationEvidence, Scor
 type JobSourceItem = {
   source_name: string;
   application_url: string | null;
+  external_apply_url: string | null;
   attribution: string | null;
   last_seen_at: string;
 };
@@ -73,6 +74,8 @@ export default async function JobPage({ params }: PageProps) {
     notFound();
   }
   const primaryApplicationUrl = job.sources.find((source) => source.application_url)?.application_url ?? null;
+  const primaryExternalApplyUrl =
+    job.sources.find((source) => source.external_apply_url)?.external_apply_url ?? null;
 
   return (
     <main className="app-shell">
@@ -105,9 +108,16 @@ export default async function JobPage({ params }: PageProps) {
             </div>
           </dl>
           {primaryApplicationUrl ? (
-            <a className="apply-link apply-link-primary detail-apply-link" href={primaryApplicationUrl} rel="noreferrer" target="_blank">
-              Katso hakuilmoitus
-            </a>
+            <div className="job-row-actions detail-apply-link">
+              <a className="apply-link apply-link-primary" href={primaryApplicationUrl} rel="noreferrer" target="_blank">
+                Katso hakuilmoitus
+              </a>
+              {primaryExternalApplyUrl ? (
+                <a className="apply-link" href={primaryExternalApplyUrl} rel="noreferrer" target="_blank">
+                  Hae työnantajan sivulla
+                </a>
+              ) : null}
+            </div>
           ) : null}
         </header>
 
@@ -156,19 +166,26 @@ export default async function JobPage({ params }: PageProps) {
           <h2 id="sources-heading">Lähteet ja hakulinkit</h2>
           <div className="source-list">
             {job.sources.map((source) => (
-              <div className="source-row" key={`${source.source_name}-${source.application_url ?? ""}`}>
+              <div className="source-row" key={`${source.source_name}-${source.last_seen_at}`}>
                 <div>
                   <p className="job-employer">{source.source_name}</p>
                   <p className="job-meta">Viimeksi nähty {formatDate(source.last_seen_at)}</p>
                   {source.attribution ? <p className="job-sources">{source.attribution}</p> : null}
                 </div>
-                {source.application_url ? (
-                  <a className="apply-link" href={source.application_url} rel="noreferrer" target="_blank">
-                    Katso hakuilmoitus
-                  </a>
-                ) : (
-                  <span className="apply-link is-disabled">Ei linkkiä</span>
-                )}
+                <div className="job-row-actions">
+                  {source.application_url ? (
+                    <a className="apply-link" href={source.application_url} rel="noreferrer" target="_blank">
+                      Katso hakuilmoitus
+                    </a>
+                  ) : (
+                    <span className="apply-link is-disabled">Ei linkkiä</span>
+                  )}
+                  {source.external_apply_url ? (
+                    <a className="apply-link" href={source.external_apply_url} rel="noreferrer" target="_blank">
+                      Hae työnantajan sivulla
+                    </a>
+                  ) : null}
+                </div>
               </div>
             ))}
           </div>

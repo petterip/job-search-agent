@@ -213,6 +213,7 @@ def upsert_listing(
             on conflict (source_id, external_id) where external_id is not null
             do update set
                 content_hash = excluded.content_hash,
+                canonical_source_url = excluded.canonical_source_url,
                 payload = excluded.payload,
                 last_seen_at = now()
             returning id
@@ -379,11 +380,16 @@ def upsert_listing(
             sa.text(
                 """
                 update job_sources
-                set last_seen_at = now()
+                set last_seen_at = now(),
+                    application_url = :application_url
                 where source_id = :source_id and external_id = :external_id
                 """
             ),
-            {"source_id": source_id, "external_id": listing.external_id},
+            {
+                "source_id": source_id,
+                "external_id": listing.external_id,
+                "application_url": application_url,
+            },
         )
         connection.execute(
             sa.text(

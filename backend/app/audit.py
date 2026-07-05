@@ -138,6 +138,28 @@ def run_database_audit(connection: Connection) -> dict[str, Any]:
             connection,
             "select count(*) from recommendation_feedback",
         ),
+        "broken_duunitori_urls": scalar_int(
+            connection,
+            """
+            select count(*)
+            from job_sources js
+            join sources s on s.id = js.source_id
+            where s.name = 'duunitori'
+              and js.application_url like 'https://duunitori.fi/tyopaikat/%'
+              and js.application_url not like 'https://duunitori.fi/tyopaikat/tyo/%'
+            """,
+        ),
+        "tmt_urls_not_on_portal": scalar_int(
+            connection,
+            """
+            select count(*)
+            from job_sources js
+            join sources s on s.id = js.source_id
+            where s.name in ('tmt', 'tmt_oulu')
+              and js.application_url is not null
+              and js.application_url not like 'https://tyomarkkinatori.fi/%'
+            """,
+        ),
     }
 
 
