@@ -134,6 +134,90 @@ def test_recompute_learned_state_promotes_boost_and_exclusion_terms() -> None:
     assert changes["learned_version"] == 1
 
 
+def test_recompute_learned_state_preserves_term_first_seen() -> None:
+    from app.config import get_settings
+
+    profile = {
+        "preferences": {},
+        "role_clusters": [],
+        "learned": {
+            "version": 3,
+            "term_provenance": {
+                "kirjastopedagogi": {
+                    "net_weight": 0.5,
+                    "jobs": [1],
+                    "first_seen": "2026-01-01",
+                }
+            },
+        },
+    }
+    rows = [
+        {
+            "id": 1,
+            "job_id": 10,
+            "rating": 5,
+            "applied": False,
+            "comment": None,
+            "analysis_status": "skipped",
+            "created_at": datetime(2026, 3, 4, tzinfo=timezone.utc),
+            "analysis": None,
+            "scoring_snapshot": {
+                "job_id": 10,
+                "title": "Hallintosihteeri",
+                "employer": "Kaupunki",
+                "location": "Oulu",
+                "keyword_matches": ["kirjastopedagogi"],
+            },
+        },
+        {
+            "id": 2,
+            "job_id": 11,
+            "rating": 5,
+            "applied": False,
+            "comment": None,
+            "analysis_status": "skipped",
+            "created_at": datetime(2026, 4, 5, tzinfo=timezone.utc),
+            "analysis": None,
+            "scoring_snapshot": {
+                "job_id": 11,
+                "title": "Hallintovirkailija",
+                "employer": "Kunta",
+                "location": "Oulu",
+                "keyword_matches": ["kirjastopedagogi"],
+            },
+        },
+    ]
+    for index in range(8):
+        rows.append(
+            {
+                "id": 10 + index,
+                "job_id": 20 + index,
+                "rating": 3,
+                "applied": False,
+                "comment": None,
+                "analysis_status": "skipped",
+                "created_at": datetime(2026, 5, 1, tzinfo=timezone.utc),
+                "analysis": None,
+                "scoring_snapshot": {
+                    "job_id": 20 + index,
+                    "title": "Projektisihteeri",
+                    "employer": "Yhdistys",
+                    "location": "Helsinki",
+                    "keyword_matches": ["projekti"],
+                },
+            }
+        )
+
+    updated_profile, _changes = recompute_learned_state(
+        rows=rows,
+        profile=profile,
+        settings=get_settings(),
+    )
+
+    provenance = updated_profile["learned"]["term_provenance"]["kirjastopedagogi"]
+    assert provenance["first_seen"] == "2026-01-01"
+
+
 def test_learned_exclusion_penalty_is_soft_not_hard_reject() -> None:
     profile = {
         "learned": {

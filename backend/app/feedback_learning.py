@@ -284,7 +284,7 @@ def build_few_shot_examples(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
             )
             if employer:
                 seen_employers.add(employer)
-        elif rating == 1 and len(negatives) < 2:
+        elif rating <= 2 and len(negatives) < 2:
             if employer and employer in seen_employers:
                 continue
             negatives.append(
@@ -333,6 +333,9 @@ def recompute_learned_state(
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     profile_summary = minimized_profile_summary(profile)
     previous = learned_state(profile)
+    previous_term_provenance = previous.get("term_provenance") or {}
+    if not isinstance(previous_term_provenance, dict):
+        previous_term_provenance = {}
     previous_exclusions = set(learned_exclusions(profile).get("terms_fi", []))
     term_nets: dict[str, float] = defaultdict(float)
     term_jobs: dict[str, set[int]] = defaultdict(set)
@@ -430,10 +433,23 @@ def recompute_learned_state(
         if term in frequent_terms or term in _generic_match_terms():
             continue
         jobs = term_jobs[term]
+        previous_first_seen = None
+        previous_term = previous_term_provenance.get(term)
+        if isinstance(previous_term, dict):
+            previous_first_seen = previous_term.get("first_seen")
+        first_seen = previous_first_seen or min(
+            (
+                row["created_at"].date().isoformat()
+                for row in rows
+                if int(row.get("job_id") or 0) in jobs
+                and isinstance(row.get("created_at"), datetime)
+            ),
+            default=datetime.now(timezone.utc).date().isoformat(),
+        )
         term_provenance[term] = {
             "net_weight": round(net, 3),
             "jobs": sorted(jobs),
-            "first_seen": datetime.now(timezone.utc).date().isoformat(),
+            "first_seen": first_seen,
         }
         if net >= BOOST_PROMOTION_THRESHOLD - THRESHOLD_EPSILON and len(jobs) >= BOOST_MIN_JOBS:
             title_like = any(

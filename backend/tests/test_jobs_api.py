@@ -148,6 +148,10 @@ class MappingRows:
     def one_or_none(self) -> dict[str, Any] | None:
         return self.rows[0] if self.rows else None
 
+    def one(self) -> dict[str, Any]:
+        assert self.rows
+        return self.rows[0]
+
 
 class SourceStatusConnection:
     def __enter__(self) -> "SourceStatusConnection":
@@ -171,6 +175,19 @@ class SourceStatusConnection:
                         "applied_count": 2,
                         "failed_count": 0,
                         "error_summary": None,
+                    }
+                ]
+            )
+        if "from enrichment_queue" in sql:
+            return MappingRows(
+                [
+                    {
+                        "queued_count": 2,
+                        "running_count": 1,
+                        "retry_count": 1,
+                        "failed_count": 0,
+                        "stale_running_count": 1,
+                        "oldest_due_at": datetime(2026, 6, 20, 12, 0, tzinfo=timezone.utc),
                     }
                 ]
             )
@@ -292,6 +309,47 @@ class FeedbackEngine:
         return self.connection
 
 
+class RecommendationListConnection:
+    def __init__(self) -> None:
+        self.params: list[dict[str, Any] | None] = []
+        self.statements: list[str] = []
+
+    def __enter__(self) -> "RecommendationListConnection":
+        return self
+
+    def __exit__(self, *args: Any) -> None:
+        return None
+
+    def execute(self, statement: object, parameters: dict[str, Any] | None = None) -> Any:
+        sql = str(statement).lower()
+        self.statements.append(sql)
+        self.params.append(parameters)
+        if "count(*) filter" in sql:
+            return MappingRows(
+                [
+                    {
+                        "commutable": 3,
+                        "commutable_or_full_remote": 5,
+                        "nationwide": 8,
+                    }
+                ]
+            )
+        if "select count(*)" in sql:
+            return ScalarResult(0)
+        return MappingRows([])
+
+    def commit(self) -> None:
+        return None
+
+
+class RecommendationListEngine:
+    def __init__(self) -> None:
+        self.connection = RecommendationListConnection()
+
+    def connect(self) -> RecommendationListConnection:
+        return self.connection
+
+
 def test_get_job_returns_404_for_missing_job(monkeypatch: Any) -> None:
     monkeypatch.setattr(main_module, "get_engine", lambda: EmptyEngine())
 
@@ -338,6 +396,14 @@ def test_source_status_endpoint_returns_latest_run_summary(monkeypatch: Any) -> 
             "failed_count": 0,
             "error_summary": None,
         },
+        "enrichment_queue": {
+            "queued_count": 2,
+            "running_count": 1,
+            "retry_count": 1,
+            "failed_count": 0,
+            "stale_running_count": 1,
+            "oldest_due_at": "2026-06-20T12:00:00Z",
+        },
     }
 
 
@@ -380,7 +446,7 @@ def test_recommendation_feedback_endpoint_creates_feedback(monkeypatch: Any) -> 
         "action": "good_match",
     }
     assert any("on conflict (recommendation_id)" in statement for statement in engine.connection.statements)
-    assert not any("set is_active = false" in statement for statement in engine.connection.statements)
+    assert any("set is_active = true" in statement for statement in engine.connection.statements)
 
 
 def test_recommendation_feedback_rating_one_hides_recommendation(monkeypatch: Any) -> None:
@@ -390,6 +456,20 @@ def test_recommendation_feedback_rating_one_hides_recommendation(monkeypatch: An
     response = TestClient(app).post(
         "/recommendations/7/feedback",
         json={"rating": 1, "applied": False},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["recommendation_hidden"] is True
+    assert any("set is_active = false" in statement for statement in engine.connection.statements)
+
+
+def test_recommendation_feedback_rating_two_hides_recommendation(monkeypatch: Any) -> None:
+    engine = FeedbackEngine()
+    monkeypatch.setattr(main_module, "get_engine", lambda: engine)
+
+    response = TestClient(app).post(
+        "/recommendations/7/feedback",
+        json={"rating": 2, "applied": False},
     )
 
     assert response.status_code == 200
@@ -408,6 +488,7 @@ def test_recommendation_feedback_rerate_unhides_recommendation(monkeypatch: Any)
 
     assert response.status_code == 200
     assert any("set is_active = true" in statement for statement in engine.connection.statements)
+    assert any("set nationwide_rank" in statement for statement in engine.connection.statements)
 
 
 def test_recommendation_feedback_legacy_action_mapping(monkeypatch: Any) -> None:
@@ -510,12 +591,44 @@ def test_recommendation_scope_sql_maps_filters_and_order() -> None:
     nationwide_filter, nationwide_order = recommendation_scope_sql("nationwide")
 
     assert "r.commutable = true" in commutable_filter
+    assert "r.travel_reason_code = 'exact_home_city'" in commutable_filter
+    assert "r.travel_origin_address = :travel_origin_address" in commutable_filter
     assert "r.commutable_rank" in commutable_order
     assert "r.commutable_or_full_remote = true" in remote_filter
+    assert "r.travel_reason_code in ('exact_home_city', 'full_remote')" in remote_filter
+    assert "r.travel_commute_limit_minutes = :travel_commute_limit_minutes" in remote_filter
+    assert "r.commutable = false and r.full_remote = true" in remote_order
     assert "r.commutable_or_full_remote_rank" in remote_order
     assert nationwide_filter == "true"
+    assert "r.commutable_or_full_remote = false" in nationwide_order
     assert "r.nationwide_rank" in nationwide_order
 
+
+def test_recommendations_scope_filters_use_current_travel_policy(monkeypatch: Any) -> None:
+    engine = RecommendationListEngine()
+    monkeypatch.setattr(main_module, "get_engine", lambda: engine)
+    monkeypatch.setenv("TRANSIT_ORIGIN_ADDRESS", "Testikatu 1, Oulu, Finland")
+    monkeypatch.setenv("RECOMMENDATION_COMMUTE_LIMIT_MINUTES", "90")
+    main_module.get_settings.cache_clear()
+
+    response = TestClient(app).get("/recommendations?scope=commutable_or_full_remote")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["total"] == 0
+    assert payload["scope_counts"] == {
+        "commutable": 3,
+        "commutable_or_full_remote": 5,
+        "nationwide": 8,
+        "remote_only": 2,
+        "nationwide_extra": 3,
+    }
+    assert any("travel_origin_address" in statement for statement in engine.connection.statements)
+    count_params = engine.connection.params[0]
+    assert count_params is not None
+    assert count_params["travel_origin_address"] == "Testikatu 1, Oulu, Finland"
+    assert count_params["travel_commute_limit_minutes"] == 90
+    main_module.get_settings.cache_clear()
 
 def test_build_scoring_snapshot_includes_rank_and_rationale(monkeypatch: Any) -> None:
     settings = main_module.get_settings()

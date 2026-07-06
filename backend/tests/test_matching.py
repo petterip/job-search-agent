@@ -3,9 +3,12 @@ from typing import Any
 from app.config import Settings
 from app.matching import (
     JobForScoring,
+    ScoreResult,
     apply_travel_to_scored_candidates,
+    discovery_pool_terms,
     expanded_tokens,
     exclusion_terms,
+    llm_review_bucket_limits,
     merge_semantic_scores,
     profile_terms,
     rank_scored_candidates_for_review,
@@ -339,6 +342,25 @@ def test_score_job_rejects_library_bus_driver_role() -> None:
     assert "kirjastoautonkuljettaja" in result.deterministic_result["missing_qualification_matches"]
 
 
+def test_score_job_rejects_personal_assistant_care_role() -> None:
+    profile = {
+        "location": {"home_city": "Oulu"},
+        "role_clusters": [{"titles_fi": ["asiakaspalvelija"], "keywords_fi": ["ohjaus", "asiakaspalvelu"]}],
+    }
+    job = JobForScoring(
+        id=1,
+        title="Henkilökohtainen avustaja",
+        employer="Example",
+        description="Työ sisältää fyysistä arkiapua asiakkaan kotona.",
+        location="Oulu",
+    )
+
+    result = score_job(profile, job)
+
+    assert not result.passes
+    assert "henkilökohtainen avustaja" in result.deterministic_result["missing_qualification_matches"]
+
+
 class FakeMappings:
     def __init__(self, rows: list[dict[str, Any]]) -> None:
         self.rows = rows
@@ -400,6 +422,116 @@ class RecordingConnection:
         return FakeResult()
 
 
+class LocalPoolConnection(RecordingConnection):
+    def execute(self, statement: Any, params: dict[str, Any] | None = None) -> FakeResult:
+        sql = str(statement)
+        self.statements.append(sql)
+        if "from job_seeker_profiles" in sql:
+            return FakeResult(
+                [
+                    {
+                        "id": 1,
+                        "profile": {
+                            "location": {"home_city": "Oulu"},
+                            "role_clusters": [
+                                {
+                                    "titles_fi": ["kirjastonhoitaja"],
+                                    "keywords_fi": ["kirjasto"],
+                                }
+                            ],
+                        },
+                    }
+                ]
+            )
+        if "from jobs" in sql and "limit :max_jobs" in sql:
+            return FakeResult(
+                [
+                    {
+                        "id": 10,
+                        "title": "Myyjä",
+                        "employer": "Retail",
+                        "description": "Myyntityö.",
+                        "location": "Helsinki",
+                    }
+                ]
+            )
+        if "from jobs" in sql and "limit :local_max_jobs" in sql:
+            return FakeResult(
+                [
+                    {
+                        "id": 20,
+                        "title": "Kirjastonhoitaja",
+                        "employer": "Oulun kaupunki",
+                        "description": "Kirjasto ja asiakaspalvelu.",
+                        "location": "Oulu",
+                    }
+                ]
+            )
+        return FakeResult()
+
+
+class RemotePoolConnection(LocalPoolConnection):
+    def execute(self, statement: Any, params: dict[str, Any] | None = None) -> FakeResult:
+        sql = str(statement)
+        if "from jobs" in sql and "limit :remote_max_jobs" in sql:
+            self.statements.append(sql)
+            return FakeResult(
+                [
+                    {
+                        "id": 30,
+                        "title": "Kirjastonhoitaja. Etätyö",
+                        "employer": "Etäpalvelu",
+                        "description": "Kirjasto ja asiakaspalvelu.",
+                        "location": "Hyvinkää",
+                    }
+                ]
+            )
+        return super().execute(statement, params)
+
+
+class DiscoveryPoolConnection(LocalPoolConnection):
+    def execute(self, statement: Any, params: dict[str, Any] | None = None) -> FakeResult:
+        sql = str(statement)
+        if "from jobs" in sql and "limit :discovery_max_jobs" in sql:
+            self.statements.append(sql)
+            return FakeResult(
+                [
+                    {
+                        "id": 40,
+                        "title": "Kirjastonhoitaja",
+                        "employer": "Kaupunki",
+                        "description": "Kirjasto, kulttuuri ja asiakaspalvelu.",
+                        "location": "Vaasa",
+                    }
+                ]
+            )
+        return super().execute(statement, params)
+
+
+def test_discovery_pool_terms_avoid_generic_profile_terms() -> None:
+    profile = {
+        "role_clusters": [
+            {
+                "titles_fi": ["koordinaattori", "päällikkö"],
+                "keywords_fi": ["asiakaspalvelu"],
+            }
+        ],
+        "preferences": {
+            "application_history_signals": {
+                "boost_titles_fi": ["kirjastonhoitaja", "palvelusihteeri"],
+            }
+        },
+    }
+
+    terms = discovery_pool_terms(profile, ["viestintäasiantuntija", "kunta"])
+
+    assert "viestintäasiantuntija" in terms
+    assert "kirjastonhoitaja" in terms
+    assert "koordinaattori" in terms
+    assert "kunta" not in terms
+    assert "päällikkö" not in terms
+
+
 def test_score_job_learned_exclusion_penalizes_rank_but_keeps_eligible() -> None:
     profile = {
         "location": {"home_city": "Oulu"},
@@ -441,6 +573,53 @@ def test_merge_semantic_scores_updates_unpenalized_machine_score() -> None:
     _, result = merged[0]
 
     assert result.deterministic_result["unpenalized_machine_score"] >= result.machine_score
+
+
+def test_merge_semantic_scores_does_not_override_missing_qualification_reject() -> None:
+    job = JobForScoring(id=1, title="Test", employer="X", description="d", location="Oulu")
+    base = ScoreResult(
+        passes=False,
+        machine_score=20,
+        vector_score=None,
+        rationale="Missing qualification.",
+        concerns=[],
+        deterministic_result={
+            "passes": False,
+            "candidate_lanes": [],
+            "title_matches": [],
+            "negative_matches": [],
+            "missing_qualification_matches": ["ajokortti"],
+        },
+    )
+
+    _, result = merge_semantic_scores([(job, base)], {1: 0.95})[0]
+
+    assert result.passes is False
+    assert result.deterministic_result["passes"] is False
+
+
+def test_merge_semantic_scores_exempts_semantic_exploration_from_anti_penalty() -> None:
+    job = JobForScoring(id=1, title="Hidden", employer="X", description="d", location="Oulu")
+    base = ScoreResult(
+        passes=False,
+        machine_score=20,
+        vector_score=None,
+        rationale="Weak deterministic fit.",
+        concerns=[],
+        deterministic_result={
+            "passes": False,
+            "candidate_lanes": [],
+            "title_matches": [],
+            "negative_matches": [],
+            "missing_qualification_matches": [],
+        },
+    )
+
+    _, result = merge_semantic_scores([(job, base)], {1: 0.82}, anti_scores={1: 1.0})[0]
+
+    assert result.passes is True
+    assert "exploration" in result.deterministic_result["candidate_lanes"]
+    assert result.deterministic_result["vector_score"] == 0.82
 
 
 def test_apply_travel_preserves_learned_exclusion_penalty(monkeypatch: Any) -> None:
@@ -547,9 +726,95 @@ def test_deterministic_recommendations_deactivate_and_upsert_without_deleting_fe
     assert "on conflict (profile_id, job_id)" in executed_sql
     assert "s.enabled = true" in executed_sql
     assert "recommendation_feedback rf" in executed_sql
-    assert "rf.rating = 1" in executed_sql
+    assert "rf.rating <= 2" in executed_sql
     assert "commutable_or_full_remote" in executed_sql
     assert "full_remote" in executed_sql
+    assert ":is_active" in executed_sql
+
+
+def test_deterministic_recommendations_scores_local_pool_outside_global_window(
+    monkeypatch: Any,
+) -> None:
+    monkeypatch.setattr(
+        "app.matching.get_settings",
+        lambda: Settings(
+            llm_eval_max_jobs=1,
+            matcher_max_jobs=1,
+            matcher_local_max_jobs=10,
+        ),
+    )
+    monkeypatch.setattr(
+        "app.matching.resolve_transit_for_queries",
+        lambda _connection, _queries, max_lookups=20: {},
+    )
+    connection = LocalPoolConnection()
+
+    result = run_deterministic_recommendations(connection, max_jobs=1)  # type: ignore[arg-type]
+
+    executed_sql = "\n".join(connection.statements).lower()
+    assert result["evaluated"] == 2
+    assert result["candidate_window"] == 2
+    assert result["local_pool"] == 1
+    assert result["recommended"] == 1
+    assert "limit :local_max_jobs" in executed_sql
+
+
+def test_deterministic_recommendations_scores_remote_pool_outside_global_window(
+    monkeypatch: Any,
+) -> None:
+    monkeypatch.setattr(
+        "app.matching.get_settings",
+        lambda: Settings(
+            llm_eval_max_jobs=1,
+            matcher_max_jobs=1,
+            matcher_local_max_jobs=0,
+            matcher_remote_max_jobs=10,
+        ),
+    )
+    monkeypatch.setattr(
+        "app.matching.resolve_transit_for_queries",
+        lambda _connection, _queries, max_lookups=20: {},
+    )
+    connection = RemotePoolConnection()
+
+    result = run_deterministic_recommendations(connection, max_jobs=1)  # type: ignore[arg-type]
+
+    executed_sql = "\n".join(connection.statements).lower()
+    assert result["evaluated"] == 2
+    assert result["candidate_window"] == 2
+    assert result["remote_pool"] == 1
+    assert result["recommended"] == 1
+    assert result["commutable_or_full_remote_candidates"] == 1
+    assert "limit :remote_max_jobs" in executed_sql
+
+
+def test_deterministic_recommendations_scores_discovery_pool_outside_global_window(
+    monkeypatch: Any,
+) -> None:
+    monkeypatch.setattr(
+        "app.matching.get_settings",
+        lambda: Settings(
+            llm_eval_max_jobs=1,
+            matcher_max_jobs=1,
+            matcher_local_max_jobs=0,
+            matcher_remote_max_jobs=0,
+            discovery_search_queries=["kirjastonhoitaja"],
+        ),
+    )
+    monkeypatch.setattr(
+        "app.matching.resolve_transit_for_queries",
+        lambda _connection, _queries, max_lookups=20: {},
+    )
+    connection = DiscoveryPoolConnection()
+
+    result = run_deterministic_recommendations(connection, max_jobs=1)  # type: ignore[arg-type]
+
+    executed_sql = "\n".join(connection.statements).lower()
+    assert result["evaluated"] == 2
+    assert result["candidate_window"] == 2
+    assert result["discovery_pool"] == 1
+    assert result["recommended"] == 1
+    assert "limit :discovery_max_jobs" in executed_sql
 
 
 def test_refresh_active_recommendation_ranks_honors_rating_one_feedback() -> None:
@@ -563,7 +828,7 @@ def test_refresh_active_recommendation_ranks_honors_rating_one_feedback() -> Non
     )  # type: ignore[arg-type]
 
     executed_sql = "\n".join(connection.statements).lower()
-    assert "rf.rating = 1" in executed_sql
+    assert "rf.rating <= 2" in executed_sql
     assert "commutable_or_full_remote_rank = null" in executed_sql
 
 
@@ -645,6 +910,24 @@ def test_llm_evaluations_skip_high_anti_similarity_with_learned_exclusions() -> 
     assert result == {"llm_evaluated": 0, "llm_failed": 0, "llm_skipped": 1}
 
 
+def test_llm_review_bucket_limits_reserve_scope_capacity() -> None:
+    assert llm_review_bucket_limits(50) == {
+        "commutable": 20,
+        "remote": 10,
+        "nationwide": 20,
+    }
+    assert llm_review_bucket_limits(200) == {
+        "commutable": 80,
+        "remote": 40,
+        "nationwide": 80,
+    }
+    assert llm_review_bucket_limits(1) == {
+        "commutable": 1,
+        "remote": 0,
+        "nationwide": 0,
+    }
+
+
 def test_llm_evaluations_do_not_skip_rows_just_because_old_evaluation_id_exists() -> None:
     connection = RecordingConnection()
 
@@ -655,3 +938,8 @@ def test_llm_evaluations_do_not_skip_rows_just_because_old_evaluation_id_exists(
     assert "from recommendations r" in executed_sql
     assert "where r.llm_evaluation_id is null" not in executed_sql
     assert "current_eval.prompt_version is distinct from :prompt_version" in executed_sql
+    assert "r.is_active = true or r.nationwide_rank is not null" not in executed_sql
+    assert "recommendation_feedback rf" in executed_sql
+    assert "commutable_candidates" in executed_sql
+    assert "remote_candidates" in executed_sql
+    assert "nationwide_candidates" in executed_sql

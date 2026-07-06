@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Any, Literal, Mapping
 
@@ -92,6 +93,13 @@ def is_exact_home_city(location: str | None, home_city: str | None) -> bool:
     return normalize_city_name(location) == home_city.strip().casefold()
 
 
+def contains_home_city_destination(location: str | None, home_city: str | None) -> bool:
+    if not location or not home_city:
+        return False
+    home_query = normalize_destination(home_city)
+    return home_query in extract_destination_candidates(location)
+
+
 def is_verified_full_remote(location: str | None) -> bool:
     """True only for listings verified as full-time remote, not hybrid or vague flexibility."""
     if not location or not location.strip():
@@ -105,6 +113,14 @@ def is_verified_full_remote(location: str | None) -> bool:
     if stripped in {"etä", "etätyö", "kokopäiväinen etätyö", "remote", "etätyö koko työaika"}:
         return True
     if "/ etä" in normalized:
+        return True
+    if re.search(r"(^|[^a-zåäö])etätyö([^a-zåäö]|$)", normalized):
+        return True
+    if re.search(r"(^|[^a-z])fully remote([^a-z]|$)", normalized):
+        return True
+    if re.search(r"(^|[^a-z])100\s*%\s*remote([^a-z]|$)", normalized):
+        return True
+    if re.search(r"(^|[^a-zåäö])täysin etänä([^a-zåäö]|$)", normalized):
         return True
     return location_work_mode(location) == "remote"
 
@@ -232,6 +248,7 @@ def assess_travel(
     *,
     profile: dict[str, Any],
     location: str | None,
+    work_mode_text: str | None = None,
     transit_by_destination: Mapping[str, TransitDistanceResult | None],
     origin_address: str,
     commute_limit_minutes: int,
@@ -239,7 +256,7 @@ def assess_travel(
 ) -> TravelAssessment:
     home_city = home_city_from_profile(profile)
     work_mode = location_work_mode(location)
-    verified_full_remote = is_verified_full_remote(location)
+    verified_full_remote = is_verified_full_remote(location) or is_verified_full_remote(work_mode_text)
     limit_seconds = commute_limit_minutes * 60
     common = {
         "origin_address": origin_address,
@@ -258,6 +275,21 @@ def assess_travel(
             evidence_text=f"{label} · kotikaupunki",
             tone="good",
             reason_code="exact_home_city",
+            **common,
+        )
+
+    if contains_home_city_destination(location, home_city):
+        label = home_city or "Kotikaupunki"
+        return _assessment(
+            commutable=True,
+            full_remote=verified_full_remote,
+            status="exact_home_city",
+            duration_seconds=None,
+            distance_km=None,
+            score_adjustment=12,
+            evidence_text=f"{label} · mukana sijainneissa",
+            tone="good",
+            reason_code="contains_home_city",
             **common,
         )
 

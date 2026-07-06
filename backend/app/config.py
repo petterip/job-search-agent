@@ -13,10 +13,11 @@ class Settings(BaseModel):
     openai_embedding_dimension: int = 1536
     openai_eval_model: str = "gpt-5.4-nano"
     openai_eval_model_escalated: str = "gpt-5.4-mini"
+    openai_eval_timeout_seconds: int = 180
     gemini_api_key: str = ""
     gemini_eval_model: str = "gemini-3.5-flash"
     llm_eval_batch_size: int = 8
-    llm_eval_max_jobs: int = 50
+    llm_eval_max_jobs: int = 800
     llm_provider_failure_cooldown_min: int = 360
     storage_dir: str = "/storage"
     llm_prompt_version: int = 8
@@ -30,6 +31,8 @@ class Settings(BaseModel):
     collector_daily_hour: int = 16
     collector_daily_minute: int = 0
     matcher_max_jobs: int = 1000
+    matcher_local_max_jobs: int = 1000
+    matcher_remote_max_jobs: int = 500
     discovery_search_queries: list[str] = Field(
         default_factory=lambda: [
             "kirjastonhoitaja",
@@ -40,6 +43,16 @@ class Settings(BaseModel):
             "musiikkikirjasto",
             "musiikkitapahtumat",
             "sisällöntuottaja",
+            "sisällöntuotanto",
+            "viestintäasiantuntija",
+            "tiedottaja",
+            "koordinaattori",
+            "projektikoordinaattori",
+            "projektiassistentti",
+            "hallintoassistentti",
+            "toimistoassistentti",
+            "johdon assistentti",
+            "tapahtumakoordinaattori",
             "kulttuurituottaja",
         ]
     )
@@ -96,6 +109,21 @@ class Settings(BaseModel):
     careerjet_user_ip: str = "127.0.0.1"
     linkedin_enabled: bool = False
     linkedin_max_results_per_run: int = 100
+    linkedin_request_delay_seconds: float = 2.0
+    linkedin_search_queries: list[str] = Field(
+        default_factory=lambda: [
+            "kirjastonhoitaja",
+            "kirjastovirkailija",
+            "informaatikko",
+            "information specialist",
+            "library",
+            "content producer",
+            "sisällöntuottaja",
+            "kulttuurituottaja",
+            "museo",
+            "arkisto",
+        ]
+    )
     linkedin_browser_enrich_max_per_run: int = 10
 
     def browserbase_configured(self) -> bool:
@@ -114,6 +142,10 @@ def _bool_env(name: str, default: bool) -> bool:
 
 def _int_env(name: str, default: int) -> int:
     return int(getenv(name, str(default)))
+
+
+def _float_env(name: str, default: float) -> float:
+    return float(getenv(name, str(default)))
 
 
 @lru_cache(maxsize=1)
@@ -140,6 +172,15 @@ def get_settings() -> Settings:
         ]
     else:
         discovery_search_queries = defaults.discovery_search_queries
+    linkedin_search_raw = getenv("LINKEDIN_SEARCH_QUERIES")
+    if linkedin_search_raw:
+        linkedin_search_queries = [
+            part.strip()
+            for part in linkedin_search_raw.split(",")
+            if part.strip()
+        ]
+    else:
+        linkedin_search_queries = defaults.linkedin_search_queries
 
     return Settings(
         database_url=getenv("DATABASE_URL", defaults.database_url),
@@ -154,6 +195,10 @@ def get_settings() -> Settings:
         openai_eval_model_escalated=getenv(
             "OPENAI_EVAL_MODEL_ESCALATED",
             defaults.openai_eval_model_escalated,
+        ),
+        openai_eval_timeout_seconds=_int_env(
+            "OPENAI_EVAL_TIMEOUT_SECONDS",
+            defaults.openai_eval_timeout_seconds,
         ),
         gemini_api_key=getenv("GEMINI_API_KEY", ""),
         gemini_eval_model=getenv("GEMINI_EVAL_MODEL", defaults.gemini_eval_model),
@@ -190,6 +235,14 @@ def get_settings() -> Settings:
             defaults.collector_daily_minute,
         ),
         matcher_max_jobs=_int_env("MATCHER_MAX_JOBS", defaults.matcher_max_jobs),
+        matcher_local_max_jobs=_int_env(
+            "MATCHER_LOCAL_MAX_JOBS",
+            defaults.matcher_local_max_jobs,
+        ),
+        matcher_remote_max_jobs=_int_env(
+            "MATCHER_REMOTE_MAX_JOBS",
+            defaults.matcher_remote_max_jobs,
+        ),
         discovery_search_queries=discovery_search_queries,
         collector_enabled_sources=collector_enabled_sources,
         duunitori_page_size=_int_env("DUUNITORI_PAGE_SIZE", defaults.duunitori_page_size),
@@ -247,6 +300,11 @@ def get_settings() -> Settings:
             "LINKEDIN_MAX_RESULTS_PER_RUN",
             defaults.linkedin_max_results_per_run,
         ),
+        linkedin_request_delay_seconds=_float_env(
+            "LINKEDIN_REQUEST_DELAY_SECONDS",
+            defaults.linkedin_request_delay_seconds,
+        ),
+        linkedin_search_queries=linkedin_search_queries,
         linkedin_browser_enrich_max_per_run=_int_env(
             "LINKEDIN_BROWSER_ENRICH_MAX_PER_RUN",
             defaults.linkedin_browser_enrich_max_per_run,

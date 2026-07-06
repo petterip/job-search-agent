@@ -545,6 +545,59 @@ def test_linkedin_guest_parser_extracts_search_cards() -> None:
     assert listing.location == "Oulu, North Ostrobothnia"
 
 
+@pytest.mark.asyncio
+async def test_linkedin_collect_runs_configured_queries_separately(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("LINKEDIN_ENABLED", "true")
+    monkeypatch.setenv("LINKEDIN_REQUEST_DELAY_SECONDS", "0")
+    monkeypatch.setenv("LINKEDIN_SEARCH_QUERIES", "kirjasto,informaatikko")
+    get_settings.cache_clear()
+    seen_keywords: list[str] = []
+
+    class FakeResponse:
+        status_code = 200
+
+        def __init__(self, job_id: str) -> None:
+            self.text = f"""
+            <li>
+              <a href="/jobs/view/information-specialist-{job_id}?trk=public_jobs"></a>
+              <h3 class="base-search-card__title"> Information Specialist </h3>
+              <h4 class="base-search-card__subtitle"> Example Org </h4>
+              <span class="job-search-card__location"> Oulu </span>
+              <time datetime="2026-07-01"></time>
+            </li>
+            """
+
+        def raise_for_status(self) -> None:
+            return None
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        async def get(self, url: str, params: dict[str, object]):
+            seen_keywords.append(str(params["keywords"]))
+            return FakeResponse("1234567890")
+
+    monkeypatch.setattr("httpx.AsyncClient", FakeClient)
+
+    adapter = LinkedinAdapter()
+    assert adapter.search_queries == ["kirjasto", "informaatikko"]
+
+    result = await adapter.collect(watermark=None, max_pages=2)
+
+    assert seen_keywords == ["kirjasto", "informaatikko"]
+    assert len(result.listings) == 1
+    assert result.pages_fetched == 2
+
+
 def test_varbi_helpers_parse_rss_and_description() -> None:
     rss = """<?xml version="1.0"?>
     <rss><channel>

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime
 import html
+import math
 import logging
 import re
 from urllib.parse import urljoin
@@ -73,6 +75,8 @@ class LinkedinAdapter:
         settings = get_settings()
         self.enabled = settings.linkedin_enabled
         self.max_results = settings.linkedin_max_results_per_run
+        self.request_delay_seconds = settings.linkedin_request_delay_seconds
+        self.search_queries = settings.linkedin_search_queries
         self.url = LINKEDIN_GUEST_SEARCH_URL
 
     async def collect(
@@ -89,7 +93,14 @@ class LinkedinAdapter:
 
         effective_page_size = page_size or 25
         max_results = max_urls or self.max_results
-        max_pages = max_pages or max(1, (max_results + effective_page_size - 1) // effective_page_size)
+        search_queries = [query for query in self.search_queries if query.strip()]
+        if not search_queries:
+            logger.warning("event=linkedin_skipped reason=no_search_queries")
+            return CollectionFetchResult(listings=[], newest_watermark=watermark, pages_fetched=0)
+        max_pages = max_pages or max(
+            len(search_queries),
+            math.ceil(max_results / effective_page_size),
+        )
         listings_by_id: dict[str, NormalizedListing] = {}
         newest_watermark = watermark
         pages_fetched = 0
@@ -98,13 +109,15 @@ class LinkedinAdapter:
             for page in range(max_pages):
                 if len(listings_by_id) >= max_results:
                     break
+                query = search_queries[page % len(search_queries)]
+                page_index = page // len(search_queries)
                 response = await client.get(
                     self.url,
                     params={
-                        "keywords": " OR ".join(get_settings().discovery_search_queries[:5]),
+                        "keywords": query,
                         "location": "Finland",
                         "f_TPR": "r604800",
-                        "start": page * effective_page_size,
+                        "start": page_index * effective_page_size,
                     },
                 )
                 if response.status_code in {401, 403, 429}:
@@ -127,6 +140,8 @@ class LinkedinAdapter:
                         newest_watermark = listing.published_at
                     if len(listings_by_id) >= max_results:
                         break
+                if page + 1 < max_pages and self.request_delay_seconds > 0:
+                    await asyncio.sleep(self.request_delay_seconds)
 
         return CollectionFetchResult(
             listings=list(listings_by_id.values()),

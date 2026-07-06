@@ -65,7 +65,12 @@ EVALUATION_INSTRUCTIONS = (
     "Ei yleisluontoista täytetekstiä, yhteenvetomaista jaarittelua tai vaatimusten pitkää luettelointia. "
     "Älä käytä metapuhetta hakijan tietolähteistä; kirjoita sen sijaan suoraan 'hakijalta puuttuu ...'. "
     "Jos puuttuva vaatimus on työn keskeinen vaatimus, anna suggested_action='skip' ja pidä score enintään 35. "
+    "Paikallinen sijainti ei saa korvata huonoa sisällöllistä sopivuutta: jos paikallinen työ on fyysistä hoiva-, "
+    "arkiavun, myynnin buukkauksen tai erikoisalan asiantuntijatyötä ilman selkeää vastaavaa kokemusta, anna "
+    "suggested_action='skip' tai score alle 40. "
     "Jos työ on vain heikko tai kaukainen siirrettävä osuma, anna suggested_action='skip' tai score alle 40. "
+    "Käytä transferable_weaker + consider vain, kun työn ydintehtävissä on konkreettinen yhteys hakijan "
+    "todennettuun kokemukseen eikä keskeinen osaamisvaatimus puutu. "
     "Käytä suggested_action='apply' vain, kun keskeiset vaatimukset, sijainti ja työn sisältö sopivat hyvin. "
     "Palauta vain skeeman mukainen arvio."
 )
@@ -228,10 +233,17 @@ def normalized_evaluation_payload(payload: dict[str, Any]) -> dict[str, Any]:
 class OpenAIEvaluationProvider:
     provider_name = "openai"
 
-    def __init__(self, api_key: str) -> None:
+    def __init__(
+        self,
+        api_key: str,
+        *,
+        timeout_seconds: int = 180,
+        max_retries: int = 2,
+    ) -> None:
         from openai import OpenAI
 
-        self.client = OpenAI(api_key=api_key, max_retries=0)
+        self.timeout_seconds = timeout_seconds
+        self.client = OpenAI(api_key=api_key, max_retries=max_retries)
 
     def evaluate_job_fit(
         self,
@@ -260,7 +272,7 @@ class OpenAIEvaluationProvider:
                     }
                 },
                 store=False,
-                timeout=60,
+                timeout=self.timeout_seconds,
             )
         except Exception as exc:
             code = getattr(getattr(exc, "body", None), "get", lambda _key: None)("code")
@@ -383,7 +395,10 @@ def build_evaluation_provider(settings: Settings) -> EvaluationProvider | None:
         logger.warning("event=llm_provider_skipped reason=provider_cooldown provider=%s", settings.llm_provider)
         return None
     if settings.llm_provider == "openai" and settings.openai_api_key:
-        return OpenAIEvaluationProvider(api_key=settings.openai_api_key)
+        return OpenAIEvaluationProvider(
+            api_key=settings.openai_api_key,
+            timeout_seconds=settings.openai_eval_timeout_seconds,
+        )
     if settings.llm_provider == "gemini" and settings.gemini_api_key:
         return GeminiEvaluationProvider(api_key=settings.gemini_api_key)
     return None

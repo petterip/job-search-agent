@@ -31,6 +31,11 @@ def upgrade() -> None:
                 select js.id
                 from job_sources js
                 where js.job_id = eq.job_id
+                  and (
+                      select count(*)
+                      from job_sources count_js
+                      where count_js.job_id = eq.job_id
+                  ) = 1
                 order by js.last_seen_at desc nulls last, js.id desc
                 limit 1
             ),
@@ -38,6 +43,11 @@ def upgrade() -> None:
                 select js.raw_listing_id
                 from job_sources js
                 where js.job_id = eq.job_id
+                  and (
+                      select count(*)
+                      from job_sources count_js
+                      where count_js.job_id = eq.job_id
+                  ) = 1
                 order by js.last_seen_at desc nulls last, js.id desc
                 limit 1
             )
@@ -61,6 +71,11 @@ def upgrade() -> None:
                 select js.id
                 from job_sources js
                 where js.job_id = je.job_id
+                  and (
+                      select count(*)
+                      from job_sources count_js
+                      where count_js.job_id = je.job_id
+                  ) = 1
                 order by js.last_seen_at desc nulls last, js.id desc
                 limit 1
             ),
@@ -68,6 +83,11 @@ def upgrade() -> None:
                 select js.raw_listing_id
                 from job_sources js
                 where js.job_id = je.job_id
+                  and (
+                      select count(*)
+                      from job_sources count_js
+                      where count_js.job_id = je.job_id
+                  ) = 1
                 order by js.last_seen_at desc nulls last, js.id desc
                 limit 1
             )

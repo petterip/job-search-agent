@@ -60,6 +60,19 @@ DETAIL_HTTP_SOURCE_NAMES = (
 )
 
 
+class BrowserEnrichmentError(RuntimeError):
+    def __init__(
+        self,
+        message: str,
+        *,
+        browser_session_id: str | None,
+        browser_dashboard_url: str | None,
+    ) -> None:
+        super().__init__(message)
+        self.browser_session_id = browser_session_id
+        self.browser_dashboard_url = browser_dashboard_url
+
+
 def default_source_names_for_enricher(enricher: str) -> tuple[str, ...] | None:
     if enricher == "detail_http":
         return DETAIL_HTTP_SOURCE_NAMES
@@ -257,9 +270,16 @@ async def _jobly_browser_result_async(candidate: EnrichmentInput) -> EnrichmentR
     async with browser_session() as session_handle:
         if session_handle.session is None:
             return None
-        async with connect_playwright_over_cdp(session_handle.session.connect_url) as cdp:
-            await cdp.page.goto(url, wait_until="domcontentloaded", timeout=30_000)
-            content = await cdp.page.content()
+        try:
+            async with connect_playwright_over_cdp(session_handle.session.connect_url) as cdp:
+                await cdp.page.goto(url, wait_until="domcontentloaded", timeout=30_000)
+                content = await cdp.page.content()
+        except Exception as exc:  # noqa: BLE001 - preserve browser session metadata for audit.
+            raise BrowserEnrichmentError(
+                str(exc),
+                browser_session_id=session_handle.session.session_id,
+                browser_dashboard_url=session_handle.session.dashboard_url,
+            ) from exc
     description = extract_jobly_static_description(content)
     if not description:
         return None
@@ -403,6 +423,8 @@ def run_enrichment(
             error = str(exc)[:2000]
             errors.append(error)
             failed_count += 1
+            browser_session_id = getattr(exc, "browser_session_id", None)
+            browser_dashboard_url = getattr(exc, "browser_dashboard_url", None)
             with engine.begin() as connection:
                 next_status = retry_or_fail_queue_item(
                     connection,
@@ -414,6 +436,8 @@ def run_enrichment(
                     attempt_id=attempt_id,
                     status="failed",
                     error=f"{next_status}: {error}",
+                    browser_session_id=browser_session_id,
+                    browser_dashboard_url=browser_dashboard_url,
                 )
     with engine.begin() as connection:
         finish_enrichment_run(

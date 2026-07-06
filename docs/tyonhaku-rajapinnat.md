@@ -527,7 +527,7 @@ Authorization: Basic {API_KEY}:
 
 - Job Posting API: **vain hyväksytyt Talent Solutions -kumppanit** — ei uusia kumppanuuksia avoinna pieniä toimijoita varten
 - Työpaikkojen haku ulos: ei virallista API:a; kolmannen osapuolen scraping-palvelut rikkovat käyttöehtoja
-- **Projektin tila:** valinnainen lisälähde `sources.yaml`-rekisterissä (`scheduled_by_default: false`, `LINKEDIN_ENABLED=false` oletuksena); guest HTTP -haku ensin, lyhyet kuvaukset mahdollisesti enrichment-jonon kautta
+- **Projektin tila:** valinnainen lisälähde `sources.yaml`-rekisterissä (`scheduled_by_default: false`, `LINKEDIN_ENABLED=false` oletuksena); guest HTTP -haku ajaa erilliset `LINKEDIN_SEARCH_QUERIES`-termit monipuolisen recallin vuoksi ja tahdistaa pyynnöt `LINKEDIN_REQUEST_DELAY_SECONDS`-viiveellä, lyhyet kuvaukset mahdollisesti enrichment-jonon kautta
 
 ---
 
@@ -583,9 +583,9 @@ Projektin MVP-keruu vastaa [`goal.md`](goal.md)-MVP:tä ja [`sources.yaml`](sour
 1. **MVP-lähteet:** Duunitori `jobentries` + TMT `search/v2/search` + Laura REST
 2. **Post-MVP:** Jobly sitemap + JSON-LD; EURES täydentäväksi, ei luotettava incrementaali
 3. **Ei MVP:ssä / estetty:** Indeed, KIPA P67 (estetty tai sopimusvaatimus)
-4. **Valinnaiset lisälähteet (ei oletusajossa):** Careerjet (API-avain), LinkedIn (`LINKEDIN_ENABLED=false` oletuksena)
+4. **Valinnaiset lisälähteet (ei oletusajossa):** Careerjet (API-avain), LinkedIn (`LINKEDIN_ENABLED=false` oletuksena, erillinen `LINKEDIN_SEARCH_QUERIES`-termilista)
 5. **Incrementaali:** Duunitori `-date_posted`-sivutus, TMT `publishedAfter` (`pageSize=90`), Laura `after`/`modified_after`
-6. **Recall-lisähaku:** aja Duunitori/TMT/Laura-incrementaalin rinnalla pieni `DISCOVERY_SEARCH_QUERIES`-termilista. Tämä palauttaa edelleen avoimia, mutta vesileimaa vanhempia korkean arvon osumia kuten kirjastonhoitaja-, kirjastovirkailija-, informaatikko-, musiikkikirjasto-, sisällöntuottaja- ja kulttuurituottajaroolit.
+6. **Recall-lisähaku:** aja Duunitori/TMT/Laura-incrementaalin rinnalla pieni `DISCOVERY_SEARCH_QUERIES`-termilista. Tämä palauttaa edelleen avoimia, mutta vesileimaa vanhempia korkean arvon osumia kuten kirjastonhoitaja-, kirjastovirkailija-, informaatikko-, musiikkikirjasto-, sisällöntuottaja-, kulttuurituottaja-, viestintä-, projekti-, koordinointi- ja hallintoassistenttiroolit.
 
 Alla yleisempi vertailu muihin käyttötarkoituksiin.
 

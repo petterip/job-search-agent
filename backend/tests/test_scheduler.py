@@ -70,6 +70,21 @@ def test_configured_scheduled_sources_allows_explicit_supplementals(
     )
 
 
+def test_configured_scheduled_sources_requires_linkedin_enablement(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("COLLECTOR_ENABLED_SOURCES", "duunitori,linkedin")
+    monkeypatch.setenv("LINKEDIN_ENABLED", "false")
+    get_settings.cache_clear()
+
+    assert configured_scheduled_sources() == (("duunitori", 5),)
+
+    monkeypatch.setenv("LINKEDIN_ENABLED", "true")
+    get_settings.cache_clear()
+
+    assert configured_scheduled_sources() == (("duunitori", 5), ("linkedin", 360))
+
+
 def test_configured_scheduled_sources_rejects_unknown_source(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -78,6 +93,66 @@ def test_configured_scheduled_sources_rejects_unknown_source(
 
     with pytest.raises(ValueError, match="missing"):
         configured_scheduled_sources()
+
+
+@pytest.mark.asyncio
+async def test_scheduled_pipeline_runs_enrichment_locations_feedback_learning_matching_in_order(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+
+    class BeginContext:
+        def __enter__(self) -> object:
+            return object()
+
+        def __exit__(self, *_args) -> None:  # noqa: ANN002
+            return None
+
+    class Engine:
+        def begin(self) -> BeginContext:
+            return BeginContext()
+
+    monkeypatch.setattr(scheduler_module, "source_collection_running", lambda _database_url: False)
+    monkeypatch.setattr(scheduler_module, "start_pipeline_run", lambda _database_url: 7)
+    monkeypatch.setattr(scheduler_module, "finish_pipeline_run", lambda *_args, **_kwargs: calls.append("finish"))
+    monkeypatch.setattr(scheduler_module, "get_engine", lambda: Engine())
+    monkeypatch.setattr(
+        scheduler_module,
+        "run_enrichment",
+        lambda *, enricher: calls.append(f"enrichment:{enricher}") or {"processed": 0},
+    )
+    monkeypatch.setattr(
+        scheduler_module,
+        "enrich_job_locations",
+        lambda _connection: calls.append("locations") or {"updated": 0},
+    )
+    monkeypatch.setattr(
+        scheduler_module,
+        "drain_pending_feedback_analyses",
+        lambda: calls.append("feedback_analysis") or {"processed": 0},
+    )
+    monkeypatch.setattr(
+        scheduler_module,
+        "learn_from_feedback",
+        lambda _connection: calls.append("feedback_learning") or {"feedback_total": 0},
+    )
+    monkeypatch.setattr(
+        scheduler_module,
+        "run_matching",
+        lambda *, max_jobs: calls.append("matching") or {"recommended": 0},
+    )
+
+    await scheduler_module.scheduled_pipeline()
+
+    assert calls == [
+        "enrichment:detail_http",
+        "enrichment:jobly_browser",
+        "locations",
+        "feedback_analysis",
+        "feedback_learning",
+        "matching",
+        "finish",
+    ]
 
 
 def test_source_collection_running_reconciles_stale_runs(monkeypatch: pytest.MonkeyPatch) -> None:

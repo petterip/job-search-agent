@@ -214,6 +214,17 @@ h1 {
   white-space: nowrap;
 }
 
+.scope-toggle-bar {
+  display: flex;
+  width: 100%;
+}
+
+.scope-toggle-bar .scope-toggle-option {
+  flex: 1 1 0;
+  min-width: 0;
+  text-align: center;
+}
+
 .scope-toggle-option.is-active {
   background: var(--accent);
   color: white;
@@ -250,6 +261,17 @@ h1 {
 
 .recommendations {
   margin-bottom: 24px;
+}
+
+.recommendations-header {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
+.recommendations-header .feed-heading {
+  margin-bottom: 0;
 }
 
 .source-health {
@@ -778,13 +800,13 @@ h1 {
   pointer-events: none;
 }
 
-.feedback-rating-option.is-selected,
+.feedback-rating-option:has(input:checked),
 .feedback-rating-option:has(input:focus-visible) {
   outline: 2px solid var(--accent-strong);
   outline-offset: 2px;
 }
 
-.feedback-rating-option.is-selected {
+.feedback-rating-option:has(input:checked) {
   border-color: var(--accent-strong);
   background: color-mix(in srgb, var(--accent-strong) 12%, var(--surface-subtle));
 }

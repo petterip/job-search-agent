@@ -169,7 +169,7 @@ export default async function JobPage({ params }: PageProps) {
                 <RecommendationActionBadge value={job.recommendation.suggested_action} />
               </div>
             </div>
-            {!job.recommendation.is_active || job.recommendation.feedback?.rating === 1 ? (
+            {!job.recommendation.is_active || (job.recommendation.feedback?.rating ?? 5) <= 2 ? (
               <p className="feedback-hidden-note" role="status">
                 Piilotettu suosituksista
               </p>
@@ -196,7 +196,7 @@ export default async function JobPage({ params }: PageProps) {
                     >
                       <input
                         aria-label={option.label}
-                        checked={selected}
+                        defaultChecked={selected}
                         name="rating"
                         required={job.recommendation?.feedback === null}
                         type="radio"

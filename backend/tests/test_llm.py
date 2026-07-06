@@ -119,6 +119,11 @@ def test_evaluation_request_hash_is_stable() -> None:
     assert len(first) == 64
 
 
+def test_evaluation_instructions_do_not_let_locality_override_fit() -> None:
+    assert "Paikallinen sijainti ei saa korvata huonoa sisällöllistä sopivuutta" in EVALUATION_INSTRUCTIONS
+    assert "transferable_weaker + consider" in EVALUATION_INSTRUCTIONS
+
+
 def test_job_fit_evaluation_schema_forbids_additional_properties() -> None:
     schema = JobFitEvaluation.model_json_schema()
 
@@ -240,7 +245,7 @@ def test_configured_eval_model_follows_provider() -> None:
     assert configured_eval_model(settings, "openai") == "openai-model"
 
 
-def test_openai_provider_uses_request_timeout(monkeypatch) -> None:
+def test_openai_provider_uses_configurable_request_timeout(monkeypatch) -> None:
     captured: dict[str, object] = {}
 
     class FakeResponse:
@@ -263,10 +268,12 @@ def test_openai_provider_uses_request_timeout(monkeypatch) -> None:
 
     class FakeOpenAI:
         def __init__(self, api_key, max_retries):  # noqa: ANN001
+            captured["api_key"] = api_key
+            captured["max_retries"] = max_retries
             self.responses = FakeResponses()
 
     monkeypatch.setattr("openai.OpenAI", FakeOpenAI)
-    provider = OpenAIEvaluationProvider(api_key="test-key")
+    provider = OpenAIEvaluationProvider(api_key="test-key", timeout_seconds=240)
 
     evaluation, metadata = provider.evaluate_job_fit(
         profile_summary="{}",
@@ -277,7 +284,8 @@ def test_openai_provider_uses_request_timeout(monkeypatch) -> None:
 
     assert evaluation.score == 82
     assert metadata["returned_model"] == "openai-returned"
-    assert captured["timeout"] == 60
+    assert captured["timeout"] == 240
+    assert captured["max_retries"] == 2
 
 
 def test_gemini_provider_parses_structured_response(monkeypatch) -> None:

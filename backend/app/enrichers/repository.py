@@ -790,3 +790,24 @@ def latest_enrichment_run_summary(connection: Connection) -> dict[str, Any] | No
         )
     ).mappings().one_or_none()
     return dict(row) if row is not None else None
+
+
+def enrichment_queue_health(connection: Connection) -> dict[str, Any]:
+    row = connection.execute(
+        sa.text(
+            """
+            select
+                count(*) filter (where status = 'queued') as queued_count,
+                count(*) filter (where status = 'running') as running_count,
+                count(*) filter (where status = 'retry') as retry_count,
+                count(*) filter (where status = 'failed') as failed_count,
+                count(*) filter (
+                    where status = 'running'
+                      and updated_at < now() - interval '30 minutes'
+                ) as stale_running_count,
+                min(next_attempt_at) filter (where status in ('queued', 'retry')) as oldest_due_at
+            from enrichment_queue
+            """
+        )
+    ).mappings().one()
+    return dict(row)

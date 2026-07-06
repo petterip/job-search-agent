@@ -8,7 +8,7 @@ from pydantic import BaseModel, Field
 
 from app.config import get_settings
 from app.db import get_engine
-from app.enrichers.repository import latest_enrichment_run_summary
+from app.enrichers.repository import enrichment_queue_health, latest_enrichment_run_summary
 from app.feedback_analysis import feedback_content_hash
 from app.llm import configured_eval_model
 from app.location_evidence_service import (
@@ -18,6 +18,7 @@ from app.location_evidence_service import (
 )
 from app.logging import configure_logging
 from app.source_links import source_external_apply_url
+from app.travel_policy import ROUTING_PROFILE
 
 configure_logging()
 
@@ -97,9 +98,19 @@ class EnrichmentRunStatus(BaseModel):
     error_summary: str | None
 
 
+class EnrichmentQueueHealth(BaseModel):
+    queued_count: int
+    running_count: int
+    retry_count: int
+    failed_count: int
+    stale_running_count: int
+    oldest_due_at: datetime | None = None
+
+
 class SourceStatusResponse(BaseModel):
     sources: list[SourceStatusItem]
     enrichment_last_run: EnrichmentRunStatus | None = None
+    enrichment_queue: EnrichmentQueueHealth
 
 
 class RecommendationFeedbackSummary(BaseModel):
@@ -124,13 +135,84 @@ RECOMMENDATION_SCOPES: frozenset[str] = frozenset(
 
 def recommendation_scope_sql(scope: RecommendationScope) -> tuple[str, str]:
     if scope == "commutable":
-        return "r.commutable = true", "r.commutable_rank asc nulls last, r.machine_score desc, r.id desc"
+        return (
+            "r.commutable = true"
+            " and ("
+            "   r.travel_reason_code = 'exact_home_city'"
+            "   or ("
+            "     r.travel_origin_address = :travel_origin_address"
+            "     and r.travel_commute_limit_minutes = :travel_commute_limit_minutes"
+            "     and r.travel_routing_profile = :travel_routing_profile"
+            "   )"
+            " )",
+            "r.commutable_rank asc nulls last, r.machine_score desc, r.id desc",
+        )
     if scope == "commutable_or_full_remote":
         return (
-            "r.commutable_or_full_remote = true",
+            "r.commutable_or_full_remote = true"
+            " and ("
+            "   r.travel_reason_code in ('exact_home_city', 'full_remote')"
+            "   or ("
+            "     r.travel_origin_address = :travel_origin_address"
+            "     and r.travel_commute_limit_minutes = :travel_commute_limit_minutes"
+            "     and r.travel_routing_profile = :travel_routing_profile"
+            "   )"
+            " )",
+            "case when r.commutable = false and r.full_remote = true then 0 else 1 end, "
             "r.commutable_or_full_remote_rank asc nulls last, r.machine_score desc, r.id desc",
         )
-    return "true", "r.nationwide_rank asc nulls last, r.machine_score desc, r.id desc"
+    return (
+        "true",
+        "case when r.commutable_or_full_remote = false then 0 else 1 end, "
+        "r.nationwide_rank asc nulls last, r.machine_score desc, r.id desc",
+    )
+
+
+def current_travel_policy_params() -> dict[str, Any]:
+    settings = get_settings()
+    return {
+        "travel_origin_address": settings.transit_origin_address,
+        "travel_commute_limit_minutes": settings.recommendation_commute_limit_minutes,
+        "travel_routing_profile": ROUTING_PROFILE,
+    }
+
+
+def recommendation_scope_counts(connection: Any) -> "RecommendationScopeCounts":
+    commutable_filter, _commutable_order = recommendation_scope_sql("commutable")
+    remote_filter, _remote_order = recommendation_scope_sql("commutable_or_full_remote")
+    scope_params = current_travel_policy_params()
+    row = connection.execute(
+        sa.text(
+            f"""
+            select
+                count(*) filter (where {commutable_filter})::int as commutable,
+                count(*) filter (where {remote_filter})::int as commutable_or_full_remote,
+                count(*)::int as nationwide
+            from recommendations r
+            join jobs j on j.id = r.job_id
+            where r.is_active = true
+              and j.status = 'active'
+              and exists (
+                  select 1
+                  from job_sources js
+                  join sources s on s.id = js.source_id
+                  where js.job_id = j.id
+                    and s.enabled = true
+              )
+            """
+        ),
+        scope_params,
+    ).mappings().one()
+    commutable = int(row["commutable"] or 0)
+    remote = int(row["commutable_or_full_remote"] or 0)
+    nationwide = int(row["nationwide"] or 0)
+    return RecommendationScopeCounts(
+        commutable=commutable,
+        commutable_or_full_remote=remote,
+        nationwide=nationwide,
+        remote_only=max(0, remote - commutable),
+        nationwide_extra=max(0, nationwide - remote),
+    )
 
 
 class RecommendationListItem(BaseModel):
@@ -165,12 +247,21 @@ class RecommendationListItem(BaseModel):
     feedback: RecommendationFeedbackSummary | None = None
 
 
+class RecommendationScopeCounts(BaseModel):
+    commutable: int
+    commutable_or_full_remote: int
+    nationwide: int
+    remote_only: int
+    nationwide_extra: int
+
+
 class RecommendationListResponse(BaseModel):
     items: list[RecommendationListItem]
     limit: int
     offset: int
     total: int
     scope: RecommendationScope
+    scope_counts: RecommendationScopeCounts
 
 
 class RecommendationFeedbackResponse(BaseModel):
@@ -300,7 +391,7 @@ def apply_recommendation_visibility_from_feedback(
     recommendation_id: int,
     rating: int,
 ) -> None:
-    if rating == 1:
+    if rating <= 2:
         connection.execute(
             sa.text(
                 """
@@ -316,7 +407,7 @@ def apply_recommendation_visibility_from_feedback(
             {"recommendation_id": recommendation_id},
         )
         return
-    if rating >= 2:
+    if rating >= 3:
         connection.execute(
             sa.text(
                 """
@@ -327,6 +418,20 @@ def apply_recommendation_visibility_from_feedback(
             ),
             {"recommendation_id": recommendation_id},
         )
+        profile_id = connection.execute(
+            sa.text(
+                """
+                select profile_id
+                from recommendations
+                where id = :recommendation_id
+                """
+            ),
+            {"recommendation_id": recommendation_id},
+        ).scalar_one_or_none()
+        if profile_id is not None:
+            from app.matching import refresh_active_recommendation_ranks
+
+            refresh_active_recommendation_ranks(connection, profile_id=int(profile_id))
 
 
 class JobDetailResponse(BaseModel):
@@ -807,11 +912,13 @@ async def list_source_status() -> SourceStatusResponse:
         ).mappings()
         sources = [SourceStatusItem(**row) for row in rows]
         enrichment_row = latest_enrichment_run_summary(connection)
+        enrichment_queue = enrichment_queue_health(connection)
     return SourceStatusResponse(
         sources=sources,
         enrichment_last_run=(
             EnrichmentRunStatus(**enrichment_row) if enrichment_row is not None else None
         ),
+        enrichment_queue=EnrichmentQueueHealth(**enrichment_queue),
     )
 
 
@@ -824,8 +931,10 @@ async def list_recommendations(
     if scope not in RECOMMENDATION_SCOPES:
         raise HTTPException(status_code=422, detail="unknown recommendation scope")
     scope_filter, scope_order = recommendation_scope_sql(scope)
+    scope_params = current_travel_policy_params()
     engine = get_engine()
     with engine.connect() as connection:
+        scope_counts = recommendation_scope_counts(connection)
         total = int(
             connection.execute(
                 sa.text(
@@ -842,9 +951,10 @@ async def list_recommendations(
                           join sources s on s.id = js.source_id
                           where js.job_id = j.id
                             and s.enabled = true
-                      )
+                        )
                     """
-                )
+                ),
+                scope_params,
             ).scalar_one()
         )
         rows = connection.execute(
@@ -852,11 +962,7 @@ async def list_recommendations(
                 f"""
                 select
                     r.id,
-                    case
-                        when :scope = 'commutable' then r.commutable_rank
-                        when :scope = 'commutable_or_full_remote' then r.commutable_or_full_remote_rank
-                        else r.nationwide_rank
-                    end as rank,
+                    row_number() over (order by {scope_order})::int as rank,
                     r.machine_score,
                     r.llm_score,
                     r.fit_tier,
@@ -898,11 +1004,18 @@ async def list_recommendations(
                 limit :limit offset :offset
                 """
             ),
-            {"scope": scope, "limit": limit, "offset": offset},
+            {"scope": scope, "limit": limit, "offset": offset, **scope_params},
         ).mappings()
         items = [recommendation_item_from_row(row) for row in rows]
         connection.commit()
-    return RecommendationListResponse(items=items, limit=limit, offset=offset, total=total, scope=scope)
+    return RecommendationListResponse(
+        items=items,
+        limit=limit,
+        offset=offset,
+        total=total,
+        scope=scope,
+        scope_counts=scope_counts,
+    )
 
 
 @app.get("/recommendations/{recommendation_id}/feedback", response_model=RecommendationFeedbackResponse)
@@ -933,7 +1046,7 @@ async def get_recommendation_feedback(recommendation_id: int) -> RecommendationF
         rating=int(row["rating"]),
         applied=bool(row["applied"]),
         analysis_status=str(row["analysis_status"]),
-        recommendation_hidden=int(row["rating"]) == 1,
+        recommendation_hidden=int(row["rating"]) <= 2,
         action=row["action"],
     )
 
@@ -1066,7 +1179,7 @@ async def create_recommendation_feedback(
                     rating=rating,
                     applied=applied,
                     analysis_status=analysis_status,
-                    recommendation_hidden=rating == 1,
+                    recommendation_hidden=rating <= 2,
                     action=legacy_action,
                 )
             connection.execute(
@@ -1140,7 +1253,7 @@ async def create_recommendation_feedback(
         rating=rating,
         applied=applied,
         analysis_status=analysis_status,
-        recommendation_hidden=rating == 1,
+        recommendation_hidden=rating <= 2,
         action=legacy_action,
     )
 

@@ -13,6 +13,7 @@ Start with [`goal.md`](goal.md) for the product north star, then [`implementatio
 | [`implementation-journal.md`](implementation-journal.md) | Concise record of what is implemented, verified, and still missing. |
 | [`browser-enrichment-plan.md`](browser-enrichment-plan.md) | Planned browser enrichment tier, HTTP coverage gaps, Careerjet/LinkedIn integration, and phased tasks. |
 | [`feedback-learning-plan.md`](feedback-learning-plan.md) | Five-point recommendation feedback, async LLM feedback analysis, feedback-driven learning loop, and phased integration with matching and collection. |
+| [`local-recommendation-recall-improvement-plan.md`](local-recommendation-recall-improvement-plan.md) | Analysis and phased implementation plan for improving sparse local recommendation tabs. |
 | [`sources.yaml`](sources.yaml) | Machine-readable source registry for collectors: endpoints, snapshot counts, and polling intervals. |
 
 Repeatable source test scripts live in [`../scrape-test/`](../scrape-test/).

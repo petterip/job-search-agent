@@ -2,17 +2,6 @@ import Link from "next/link";
 
 import { RecommendationActionBadge, RecommendationEvidence, ScoreBadge } from "./ui";
 
-type HealthResponse = {
-  status: "ok";
-  service: string;
-  checked_at: string;
-  llm_enabled: boolean;
-  transit_distance_enabled: boolean;
-  embedding_model: string;
-  embedding_dimension: number;
-  eval_model: string;
-};
-
 type LocationEvidence = {
   text: string;
   tone: "good" | "warning" | "bad";
@@ -92,6 +81,13 @@ type RecommendationListResponse = {
   offset: number;
   total: number;
   scope: RecommendationScope;
+  scope_counts: {
+    commutable: number;
+    commutable_or_full_remote: number;
+    nationwide: number;
+    remote_only: number;
+    nationwide_extra: number;
+  };
 };
 
 type PageProps = {
@@ -99,7 +95,7 @@ type PageProps = {
 };
 
 const PAGE_LIMIT = 30;
-const RECOMMENDATION_LIMIT = 15;
+const RECOMMENDATION_LIMIT = 30;
 const RECOMMENDATION_CATEGORY_ORDER = [
   "Kirjasto ja tietopalvelu",
   "Johtaminen ja hallinto",
@@ -125,6 +121,41 @@ const RECOMMENDATION_SCOPES: { value: RecommendationScope; label: string }[] = [
 
 function recommendationScopeLabel(scope: RecommendationScope): string {
   return RECOMMENDATION_SCOPES.find((item) => item.value === scope)?.label ?? "Enintään 2 h";
+}
+
+function recommendationScopeCount(
+  counts: RecommendationListResponse["scope_counts"] | undefined,
+  scope: RecommendationScope,
+): number | null {
+  if (!counts) return null;
+  return counts[scope];
+}
+
+function recommendationScopeDelta(
+  counts: RecommendationListResponse["scope_counts"] | undefined,
+  scope: RecommendationScope,
+): number | null {
+  if (!counts) return null;
+  if (scope === "commutable_or_full_remote") return counts.remote_only;
+  if (scope === "nationwide") return counts.nationwide_extra;
+  return null;
+}
+
+function recommendationScopeSummary(
+  counts: RecommendationListResponse["scope_counts"] | undefined,
+  scope: RecommendationScope,
+): string {
+  if (!counts) return recommendationScopeLabel(scope);
+  if (scope === "commutable_or_full_remote" && counts.remote_only === 0) {
+    return "Etälaajennus ei lisää hyväksyttyjä etä-only suosituksia tällä hetkellä.";
+  }
+  if (scope === "commutable_or_full_remote") {
+    return `${counts.remote_only.toLocaleString("fi-FI")} hyväksyttyä etä-only lisäystä.`;
+  }
+  if (scope === "nationwide") {
+    return `${counts.nationwide_extra.toLocaleString("fi-FI")} lisäystä 2 h + etä -näkymään verrattuna.`;
+  }
+  return recommendationScopeLabel(scope);
 }
 
 function buildHomePath(filters: {
@@ -203,12 +234,14 @@ function formatDateTime(value: string | null): string {
 function pageHref(
   filters: { q: string; source: string; employer: string; location: string },
   offset: number,
+  scope: RecommendationScope,
 ): string {
   const params = new URLSearchParams();
   if (filters.q) params.set("q", filters.q);
   if (filters.source) params.set("source", filters.source);
   if (filters.employer) params.set("employer", filters.employer);
   if (filters.location) params.set("location", filters.location);
+  if (scope !== "commutable") params.set("scope", scope);
   if (offset > 0) params.set("offset", String(offset));
   const query = params.toString();
   return query ? `/?${query}` : "/";
@@ -254,8 +287,7 @@ export default async function Home({ searchParams }: PageProps) {
       ? scopeParam
       : "commutable";
 
-  const [health, jobs, sourceList, sourceStatus, recommendations] = await Promise.all([
-    getJson<HealthResponse>("/health"),
+  const [jobs, sourceList, sourceStatus, recommendations] = await Promise.all([
     getJson<JobListResponse>(buildJobsPath({ ...filters, offset })),
     getJson<SourceListResponse>("/sources"),
     getJson<SourceStatusResponse>("/sources/status"),
@@ -278,10 +310,6 @@ export default async function Home({ searchParams }: PageProps) {
           <div>
             <p className="eyebrow">Paikallinen työnhakunäkymä</p>
             <h1>Työpaikkaportaali</h1>
-          </div>
-          <div className="system-status" aria-label="Järjestelmän tila">
-            <span className={health ? "status-dot is-ok" : "status-dot is-down"} />
-            <span>{health ? "API käytössä" : "API ei vastaa"}</span>
           </div>
         </header>
 
@@ -314,24 +342,42 @@ export default async function Home({ searchParams }: PageProps) {
         </form>
 
         <section className="recommendations" aria-labelledby="recommendations-title">
-          <div className="feed-heading">
-            <div>
-              <h2 id="recommendations-title">Suositukset</h2>
-              <p>
-                {recommendations
-                  ? `${recommendations.total.toLocaleString("fi-FI")} osumaa · ${recommendationScopeLabel(scope)}`
-                  : "Suosituksia ei voitu ladata"}
-              </p>
+          <div className="recommendations-header">
+            <div className="feed-heading">
+              <div>
+                <h2 id="recommendations-title">Suositukset</h2>
+                <p>
+                  {recommendations
+                    ? `${recommendations.total.toLocaleString("fi-FI")} osumaa · ${recommendationScopeSummary(
+                        recommendations.scope_counts,
+                        scope,
+                      )}`
+                    : "Suosituksia ei voitu ladata"}
+                </p>
+              </div>
             </div>
-            <div className="scope-toggle" role="group" aria-label="Suositusten laajuus">
+            <div className="scope-toggle scope-toggle-bar" role="group" aria-label="Suositusten laajuus">
               {RECOMMENDATION_SCOPES.map((item) => (
-                <Link
-                  key={item.value}
-                  className={scope === item.value ? "scope-toggle-option is-active" : "scope-toggle-option"}
-                  href={buildHomePath({ ...filters, offset, scope: item.value })}
-                >
-                  {item.label}
-                </Link>
+                (() => {
+                  const count = recommendationScopeCount(recommendations?.scope_counts, item.value);
+                  const delta = recommendationScopeDelta(recommendations?.scope_counts, item.value);
+                  return (
+                    <Link
+                      key={item.value}
+                      className={scope === item.value ? "scope-toggle-option is-active" : "scope-toggle-option"}
+                      href={buildHomePath({ ...filters, offset, scope: item.value })}
+                      aria-current={scope === item.value ? "page" : undefined}
+                    >
+                      <span>{item.label}</span>
+                      {count !== null ? (
+                        <small>
+                          {count.toLocaleString("fi-FI")}
+                          {delta !== null ? ` (+${delta.toLocaleString("fi-FI")})` : ""}
+                        </small>
+                      ) : null}
+                    </Link>
+                  );
+                })()
               ))}
             </div>
           </div>
@@ -411,10 +457,10 @@ export default async function Home({ searchParams }: PageProps) {
             </p>
           </div>
           <div className="pager">
-            <a aria-disabled={offset === 0} href={pageHref(filters, previousOffset)}>
+            <a aria-disabled={offset === 0} href={pageHref(filters, previousOffset, scope)}>
               Edelliset
             </a>
-            <a aria-disabled={nextOffset >= total} href={pageHref(filters, nextOffset)}>
+            <a aria-disabled={nextOffset >= total} href={pageHref(filters, nextOffset, scope)}>
               Seuraavat
             </a>
           </div>

@@ -116,7 +116,7 @@ Use OpenAI Structured Outputs or Gemini structured output with a Pydantic schema
 Use **one job per request**, with bounded parallelism:
 
 - `LLM_EVAL_BATCH_SIZE=5..10`
-- `LLM_EVAL_MAX_JOBS=20..30` per run
+- `LLM_EVAL_MAX_JOBS=800` per run by default; lower it in constrained environments
 - retry once on transient provider/schema failures
 - persist skipped/error states instead of silently dropping candidates
 
@@ -270,7 +270,7 @@ Keep the Pydantic model provider-neutral. Provider-specific adapters should tran
 | `GEMINI_API_KEY` | `...` | Optional fallback provider. |
 | `GEMINI_EVAL_MODEL` | `gemini-3.1-flash-lite` | Gemini fallback evaluator. |
 | `LLM_EVAL_BATCH_SIZE` | `8` | Max parallel evaluation requests. |
-| `LLM_EVAL_MAX_JOBS` | `30` | Max jobs sent to LLM per run. |
+| `LLM_EVAL_MAX_JOBS` | `800` | Max jobs sent to LLM per run. |
 | `LLM_PROMPT_VERSION` | `5` | Prompt/schema audit version. |
 
 ---

@@ -17,7 +17,7 @@ sources:
     notes:
       - "municipality= and date_posted__gte= accepted but do not filter"
       - "search= works for keyword filter"
-      - "collector also merges DISCOVERY_SEARCH_QUERIES results to recover still-open older high-value matches, including library and selected music/content/culture terms"
+      - "collector also merges DISCOVERY_SEARCH_QUERIES results to recover still-open older high-value matches, including library, selected music/content/culture, and remote-friendly administration/communications/coordination terms"
       - "descr field contains full listing text"
       - "page_size values above 100 are silently capped to 100 results"
 
@@ -35,7 +35,7 @@ sources:
     incremental: publishedAfter  # pageSize=90 works; pageSize>=99 returns HTTP 400
     attribution: "Lähde: Työmarkkinatorin asiakastietojärjestelmä"
     notes:
-      - "collector also runs DISCOVERY_SEARCH_QUERIES with the same filters and fetches detail payloads, including library and selected music/content/culture terms"
+      - "collector also runs DISCOVERY_SEARCH_QUERIES with the same filters and fetches detail payloads, including library, selected music/content/culture, and remote-friendly administration/communications/coordination terms"
 
   laura:
     method: wordpress_rest
@@ -50,7 +50,7 @@ sources:
       new_postings: after  # ISO8601, publish date
       edits: modified_after
     notes:
-      - "collector also merges first-page REST search results for DISCOVERY_SEARCH_QUERIES, including library and selected music/content/culture terms"
+      - "collector also merges first-page REST search results for DISCOVERY_SEARCH_QUERIES, including library, selected music/content/culture, and remote-friendly administration/communications/coordination terms"
 
   jobly:
     method: sitemap_jsonld
@@ -160,6 +160,8 @@ sources:
     incremental: search_watermark
     notes:
       - "Optional supplementary aggregate; disabled unless LINKEDIN_ENABLED=true"
+      - "Runs separate LINKEDIN_SEARCH_QUERIES terms for broader recall instead of one generic OR query"
+      - "Paces guest requests with LINKEDIN_REQUEST_DELAY_SECONDS to reduce 429 responses"
       - "Guest HTTP search first; short descriptions route through the enrichment queue when enabled"
 
   valtiolle:

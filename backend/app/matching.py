@@ -98,6 +98,15 @@ GENERIC_MATCH_TERMS = {
     "työntekijä",
     "vastaava",
 }
+DISCOVERY_POOL_EXCLUDED_TERMS = GENERIC_MATCH_TERMS | {
+    "asiakaspalvelu",
+    "hallinto",
+    "johtaminen",
+    "kunta",
+    "kaupunki",
+    "palvelu",
+    "työ",
+}
 MISSING_QUALIFICATION_REJECT_PATTERNS = {
     "opettajan_kelpoisuus": (
         r"\bopettajan kelpoisuus\b",
@@ -116,6 +125,7 @@ MISSING_QUALIFICATION_REJECT_PATTERNS = {
     ),
 }
 COMPOUND_HARD_REJECT_TERMS = {
+    "henkilökohtainen avustaja",
     "kirjastoautonkuljettaja",
 }
 LANE_QUOTAS = {
@@ -422,10 +432,16 @@ def merge_semantic_scores(
             continue
         deterministic_result = dict(result.deterministic_result)
         candidate_lanes = list(deterministic_result.get("candidate_lanes", []))
-        is_exploration = "exploration" in candidate_lanes
         adjusted_vector = float(vector_score)
         if job.id in preference_scores:
             adjusted_vector += alpha * preference_scores[job.id]
+
+        pre_anti_vector = max(0.0, min(1.0, adjusted_vector))
+        semantic_exploration_candidate = (
+            pre_anti_vector >= SEMANTIC_VECTOR_THRESHOLD
+            and not deterministic_result.get("title_matches")
+        )
+        is_exploration = "exploration" in candidate_lanes or semantic_exploration_candidate
         if job.id in anti_scores and not is_exploration:
             adjusted_vector -= beta * anti_scores[job.id]
         adjusted_vector = max(0.0, min(1.0, adjusted_vector))
@@ -443,6 +459,7 @@ def merge_semantic_scores(
         passes = result.passes or (
             adjusted_vector >= SEMANTIC_VECTOR_THRESHOLD
             and not deterministic_result.get("negative_matches")
+            and not deterministic_result.get("missing_qualification_matches")
         )
         deterministic_result.update(
             {
@@ -546,9 +563,15 @@ def apply_travel_to_scored_candidates(
 
     travel_scored: list[tuple[JobForScoring, ScoreResult, TravelAssessment]] = []
     for job, result in scored:
+        work_mode_text = " ".join(
+            part
+            for part in (job.title, job.employer, job.description, job.location)
+            if part
+        )
         assessment = assess_travel(
             profile=profile,
             location=job.location,
+            work_mode_text=work_mode_text,
             transit_by_destination=transit_by_destination,
             origin_address=origin_address,
             commute_limit_minutes=commute_limit_minutes,
@@ -579,10 +602,197 @@ def apply_travel_to_scored_candidates(
     return travel_scored
 
 
+def local_location_terms(profile: dict[str, Any]) -> list[str]:
+    location = profile.get("location")
+    if not isinstance(location, dict):
+        return []
+
+    terms: list[str] = []
+    seen: set[str] = set()
+
+    def add_term(value: Any) -> None:
+        if not isinstance(value, str) or not value.strip():
+            return
+        normalized = value.strip().casefold()
+        if normalized not in seen:
+            seen.add(normalized)
+            terms.append(value.strip())
+
+    add_term(location.get("home_city"))
+    region_towns = location.get("region_towns")
+    if isinstance(region_towns, list):
+        for town in region_towns:
+            add_term(town)
+    return terms
+
+
+def discovery_pool_terms(profile: dict[str, Any], configured_queries: list[str]) -> list[str]:
+    candidates: list[str] = []
+    candidates.extend(configured_queries)
+    for term_set in (
+        profile_terms(profile, "titles_fi"),
+        application_history_terms(profile, "boost_titles_fi"),
+        learned_boost_terms(profile, "boost_titles_fi"),
+    ):
+        candidates.extend(sorted(term_set))
+
+    terms: list[str] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        normalized = str(candidate).strip().casefold()
+        if not normalized:
+            continue
+        if normalized in DISCOVERY_POOL_EXCLUDED_TERMS:
+            continue
+        if len(normalized) < 5:
+            continue
+        if normalized not in seen:
+            seen.add(normalized)
+            terms.append(normalized)
+    return terms[:80]
+
+
+def fetch_active_job_rows(
+    connection: Connection,
+    *,
+    max_jobs: int,
+    profile: dict[str, Any],
+    local_max_jobs: int,
+    remote_max_jobs: int,
+    discovery_terms: list[str],
+) -> tuple[list[dict[str, Any]], int, int, int]:
+    base_sql = """
+        select id, title, employer, description, location
+        from jobs
+        where status = 'active'
+          and exists (
+              select 1
+              from job_sources js
+              join sources s on s.id = js.source_id
+              where js.job_id = jobs.id
+                and s.enabled = true
+          )
+        order by published_at desc nulls last, id desc
+        limit :max_jobs
+        """
+    recent_rows = [
+        dict(row)
+        for row in connection.execute(sa.text(base_sql), {"max_jobs": max_jobs}).mappings()
+    ]
+
+    rows_by_id: dict[int, dict[str, Any]] = {int(row["id"]): row for row in recent_rows}
+    local_rows_added = 0
+    terms = local_location_terms(profile)
+    if terms and local_max_jobs > 0:
+        params: dict[str, Any] = {"local_max_jobs": local_max_jobs}
+        clauses: list[str] = []
+        for index, term in enumerate(terms):
+            key = f"local_location_{index}"
+            params[key] = rf"(^|[[:space:],/]){re.escape(term)}([[:space:],/]|$)"
+            clauses.append(f"coalesce(location, '') ~* :{key}")
+
+        local_sql = f"""
+            select id, title, employer, description, location
+            from jobs
+            where status = 'active'
+              and exists (
+                  select 1
+                  from job_sources js
+                  join sources s on s.id = js.source_id
+                  where js.job_id = jobs.id
+                    and s.enabled = true
+              )
+              and ({' or '.join(clauses)})
+            order by published_at desc nulls last, id desc
+            limit :local_max_jobs
+            """
+        for row in connection.execute(sa.text(local_sql), params).mappings():
+            row_dict = dict(row)
+            job_id = int(row_dict["id"])
+            if job_id not in rows_by_id:
+                local_rows_added += 1
+                rows_by_id[job_id] = row_dict
+
+    remote_rows_added = 0
+    if remote_max_jobs > 0:
+        remote_sql = """
+            select id, title, employer, description, location
+            from jobs
+            where status = 'active'
+              and exists (
+                  select 1
+                  from job_sources js
+                  join sources s on s.id = js.source_id
+                  where js.job_id = jobs.id
+                    and s.enabled = true
+              )
+              and (
+                  coalesce(location, '') ~* '(^|[[:space:],/])etä([[:space:],/]|$)'
+                  or coalesce(location, '') ~* '(^|[[:space:],/])remote([[:space:],/]|$)'
+                  or coalesce(title, '') ~* '(^|[^[:alpha:]])etätyö([^[:alpha:]]|$)'
+                  or coalesce(title, '') ~* '(^|[^[:alpha:]])remote([^[:alpha:]]|$)'
+                  or coalesce(description, '') ~* '(^|[^[:alpha:]])kokopäiväinen etätyö([^[:alpha:]]|$)'
+                  or coalesce(description, '') ~* '(^|[^[:alpha:]])täysin etänä([^[:alpha:]]|$)'
+                  or coalesce(description, '') ~* '(^|[^[:alpha:]])100 ?% remote([^[:alpha:]]|$)'
+                  or coalesce(description, '') ~* '(^|[^[:alpha:]])fully remote([^[:alpha:]]|$)'
+              )
+              and coalesce(location, '') !~* 'hybridi|hybrid'
+              and coalesce(title, '') !~* 'hybridi|hybrid|etätyömahdollisuus|mahdollisuus etä'
+              and coalesce(description, '') !~* 'osittain etä|osittainen etä|hybridi|hybrid|etätyömahdollisuus|mahdollisuus etä'
+            order by published_at desc nulls last, id desc
+            limit :remote_max_jobs
+            """
+        for row in connection.execute(
+            sa.text(remote_sql),
+            {"remote_max_jobs": remote_max_jobs},
+        ).mappings():
+            row_dict = dict(row)
+            job_id = int(row_dict["id"])
+            if job_id not in rows_by_id:
+                remote_rows_added += 1
+                rows_by_id[job_id] = row_dict
+
+    discovery_rows_added = 0
+    if discovery_terms:
+        params: dict[str, Any] = {"discovery_max_jobs": max(max_jobs * 3, max_jobs + 1000)}
+        clauses: list[str] = []
+        for index, term in enumerate(discovery_terms):
+            key = f"discovery_term_{index}"
+            params[key] = rf"(^|[^[:alpha:]]){re.escape(term)}([^[:alpha:]]|$)"
+            clauses.append(
+                f"(coalesce(title, '') || ' ' || coalesce(description, '')) ~* :{key}"
+            )
+        discovery_sql = f"""
+            select id, title, employer, description, location
+            from jobs
+            where status = 'active'
+              and exists (
+                  select 1
+                  from job_sources js
+                  join sources s on s.id = js.source_id
+                  where js.job_id = jobs.id
+                    and s.enabled = true
+              )
+              and ({' or '.join(clauses)})
+            order by published_at desc nulls last, id desc
+            limit :discovery_max_jobs
+            """
+        for row in connection.execute(sa.text(discovery_sql), params).mappings():
+            row_dict = dict(row)
+            job_id = int(row_dict["id"])
+            if job_id not in rows_by_id:
+                discovery_rows_added += 1
+                rows_by_id[job_id] = row_dict
+
+    return list(rows_by_id.values()), local_rows_added, remote_rows_added, discovery_rows_added
+
+
 def run_deterministic_recommendations(
     connection: Connection,
     *,
     max_jobs: int = 500,
+    activate_candidates: bool = True,
+    deactivate_existing: bool = True,
 ) -> dict[str, int]:
     settings = get_settings()
     profile_row = connection.execute(
@@ -600,26 +810,14 @@ def run_deterministic_recommendations(
 
     profile_id = int(profile_row["id"])
     profile = dict(profile_row["profile"])
-    job_rows = list(
-        connection.execute(
-            sa.text(
-                """
-                select id, title, employer, description, location
-                from jobs
-                where status = 'active'
-                  and exists (
-                      select 1
-                      from job_sources js
-                      join sources s on s.id = js.source_id
-                      where js.job_id = jobs.id
-                        and s.enabled = true
-                  )
-                order by published_at desc nulls last, id desc
-                limit :max_jobs
-                """
-            ),
-            {"max_jobs": max_jobs},
-        ).mappings()
+    discovery_terms = discovery_pool_terms(profile, settings.discovery_search_queries)
+    job_rows, local_pool, remote_pool, discovery_pool = fetch_active_job_rows(
+        connection,
+        max_jobs=max_jobs,
+        profile=profile,
+        local_max_jobs=settings.matcher_local_max_jobs,
+        remote_max_jobs=settings.matcher_remote_max_jobs,
+        discovery_terms=discovery_terms,
     )
 
     evaluated = 0
@@ -710,20 +908,21 @@ def run_deterministic_recommendations(
             commutable_or_full_remote_order += 1
             commutable_or_full_remote_rank_by_job_id[job.id] = commutable_or_full_remote_order
 
-    connection.execute(
-        sa.text(
-            """
-            update recommendations
-            set is_active = false,
-                rank = null,
-                commutable_rank = null,
-                commutable_or_full_remote_rank = null,
-                nationwide_rank = null
-            where profile_id = :profile_id
-            """
-        ),
-        {"profile_id": profile_id},
-    )
+    if deactivate_existing:
+        connection.execute(
+            sa.text(
+                """
+                update recommendations
+                set is_active = false,
+                    rank = null,
+                    commutable_rank = null,
+                    commutable_or_full_remote_rank = null,
+                    nationwide_rank = null
+                where profile_id = :profile_id
+                """
+            ),
+            {"profile_id": profile_id},
+        )
     for job, result in scored:
         assessment = assessment_by_job_id[job.id]
         evidence = LocationEvidence(text=assessment.evidence_text, tone=assessment.tone)
@@ -781,7 +980,7 @@ def run_deterministic_recommendations(
                     :travel_routing_profile,
                     :rationale,
                     CAST(:concerns AS jsonb),
-                    true
+                    :is_active
                 )
                 on conflict (profile_id, job_id)
                 do update set
@@ -793,7 +992,7 @@ def run_deterministic_recommendations(
                             select 1
                             from recommendation_feedback rf
                             where rf.recommendation_id = recommendations.id
-                              and (rf.rating = 1 or rf.action = 'not_relevant')
+                              and (rf.rating <= 2 or rf.action = 'not_relevant')
                         )
                         then null
                         else excluded.rank
@@ -806,7 +1005,7 @@ def run_deterministic_recommendations(
                             select 1
                             from recommendation_feedback rf
                             where rf.recommendation_id = recommendations.id
-                              and (rf.rating = 1 or rf.action = 'not_relevant')
+                              and (rf.rating <= 2 or rf.action = 'not_relevant')
                         )
                         then null
                         else excluded.commutable_rank
@@ -816,7 +1015,7 @@ def run_deterministic_recommendations(
                             select 1
                             from recommendation_feedback rf
                             where rf.recommendation_id = recommendations.id
-                              and (rf.rating = 1 or rf.action = 'not_relevant')
+                              and (rf.rating <= 2 or rf.action = 'not_relevant')
                         )
                         then null
                         else excluded.commutable_or_full_remote_rank
@@ -826,7 +1025,7 @@ def run_deterministic_recommendations(
                             select 1
                             from recommendation_feedback rf
                             where rf.recommendation_id = recommendations.id
-                              and (rf.rating = 1 or rf.action = 'not_relevant')
+                              and (rf.rating <= 2 or rf.action = 'not_relevant')
                         )
                         then null
                         else excluded.nationwide_rank
@@ -840,12 +1039,15 @@ def run_deterministic_recommendations(
                     travel_routing_profile = excluded.travel_routing_profile,
                     rationale = excluded.rationale,
                     concerns = excluded.concerns,
-                    is_active = not exists (
-                        select 1
-                        from recommendation_feedback rf
-                        where rf.recommendation_id = recommendations.id
-                          and (rf.rating = 1 or rf.action = 'not_relevant')
-                    )
+                    is_active = case
+                        when :is_active then not exists (
+                            select 1
+                            from recommendation_feedback rf
+                            where rf.recommendation_id = recommendations.id
+                              and (rf.rating <= 2 or rf.action = 'not_relevant')
+                        )
+                        else recommendations.is_active
+                    end
                 """
             ),
             {
@@ -870,10 +1072,38 @@ def run_deterministic_recommendations(
                 "travel_routing_profile": assessment.routing_profile,
                 "rationale": result.rationale,
                 "concerns": json.dumps(concerns, ensure_ascii=False),
+                "is_active": activate_candidates,
             },
         )
 
-    return {"profile_id": profile_id, "evaluated": evaluated, "recommended": len(scored)}
+    return {
+        "profile_id": profile_id,
+        "evaluated": evaluated,
+        "candidate_window": len(job_rows),
+        "local_pool": local_pool,
+        "remote_pool": remote_pool,
+        "discovery_pool": discovery_pool,
+        "deterministic_passes": len(travel_scored),
+        "commutable_candidates": len(commutable_rank_by_job_id),
+        "commutable_or_full_remote_candidates": len(commutable_or_full_remote_rank_by_job_id),
+        "recommended": len(scored),
+    }
+
+
+def llm_review_bucket_limits(max_jobs: int) -> dict[str, int]:
+    if max_jobs <= 0:
+        return {"commutable": 0, "remote": 0, "nationwide": 0}
+    commutable = min(max_jobs, max(1, round(max_jobs * 0.4)))
+    remaining = max_jobs - commutable
+    remote = min(remaining, round(max_jobs * 0.2))
+    nationwide = max_jobs - commutable - remote
+    return {"commutable": commutable, "remote": remote, "nationwide": nationwide}
+
+
+def commit_if_supported(connection: Connection) -> None:
+    commit = getattr(connection, "commit", None)
+    if callable(commit):
+        commit()
 
 
 def run_llm_evaluations(
@@ -913,46 +1143,131 @@ def run_llm_evaluations(
         )
     if eval_hints:
         augmented_profile_summary += "\n\nArviointivihjeet:\n" + "\n".join(str(hint) for hint in eval_hints)
-    rows = connection.execute(
+    bucket_limits = llm_review_bucket_limits(max_jobs)
+    rows = list(connection.execute(
         sa.text(
             """
+            with eligible as (
+                select
+                    r.id as recommendation_id,
+                    r.job_id,
+                    r.deterministic_result,
+                    r.commutable,
+                    r.commutable_or_full_remote,
+                    r.commutable_rank,
+                    r.commutable_or_full_remote_rank,
+                    r.nationwide_rank,
+                    r.machine_score,
+                    j.title,
+                    j.employer,
+                    j.description,
+                    j.location,
+                    case
+                        when r.llm_evaluation_id is null then 0
+                        when current_eval.prompt_version is distinct from :prompt_version then 1
+                        else 2
+                    end as review_priority
+                from recommendations r
+                join jobs j on j.id = r.job_id
+                left join llm_evaluations current_eval on current_eval.id = r.llm_evaluation_id
+                where r.profile_id = :profile_id
+                  and j.status = 'active'
+                  and not exists (
+                      select 1
+                      from recommendation_feedback rf
+                      where rf.recommendation_id = r.id
+                        and (rf.rating <= 2 or rf.action = 'not_relevant')
+                  )
+            ),
+            commutable_candidates as (
+                select *, 0 as bucket_order
+                from eligible
+                where commutable = true
+                order by
+                    review_priority,
+                    commutable_rank asc nulls last,
+                    nationwide_rank asc nulls last,
+                    machine_score desc,
+                    recommendation_id desc
+                limit :commutable_llm_limit
+            ),
+            remote_candidates as (
+                select *, 1 as bucket_order
+                from eligible
+                where commutable = false
+                  and commutable_or_full_remote = true
+                  and recommendation_id not in (
+                      select recommendation_id from commutable_candidates
+                  )
+                order by
+                    review_priority,
+                    commutable_or_full_remote_rank asc nulls last,
+                    nationwide_rank asc nulls last,
+                    machine_score desc,
+                    recommendation_id desc
+                limit :remote_llm_limit
+            ),
+            nationwide_candidates as (
+                select *, 2 as bucket_order
+                from eligible
+                where recommendation_id not in (
+                    select recommendation_id from commutable_candidates
+                    union
+                    select recommendation_id from remote_candidates
+                )
+                order by
+                    review_priority,
+                    nationwide_rank asc nulls last,
+                    machine_score desc,
+                    recommendation_id desc
+                limit :nationwide_llm_limit
+            )
             select
-                r.id as recommendation_id,
-                r.job_id,
-                r.deterministic_result,
-                j.title,
-                j.employer,
-                j.description,
-                j.location
-            from recommendations r
-            join jobs j on j.id = r.job_id
-            left join llm_evaluations current_eval on current_eval.id = r.llm_evaluation_id
-            where r.profile_id = :profile_id
-              and r.is_active = true
-              and j.status = 'active'
+                recommendation_id,
+                job_id,
+                deterministic_result,
+                title,
+                employer,
+                description,
+                location
+            from (
+                select * from commutable_candidates
+                union all
+                select * from remote_candidates
+                union all
+                select * from nationwide_candidates
+            ) selected
             order by
-                case
-                    when r.llm_evaluation_id is null then 0
-                    when current_eval.prompt_version is distinct from :prompt_version then 1
-                    else 2
-                end,
-                case when r.commutable then 0 when r.commutable_or_full_remote then 1 else 2 end,
-                r.commutable_rank asc nulls last,
-                r.commutable_or_full_remote_rank asc nulls last,
-                r.nationwide_rank asc nulls last,
-                r.machine_score desc,
-                r.id desc
-            limit :max_jobs
+                bucket_order,
+                review_priority,
+                coalesce(commutable_rank, commutable_or_full_remote_rank, nationwide_rank) asc nulls last,
+                machine_score desc,
+                recommendation_id desc
             """
         ),
-        {"profile_id": profile_id, "max_jobs": max_jobs, "prompt_version": settings.llm_prompt_version},
-    ).mappings()
+        {
+            "profile_id": profile_id,
+            "commutable_llm_limit": bucket_limits["commutable"],
+            "remote_llm_limit": bucket_limits["remote"],
+            "nationwide_llm_limit": bucket_limits["nationwide"],
+            "prompt_version": settings.llm_prompt_version,
+        },
+    ).mappings())
+    logger.info(
+        "event=llm_evaluation_candidates_selected total=%s commutable_limit=%s remote_limit=%s nationwide_limit=%s prompt_version=%s",
+        len(rows),
+        bucket_limits["commutable"],
+        bucket_limits["remote"],
+        bucket_limits["nationwide"],
+        settings.llm_prompt_version,
+    )
+    commit_if_supported(connection)
 
     evaluated = 0
     failed = 0
     eval_model = configured_eval_model(settings, provider.provider_name)
     skipped = 0
-    for row in rows:
+    for index, row in enumerate(rows, start=1):
         deterministic_result = row.get("deterministic_result") or {}
         if isinstance(deterministic_result, str):
             deterministic_result = json.loads(deterministic_result)
@@ -987,6 +1302,7 @@ def run_llm_evaluations(
             ),
             {"request_hash": request_hash},
         ).mappings().one_or_none()
+        commit_if_supported(connection)
         try:
             if existing is None:
                 evaluation, metadata = provider.evaluate_job_fit(
@@ -1064,12 +1380,30 @@ def run_llm_evaluations(
                 },
             )
             evaluated += 1
+            commit_if_supported(connection)
+            if evaluated == 1 or evaluated % 10 == 0 or index == len(rows):
+                logger.info(
+                    "event=llm_evaluation_progress evaluated=%s failed=%s skipped=%s total=%s job_id=%s",
+                    evaluated,
+                    failed,
+                    skipped,
+                    len(rows),
+                    row["job_id"],
+                )
         except Exception as exc:
+            commit_if_supported(connection)
             failed += 1
             logger.exception("event=llm_evaluation_failed job_id=%s", row["job_id"])
             if isinstance(exc, EvaluationProviderUnavailable):
                 mark_provider_unavailable(settings, str(exc))
                 break
+    logger.info(
+        "event=llm_evaluation_completed evaluated=%s failed=%s skipped=%s total=%s",
+        evaluated,
+        failed,
+        skipped,
+        len(rows),
+    )
     return {"llm_evaluated": evaluated, "llm_failed": failed, "llm_skipped": skipped}
 
 
@@ -1109,7 +1443,43 @@ def refresh_active_recommendation_ranks(
                       select 1
                       from recommendation_feedback rf
                       where rf.recommendation_id = r.id
-                        and (rf.rating = 1 or rf.action = 'not_relevant')
+                        and (rf.rating <= 2 or rf.action = 'not_relevant')
+                  )
+              )
+            """
+        ),
+        {
+            "profile_id": profile_id,
+            "require_llm_review": require_llm_review,
+            "prompt_version": prompt_version,
+        },
+    )
+    connection.execute(
+        sa.text(
+            """
+            update recommendations r
+            set is_active = true
+            where r.profile_id = :profile_id
+              and not (
+                  r.suggested_action = 'skip'
+                  or r.llm_score < 40
+                  or r.fit_tier in ('generic_customer_service_only', 'not_applicable')
+                  or (:require_llm_review and r.llm_evaluation_id is null)
+                  or (
+                      :require_llm_review
+                      and :prompt_version is not null
+                      and exists (
+                          select 1
+                          from llm_evaluations e
+                          where e.id = r.llm_evaluation_id
+                            and e.prompt_version is distinct from :prompt_version
+                      )
+                  )
+                  or exists (
+                      select 1
+                      from recommendation_feedback rf
+                      where rf.recommendation_id = r.id
+                        and (rf.rating <= 2 or rf.action = 'not_relevant')
                   )
               )
             """
@@ -1252,20 +1622,27 @@ def refresh_active_recommendation_ranks(
 def run_matching(max_jobs: int = 500) -> dict[str, int]:
     settings = get_settings()
     engine = get_engine()
+    provider = build_evaluation_provider(settings)
     with engine.begin() as connection:
-        result = run_deterministic_recommendations(connection, max_jobs=max_jobs)
-        profile_id = int(result.get("profile_id") or 0)
-        provider = build_evaluation_provider(settings)
-        if provider is None:
-            if profile_id:
+        result = run_deterministic_recommendations(
+            connection,
+            max_jobs=max_jobs,
+            activate_candidates=provider is None,
+            deactivate_existing=provider is None,
+        )
+    profile_id = int(result.get("profile_id") or 0)
+    if provider is None:
+        if profile_id:
+            with engine.begin() as connection:
                 result["recommended"] = refresh_active_recommendation_ranks(
                     connection,
                     profile_id=profile_id,
                     require_llm_review=False,
                     prompt_version=settings.llm_prompt_version,
                 )
-            result.update({"llm_evaluated": 0, "llm_failed": 0})
-            return result
+        result.update({"llm_evaluated": 0, "llm_failed": 0})
+        return result
+    with engine.connect() as connection:
         result.update(
             run_llm_evaluations(
                 connection,
@@ -1273,11 +1650,12 @@ def run_matching(max_jobs: int = 500) -> dict[str, int]:
                 max_jobs=settings.llm_eval_max_jobs,
             )
         )
-        if profile_id:
+    if profile_id:
+        with engine.begin() as connection:
             result["recommended"] = refresh_active_recommendation_ranks(
                 connection,
                 profile_id=profile_id,
                 require_llm_review=True,
                 prompt_version=settings.llm_prompt_version,
             )
-        return result
+    return result

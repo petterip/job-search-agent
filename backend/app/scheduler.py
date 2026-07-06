@@ -55,10 +55,12 @@ def configured_scheduled_sources() -> tuple[tuple[str, int], ...]:
     unknown = sorted(enabled - known)
     if unknown:
         raise ValueError(f"Unknown COLLECTOR_ENABLED_SOURCES entries: {', '.join(unknown)}")
+    settings = get_settings()
     return tuple(
         (source_name, interval_minutes)
         for source_name, interval_minutes in AVAILABLE_SCHEDULED_SOURCES
         if source_name in enabled
+        and (source_name != LinkedinAdapter.source_name or settings.linkedin_enabled)
     )
 
 
@@ -213,12 +215,16 @@ async def scheduled_pipeline() -> None:
         logger.info("event=daily_pipeline_skipped reason=pipeline_already_running")
         return
     try:
-        enrichment_result = run_enrichment()
-        feedback_analysis_result = drain_pending_feedback_analyses()
+        enrichment_result = {
+            "detail_http": run_enrichment(enricher="detail_http"),
+            "jobly_browser": run_enrichment(enricher="jobly_browser"),
+        }
         engine = get_engine()
         with engine.begin() as connection:
-            feedback_learning_result = learn_from_feedback(connection)
             location_result = enrich_job_locations(connection)
+        feedback_analysis_result = drain_pending_feedback_analyses()
+        with engine.begin() as connection:
+            feedback_learning_result = learn_from_feedback(connection)
         matching_result = run_matching(max_jobs=settings.matcher_max_jobs)
         finish_pipeline_run(settings.database_url, run_id, "completed")
         logger.info(
