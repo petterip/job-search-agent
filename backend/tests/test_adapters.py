@@ -629,3 +629,106 @@ def test_varbi_helpers_parse_rss_and_description() -> None:
     )
     assert listing.external_id == "12345"
     assert listing.employer == "Oulun yliopisto"
+
+
+class _FakeJobsResponse:
+    def __init__(self, text: str, status_code: int = 200) -> None:
+        self.text = text
+        self.status_code = status_code
+
+    def raise_for_status(self) -> None:
+        if self.status_code >= 400:
+            raise RuntimeError(f"HTTP {self.status_code}")
+
+
+class _FakeJoblyClient:
+    def __init__(self, pages: dict[str, tuple[str, int]], **_kwargs) -> None:
+        self.pages = pages
+        self.requested: list[str] = []
+
+    async def __aenter__(self) -> "_FakeJoblyClient":
+        return self
+
+    async def __aexit__(self, *_args) -> None:
+        return None
+
+    async def get(self, url: str) -> _FakeJobsResponse:
+        self.requested.append(url)
+        text, status = self.pages.get(url, ("", 404))
+        return _FakeJobsResponse(text, status)
+
+
+def _sitemap(*entries: tuple[str, str | None]) -> str:
+    blocks = []
+    for url, lastmod in entries:
+        mod = f"<lastmod>{lastmod}</lastmod>" if lastmod else ""
+        blocks.append(f"<url><loc>{url}</loc>{mod}</url>")
+    return "<urlset>" + "".join(blocks) + "</urlset>"
+
+
+def test_jobly_resumable_scan_merges_identities_and_reports_outcomes(monkeypatch) -> None:
+    import httpx
+
+    from app.adapters.jobly import JoblyAdapter
+
+    sitemap = _sitemap(
+        ("https://www.jobly.fi/tyopaikka/alpha-101", "2026-09-01"),
+        ("https://www.jobly.fi/tyopaikka/alpha-101-alias", None),  # alias, older evidence
+        ("https://www.jobly.fi/tyopaikka/beta-102", "2026-09-02"),
+        ("https://www.jobly.fi/tyopaikka/gamma-103", None),
+    )
+    detail = "<script type=\"application/ld+json\">{\"@type\": \"JobPosting\", \"title\": \"Alpha\"}</script>"
+    pages = {
+        "https://www.jobly.fi/sitemap.xml?page=1": (sitemap, 200),
+        "https://www.jobly.fi/tyopaikka/alpha-101": (detail, 200),
+        "https://www.jobly.fi/tyopaikka/beta-102": ("", 404),
+        "https://www.jobly.fi/tyopaikka/gamma-103": ("<html>no jsonld</html>", 200),
+    }
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kw: _FakeJoblyClient(pages, **kw))
+    adapter = JoblyAdapter()
+    adapter.sitemap_urls = ["https://www.jobly.fi/sitemap.xml?page=1"]
+
+    import asyncio
+
+    result = asyncio.run(
+        adapter.collect(
+            watermark=None,
+            pending_entries=[
+                ("101", "https://www.jobly.fi/tyopaikka/alpha-101", None),
+                ("102", "https://www.jobly.fi/tyopaikka/beta-102", None),
+                ("103", "https://www.jobly.fi/tyopaikka/gamma-103", None),
+            ],
+        )
+    )
+
+    identities = {entry[0] for entry in result.scan_entries}
+    # Duplicate/alias URLs share one external id.
+    assert identities == {"101", "102", "103"}
+    assert result.scan_outcomes == {"101": "classified", "102": "missing", "103": "classified"}
+    # Only the claimed batch was fetched (no newest-first prefix scan).
+    requested = result.__dict__.get("requested")
+    assert len(result.listings) == 2
+
+
+def test_jobly_legacy_scan_marks_truncation(monkeypatch) -> None:
+    import httpx
+
+    from app.adapters.jobly import JoblyAdapter
+
+    sitemap = _sitemap(
+        *[(f"https://www.jobly.fi/tyopaikka/job-{i}", f"2026-09-{i:02d}") for i in range(1, 6)]
+    )
+    pages = {"https://www.jobly.fi/sitemap.xml?page=1": (sitemap, 200)}
+    for i in range(1, 6):
+        pages[f"https://www.jobly.fi/tyopaikka/job-{i}"] = ("<html>no jsonld</html>", 200)
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kw: _FakeJoblyClient(pages, **kw))
+    adapter = JoblyAdapter()
+    adapter.sitemap_urls = ["https://www.jobly.fi/sitemap.xml?page=1"]
+
+    import asyncio
+
+    result = asyncio.run(adapter.collect(watermark=None, max_urls=2))
+
+    assert result.stopped_at_watermark is True
+    assert "legacy_truncated_scan" in result.warnings
+    assert len(result.scan_entries) == 5

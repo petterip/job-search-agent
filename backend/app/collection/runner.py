@@ -10,6 +10,16 @@ import sqlalchemy as sa
 from sqlalchemy.engine import Connection, Engine
 
 from app.adapters.base import NormalizedListing, SourceAdapter, ensure_aware_utc
+from app.collection.scan_state import (
+    OUTCOME_INVALID,
+    SitemapEntry,
+    claim_scan_batch,
+    close_absent_members,
+    frontier_drained,
+    mark_scan_outcome,
+    scan_backlog_report,
+    sync_sitemap_entries,
+)
 from app.collection.events import (
     current_source_id,
     current_source_name,
@@ -956,12 +966,40 @@ async def run_source_collection(
         source_id_token = current_source_id.set(int(source_id))
         source_name_token = current_source_name.set(adapter.source_name)
         try:
-            fetch_result = await adapter.collect(
-                watermark=watermark,
-                page_size=page_size,
-                max_pages=max_pages,
-                max_urls=max_urls,
-            )
+            resumable_scan = bool(getattr(adapter, "supports_resumable_scan", False))
+            pending_entries: list[tuple[str, str, Any]] | None = None
+            if resumable_scan:
+                settings_for_scan = get_settings()
+                with engine.begin() as connection:
+                    members = claim_scan_batch(
+                        connection,
+                        source_id=source_id,
+                        limit=max_urls or settings_for_scan.jobly_max_urls_per_run,
+                    )
+                pending_entries = [
+                    (member.external_id, member.canonical_url, member.lastmod)
+                    for member in members
+                ]
+                logger.info(
+                    "event=source_scan_batch_claimed source=%s claimed=%s",
+                    adapter.source_name,
+                    len(pending_entries),
+                )
+            if resumable_scan:
+                fetch_result = await adapter.collect(
+                    watermark=watermark,
+                    page_size=page_size,
+                    max_pages=max_pages,
+                    max_urls=max_urls,
+                    pending_entries=pending_entries,
+                )
+            else:
+                fetch_result = await adapter.collect(
+                    watermark=watermark,
+                    page_size=page_size,
+                    max_pages=max_pages,
+                    max_urls=max_urls,
+                )
             counts: dict[str, Any] = {
                 "source": adapter.source_name,
                 "skipped": False,
@@ -983,7 +1021,45 @@ async def run_source_collection(
                     seen_external_ids.add(listing.external_id)
                     result = upsert_listing(connection, source_id, listing)
                     counts[result] = int(counts[result]) + 1
-                if should_mark_missing_source_listings_removed(
+                scan_drained = True
+                if resumable_scan:
+                    settings_for_scan = get_settings()
+                    scan_entries = [
+                        SitemapEntry(
+                            external_id=str(external_id),
+                            canonical_url=str(url),
+                            lastmod=lastmod,
+                        )
+                        for external_id, url, lastmod in fetch_result.scan_entries
+                    ]
+                    counts["scan_sync"] = sync_sitemap_entries(
+                        connection,
+                        source_id=source_id,
+                        entries=scan_entries,
+                    )
+                    for external_id, _url, _lastmod in pending_entries or []:
+                        mark_scan_outcome(
+                            connection,
+                            source_id=source_id,
+                            external_id=str(external_id),
+                            outcome=fetch_result.scan_outcomes.get(
+                                str(external_id), OUTCOME_INVALID
+                            ),
+                            retry_delay_minutes=settings_for_scan.jobly_scan_retry_minutes,
+                            closure_attempts=settings_for_scan.jobly_scan_closure_attempts,
+                        )
+                    counts["scan_closed_absent"] = close_absent_members(
+                        connection,
+                        source_id=source_id,
+                        grace_hours=settings_for_scan.jobly_scan_grace_hours,
+                    )
+                    scan_drained = frontier_drained(connection, source_id=source_id)
+                    counts["scan_backlog"] = scan_backlog_report(
+                        connection, source_id=source_id
+                    )
+                    counts["scan_frontier_drained"] = scan_drained
+
+                if not resumable_scan and should_mark_missing_source_listings_removed(
                     watermark=watermark,
                     fetched_count=len(fetch_result.listings),
                     stopped_at_watermark=fetch_result.stopped_at_watermark,
@@ -997,7 +1073,7 @@ async def run_source_collection(
                         seen_external_ids=seen_external_ids,
                     )
 
-                if fetch_result.complete:
+                if fetch_result.complete and scan_drained:
                     next_watermark = advance_watermark(
                         connection,
                         source_id,
@@ -1005,12 +1081,14 @@ async def run_source_collection(
                         fetch_result.newest_watermark,
                     )
                 else:
-                    # A partial fetch must not move the cursor: unprocessed
-                    # URLs older than the partial batch would be skipped.
+                    # A partial fetch or an undrained scan frontier must not
+                    # move the cursor: unprocessed URLs would be skipped.
                     next_watermark = watermark
-                    logger.warning(
-                        "event=source_collection_partial source=%s warnings=%s",
+                    logger.info(
+                        "event=source_collection_cursor_held source=%s drained=%s complete=%s warnings=%s",
                         adapter.source_name,
+                        scan_drained,
+                        fetch_result.complete,
                         fetch_result.warnings,
                     )
 

@@ -299,12 +299,34 @@ action was run.
   `Index Scan using ix_jobs_dedupe_normalized` (down from ~42 ms / ~12.7k
   buffers) — roughly a 100x reduction on the per-listing hot path.
 
+### Sixth implementation batch (2026-09-16)
+
+- **P1-7b resumable Jobly acquisition.** Migration `20260916_0022` adds
+  `source_scan_members` (per source+external-id state machine:
+  `pending`/`classified`/`retry`/`closed`, attempts, next-attempt, sitemap
+  presence) and `source_scan_progress`. `app/collection/scan_state.py` freezes
+  the merged sitemap frontier by external id (url/lastmod are mutable
+  evidence), claims the oldest unresolved members first with no-date entries
+  first, records outcomes after persistence, keeps a single 404 retryable until
+  the configured confirmation count, never closes a parse-invalid member, closes
+  sitemap-absent members only after `JOBLY_SCAN_GRACE_HOURS`, and reports backlog
+  age/per-state counts. The collector runner passes the claimed batch to
+  `JoblyAdapter.collect`, persists member state after the listings, and advances
+  the source cursor only when the frontier is drained — so a bounded run never
+  skips unprocessed older URLs and never re-fetches the same newest prefix.
+  New settings: `JOBLY_SCAN_GRACE_HOURS`, `JOBLY_SCAN_RETRY_MINUTES`,
+  `JOBLY_SCAN_CLOSURE_ATTEMPTS`.
+- Known drain rate: with the default `JOBLY_MAX_URLS_PER_RUN=100` and one
+  scheduled collection per day, draining the observed ~14k-URL Jobly sitemap
+  takes many runs; the progress/backlog report makes the remaining work
+  explicit and the cap is configurable.
+
 ### Verification commands
 
 ```bash
 cd backend
-python -m pytest --timeout=10 -q                       # 409 passed, 28 skipped
-TEST_DATABASE_URL=postgresql+psycopg://... python -m pytest --timeout=30 -q  # 437 passed
+python -m pytest --timeout=10 -q                       # 411 passed, 35 skipped
+TEST_DATABASE_URL=postgresql+psycopg://... python -m pytest --timeout=30 -q  # 446 passed
 cd ../web && npm run typecheck && npm run build
 ```
 

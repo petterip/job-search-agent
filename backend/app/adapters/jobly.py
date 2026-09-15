@@ -147,6 +147,8 @@ class JoblyAdapter:
     def url(self) -> str:
         return self.sitemap_urls[0] if self.sitemap_urls else "https://www.jobly.fi/sitemap.xml?page=1"
 
+    supports_resumable_scan = True
+
     async def collect(
         self,
         *,
@@ -154,11 +156,13 @@ class JoblyAdapter:
         page_size: int | None = None,
         max_pages: int | None = None,
         max_urls: int | None = None,
+        pending_entries: list[tuple[str, str, datetime | None]] | None = None,
     ) -> CollectionFetchResult:
         import httpx
 
         effective_max_urls = max_urls or self.max_urls
-        candidate_urls: list[tuple[str, datetime | None]] = []
+        resumable = pending_entries is not None
+        merged: dict[str, tuple[str, datetime | None]] = {}
 
         async with httpx.AsyncClient(
             timeout=60,
@@ -177,13 +181,48 @@ class JoblyAdapter:
                     continue
                 response = await client.get(sitemap_url)
                 response.raise_for_status()
-                candidate_urls.extend(parse_sitemap_urls(response.text, watermark=watermark))
+                for url, lastmod in parse_sitemap_urls(response.text, watermark=None):
+                    external_id = validated_external_id(jobly_external_id(url))
+                    if not external_id:
+                        log_url_rejection(
+                            logger,
+                            source_name=self.source_name,
+                            reason="invalid_external_id",
+                            value=url,
+                        )
+                        continue
+                    existing = merged.get(external_id)
+                    # A corrected/newer lastmod and canonical URL are mutable
+                    # evidence; the external id remains the occurrence identity.
+                    if existing is None or (
+                        lastmod is not None
+                        and (existing[1] is None or lastmod > existing[1])
+                    ):
+                        merged[external_id] = (url, lastmod)
+
+            scan_entries = [
+                (external_id, url, lastmod)
+                for external_id, (url, lastmod) in merged.items()
+            ]
+
+            if resumable:
+                work = list(pending_entries or [])
+            else:
+                ordered = sorted(
+                    scan_entries,
+                    key=lambda item: (
+                        item[2] or datetime.min.replace(tzinfo=timezone.utc),
+                        item[0],
+                    ),
+                    reverse=True,
+                )
+                work = ordered[:effective_max_urls]
 
             listings: list[NormalizedListing] = []
+            outcomes: dict[str, str] = {}
             newest_watermark = watermark
-            fetched = 0
 
-            for url, lastmod in candidate_urls[:effective_max_urls]:
+            for external_id, url, lastmod in work:
                 url_reason = source_url_rejection_reason(self.source_name, url)
                 if url_reason is not None:
                     log_url_rejection(
@@ -192,32 +231,50 @@ class JoblyAdapter:
                         reason=url_reason,
                         value=url,
                     )
+                    outcomes[external_id] = "invalid"
                     continue
                 page_response = await client.get(url)
                 if page_response.status_code == 404:
                     logger.warning("event=jobly_listing_missing url=%s", url)
+                    outcomes[external_id] = "missing"
                     continue
                 page_response.raise_for_status()
-                payload = extract_jobly_detail_payload(page_response.text, source_url=url)
-                listing = self.normalize(payload, source_url=url)
+                try:
+                    payload = extract_jobly_detail_payload(page_response.text, source_url=url)
+                    listing = self.normalize(payload, source_url=url)
+                except Exception:
+                    logger.warning(
+                        "event=jobly_listing_parse_invalid url=%s", url, exc_info=True
+                    )
+                    outcomes[external_id] = "invalid"
+                    continue
                 listings.append(listing)
-                fetched += 1
-                lastmod = ensure_aware_utc(lastmod)
+                outcomes[external_id] = "classified"
+                normalized_lastmod = ensure_aware_utc(lastmod)
                 published_at = ensure_aware_utc(listing.published_at)
-                if lastmod is not None and (
-                    newest_watermark is None or lastmod > newest_watermark
+                if normalized_lastmod is not None and (
+                    newest_watermark is None or normalized_lastmod > newest_watermark
                 ):
-                    newest_watermark = lastmod
+                    newest_watermark = normalized_lastmod
                 elif published_at is not None and (
                     newest_watermark is None or published_at > newest_watermark
                 ):
                     newest_watermark = published_at
 
+        warnings: list[str] = []
+        if not resumable and len(scan_entries) > effective_max_urls:
+            # Legacy direct callers still truncate; the runner uses the
+            # resumable path and drains the frontier across runs instead.
+            warnings.append("legacy_truncated_scan")
+
         return CollectionFetchResult(
             listings=listings,
             newest_watermark=newest_watermark,
             pages_fetched=len(self.sitemap_urls),
-            stopped_at_watermark=len(candidate_urls) > effective_max_urls,
+            stopped_at_watermark=not resumable and len(scan_entries) > effective_max_urls,
+            warnings=warnings,
+            scan_entries=scan_entries,
+            scan_outcomes=outcomes,
         )
 
     def normalize(self, payload: dict, *, source_url: str) -> NormalizedListing:

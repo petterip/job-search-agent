@@ -313,6 +313,10 @@ class CollectionFetchResult:
     outcome: Literal["delta", "full_snapshot", "partial"] = "delta"
     warnings: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
+    # Resumable-scan evidence: the full frozen sitemap frontier and the outcome
+    # of each claimed member ("classified" | "missing" | "invalid").
+    scan_entries: list[tuple[str, str, datetime | None]] = field(default_factory=list)
+    scan_outcomes: dict[str, str] = field(default_factory=dict)
 
     @property
     def complete(self) -> bool:

@@ -92,6 +92,9 @@ class Settings(BaseModel):
         ]
     )
     jobly_max_urls_per_run: int = 100
+    jobly_scan_grace_hours: int = 72
+    jobly_scan_retry_minutes: int = 60
+    jobly_scan_closure_attempts: int = 3
     eures_url: str = "https://europa.eu/eures/api/jv-searchengine/public/jv-search/search"
     eures_page_size: int = 50
     eures_max_pages: int = 5
@@ -276,6 +279,15 @@ def get_settings() -> Settings:
         laura_max_pages=_int_env("LAURA_MAX_PAGES", defaults.laura_max_pages),
         jobly_sitemap_urls=jobly_sitemap_urls,
         jobly_max_urls_per_run=_int_env("JOBLY_MAX_URLS_PER_RUN", defaults.jobly_max_urls_per_run),
+        jobly_scan_grace_hours=_int_env(
+            "JOBLY_SCAN_GRACE_HOURS", defaults.jobly_scan_grace_hours
+        ),
+        jobly_scan_retry_minutes=_int_env(
+            "JOBLY_SCAN_RETRY_MINUTES", defaults.jobly_scan_retry_minutes
+        ),
+        jobly_scan_closure_attempts=_int_env(
+            "JOBLY_SCAN_CLOSURE_ATTEMPTS", defaults.jobly_scan_closure_attempts
+        ),
         eures_page_size=_int_env("EURES_PAGE_SIZE", defaults.eures_page_size),
         eures_max_pages=_int_env("EURES_MAX_PAGES", defaults.eures_max_pages),
         collector_stale_run_minutes=_int_env(
