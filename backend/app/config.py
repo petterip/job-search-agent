@@ -106,6 +106,7 @@ class Settings(BaseModel):
     source_stale_after_minutes: int = 1560
     retention_raw_listing_days: int = 365
     retention_activity_days: int = 180
+    labelled_evaluation_path: str = ""
     kuntarekry_collection_mode: str = "regional"
     browserbase_api_key: str = ""
     google_maps_api_key: str = ""
@@ -313,6 +314,9 @@ def get_settings() -> Settings:
         ),
         retention_activity_days=_int_env(
             "RETENTION_ACTIVITY_DAYS", defaults.retention_activity_days
+        ),
+        labelled_evaluation_path=getenv(
+            "LABELLED_EVALUATION_PATH", defaults.labelled_evaluation_path
         ),
         kuntarekry_collection_mode=getenv(
             "KUNTAREKRY_COLLECTION_MODE",

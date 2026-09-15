@@ -422,11 +422,27 @@ source and fixed:
 - **Profile validation:** `qualification_checks` shapes and language
   `hard_filter` values are validated on import.
 
+### Twelfth implementation batch (2026-09-16)
+
+- **P2-23 tooling:** `app/labelled_evaluation.py` consumes a private labels file
+  (path via `LABELLED_EVALUATION_PATH` or `--labels`) and reports per-stratum and
+  overall recall at each pipeline stage over labelled positives, published
+  precision over published labelled rows, and a Wilson 95% interval for every
+  proportion. It refuses to run without labels, never commits them, and
+  `docs/labelled-evaluation-set.md` documents the format and suggested strata.
+  The relevance labels themselves are human input.
+- **P2-22 completed:** API shape, escalation and proposed-endpoint claims are
+  reconciled across the docs; the journal route inventory matches the shipped
+  API.
+- **P1-9a** is marked implemented: all of its acceptance criteria are met
+  (no provider/HTTP call inside an open transaction, durable per-batch
+  progress, stale-publication rejection, rollback on candidate DB failure).
+
 ### Verification commands
 
 ```bash
 cd backend
-python -m pytest --timeout=10 -q                       # 427 passed, 41 skipped
+python -m pytest --timeout=10 -q                       # 431 passed, 41 skipped
 TEST_DATABASE_URL=postgresql+psycopg://... python -m pytest --timeout=30 -q  # 451 passed
 cd ../web && npm run typecheck && npm run build
 ```
