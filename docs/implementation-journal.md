@@ -221,8 +221,8 @@ remaining gaps plus new regression risks. All were addressed:
 
 ```bash
 cd backend
-python -m pytest --timeout=10 -q                       # 369 passed, 25 skipped
-TEST_DATABASE_URL=postgresql+psycopg://... python -m pytest --timeout=30 -q  # 394 passed
+python -m pytest --timeout=10 -q                       # 371 passed, 25 skipped
+TEST_DATABASE_URL=postgresql+psycopg://... python -m pytest --timeout=30 -q  # 396 passed
 cd ../web && npm run typecheck && npm run build
 ```
 
