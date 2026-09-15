@@ -321,12 +321,23 @@ action was run.
   takes many runs; the progress/backlog report makes the remaining work
   explicit and the cap is configurable.
 
+### Seventh implementation batch (2026-09-16)
+
+- **P1-7c (partial).** Adapters extract source deadlines through
+  `extract_deadline` (`validThrough` from Jobly JSON-LD, plus
+  `applicationEndDate`/`endDate`/`deadline`/`expires*`/`closingDate` at the top
+  level or under `detail`) into `NormalizedListing.expires_at`. The collector
+  stores the latest non-null deadline monotonically in `jobs.expires_at` on
+  insert, cross-source dedupe and update, and never sets catalogue status from a
+  deadline — the profile freshness policy consumes it. Tests:
+  `tests/test_adapters.py`.
+
 ### Verification commands
 
 ```bash
 cd backend
-python -m pytest --timeout=10 -q                       # 411 passed, 35 skipped
-TEST_DATABASE_URL=postgresql+psycopg://... python -m pytest --timeout=30 -q  # 446 passed
+python -m pytest --timeout=10 -q                       # 413 passed, 35 skipped
+TEST_DATABASE_URL=postgresql+psycopg://... python -m pytest --timeout=30 -q  # 448 passed
 cd ../web && npm run typecheck && npm run build
 ```
 

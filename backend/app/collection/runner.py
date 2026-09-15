@@ -513,8 +513,8 @@ def upsert_listing(
             job_id = connection.execute(
                 sa.text(
                     """
-                    insert into jobs (title, employer, description, location, published_at, status)
-                    values (:title, :employer, :description, :location, :published_at, 'active')
+                    insert into jobs (title, employer, description, location, published_at, expires_at, status)
+                    values (:title, :employer, :description, :location, :published_at, :expires_at, 'active')
                     returning id
                     """
                 ),
@@ -524,6 +524,7 @@ def upsert_listing(
                     "description": listing.description,
                     "location": listing.location,
                     "published_at": listing.published_at,
+                    "expires_at": listing.expires_at,
                 },
             ).scalar_one()
         inserted_job_source_id = connection.execute(
@@ -609,6 +610,12 @@ def upsert_listing(
                             employer = coalesce(:employer, jobs.employer),
                             description = coalesce(:effective_description, jobs.description),
                             location = coalesce(:location, jobs.location),
+                            expires_at = case
+                                when :expires_at is not null
+                                 and (jobs.expires_at is null or :expires_at > jobs.expires_at)
+                                then :expires_at
+                                else jobs.expires_at
+                            end,
                             updated_at = case
                                 when jobs.title is distinct from coalesce(:title, jobs.title) then now()
                                 when jobs.employer is distinct from coalesce(:employer, jobs.employer) then now()
@@ -625,6 +632,7 @@ def upsert_listing(
                         "employer": effective_employer,
                         "effective_description": effective_description,
                         "location": effective_location,
+                        "expires_at": listing.expires_at,
                     },
                 )
         return result
@@ -668,6 +676,12 @@ def upsert_listing(
                         then :location
                         else jobs.location
                     end,
+                    expires_at = case
+                        when :expires_at is not null
+                         and (jobs.expires_at is null or :expires_at > jobs.expires_at)
+                        then :expires_at
+                        else jobs.expires_at
+                    end,
                     status = 'active',
                     updated_at = case
                         when jobs.employer is null and :employer is not null then now()
@@ -688,6 +702,7 @@ def upsert_listing(
                 "employer": listing.employer,
                 "effective_description": effective_description,
                 "location": listing.location,
+                "expires_at": listing.expires_at,
             },
         )
         return "deduplicated" if relinked_to_cross_source else "unchanged"
@@ -709,6 +724,12 @@ def upsert_listing(
                 description = coalesce(:effective_description, jobs.description),
                 location = :location,
                 published_at = :published_at,
+                expires_at = case
+                    when :expires_at is not null
+                     and (jobs.expires_at is null or :expires_at > jobs.expires_at)
+                    then :expires_at
+                    else jobs.expires_at
+                end,
                 status = 'active',
                 updated_at = now()
             where id = :job_id
@@ -721,6 +742,7 @@ def upsert_listing(
             "effective_description": effective_description,
             "location": listing.location,
             "published_at": listing.published_at,
+            "expires_at": listing.expires_at,
         },
     )
     connection.execute(

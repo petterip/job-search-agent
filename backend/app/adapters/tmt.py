@@ -4,6 +4,7 @@ from datetime import datetime
 from dateutil.parser import isoparse
 
 from app.adapters.base import (
+    extract_deadline,
     CollectionFetchResult,
     ensure_aware_utc,
     NormalizedListing,
@@ -236,4 +237,5 @@ class TmtAdapter:
             payload=payload,
             attribution=self.attribution,
             application_url=detail_url,
+            expires_at=extract_deadline(payload),
         )

@@ -732,3 +732,34 @@ def test_jobly_legacy_scan_marks_truncation(monkeypatch) -> None:
     assert result.stopped_at_watermark is True
     assert "legacy_truncated_scan" in result.warnings
     assert len(result.scan_entries) == 5
+
+
+def test_extract_deadline_reads_common_fields() -> None:
+    from datetime import datetime, timezone
+
+    from app.adapters.base import extract_deadline
+
+    assert extract_deadline({"validThrough": "2026-10-01T23:59:59+03:00"}) == datetime(
+        2026, 10, 1, 20, 59, 59, tzinfo=timezone.utc
+    )
+    assert extract_deadline({"detail": {"applicationEndDate": "2026-10-02"}}) is not None
+    assert extract_deadline({"deadline": "not-a-date"}) is None
+    assert extract_deadline({}) is None
+    assert extract_deadline(None) is None
+
+
+def test_jobly_normalize_carries_valid_through_deadline() -> None:
+    from app.adapters.jobly import JoblyAdapter
+
+    payload = {
+        "@type": "JobPosting",
+        "title": "Kirjastonhoitaja",
+        "datePosted": "2026-09-01",
+        "validThrough": "2026-10-01T23:59:59+03:00",
+    }
+    listing = JoblyAdapter().normalize(
+        payload, source_url="https://www.jobly.fi/tyopaikka/x-1234567"
+    )
+
+    assert listing.expires_at is not None
+    assert listing.expires_at.year == 2026 and listing.expires_at.month == 10

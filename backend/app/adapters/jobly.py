@@ -14,6 +14,7 @@ from app.adapters.base import (
     ensure_aware_utc,
     log_url_rejection,
     payload_content_hash,
+    extract_deadline,
     safe_source_url,
     source_url_rejection_reason,
     validated_external_id,
@@ -307,4 +308,5 @@ class JoblyAdapter:
             content_hash=payload_content_hash(stored_payload),
             payload=stored_payload,
             application_url=safe_url or None,
+            expires_at=extract_deadline(stored_payload),
         )

@@ -5,6 +5,7 @@ import httpx
 from dateutil.parser import isoparse
 
 from app.adapters.base import (
+    extract_deadline,
     CollectionFetchResult,
     ensure_aware_utc,
     NormalizedListing,
@@ -162,4 +163,5 @@ class DuunitoriAdapter:
             content_hash=payload_content_hash(payload),
             payload=payload,
             application_url=job_url,
+            expires_at=extract_deadline(payload),
         )

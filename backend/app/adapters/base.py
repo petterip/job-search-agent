@@ -295,6 +295,7 @@ class NormalizedListing:
     payload: dict
     attribution: str | None = None
     application_url: str | None = None
+    expires_at: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -321,6 +322,47 @@ class CollectionFetchResult:
     @property
     def complete(self) -> bool:
         return self.outcome != "partial"
+
+
+# Common source deadline field names across the adapters' payloads.
+DEADLINE_KEYS = (
+    "validThrough",
+    "applicationEndDate",
+    "application_end_date",
+    "endDate",
+    "end_date",
+    "deadline",
+    "expires",
+    "expiresAt",
+    "expires_at",
+    "closingDate",
+    "closing_date",
+)
+
+
+def extract_deadline(payload: object) -> datetime | None:
+    """Best-effort source deadline from a listing payload, normalised to UTC.
+
+    The value is evidence only: a stored deadline drives profile freshness and
+    never sets the catalogue status by itself.
+    """
+    if not isinstance(payload, dict):
+        return None
+    containers: list[dict] = [payload]
+    detail = payload.get("detail")
+    if isinstance(detail, dict):
+        containers.append(detail)
+    for container in containers:
+        for key in DEADLINE_KEYS:
+            value = container.get(key)
+            if not isinstance(value, str) or not value.strip():
+                continue
+            try:
+                parsed = isoparse(value.strip())
+            except (ValueError, OverflowError):
+                continue
+            return ensure_aware_utc(parsed)
+    return None
 
 
 def payload_content_hash(payload: dict) -> str:
