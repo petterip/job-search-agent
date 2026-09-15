@@ -195,16 +195,20 @@ These rules should be encoded in migrations, constraints, or tests rather than l
 
 Keep the API boring and explicit:
 
-| Endpoint | Purpose |
-|---|---|
-| `GET /health` | Service health. |
-| `GET /jobs` | Paginated all-jobs feed with filters and full-text search. |
-| `GET /jobs/{id}` | Job detail with source occurrences and attribution. |
-| `GET /recommendations` | Ranked recommendations for the single profile. |
-| `GET /recommendations/{id}` | Recommendation detail with scoring explanation. |
-| `GET /profile` / `PUT /profile` | Single job seeker profile and preferences. |
-| `GET /sources/status` | Source health, last run, counts, and failures. |
-| `POST /pipeline/run` | Manual operator trigger for collection + matching. |
+| Endpoint | Purpose | Status |
+|---|---|---|
+| `GET /health` | Service health (liveness only). | shipped |
+| `GET /jobs` | Paginated all-jobs feed with filters and full-text search. | shipped |
+| `GET /jobs/{id}` | Job detail with source occurrences and attribution. | shipped (operator-authenticated; embeds the private recommendation panel) |
+| `GET /recommendations` | Ranked recommendations for the single profile. | shipped (operator-authenticated) |
+| `POST /recommendations/{id}/feedback` | Rating/applied/comment for one recommendation. | shipped |
+| `GET /recommendations/{id}/feedback` | Stored feedback for one recommendation. | shipped |
+| `GET /recommendations/{id}/feedback/analysis` | Stored feedback analysis. | shipped |
+| `GET /sources` | Enabled source names. | shipped |
+| `GET /sources/status` | Source health, last run, counts, freshness and failures. | shipped |
+| `GET /recommendations/{id}` | Recommendation detail with scoring explanation. | proposed, not shipped |
+| `GET /profile` / `PUT /profile` | Single job seeker profile and preferences. | proposed, not shipped (profile import is `python -m app.profile`) |
+| `POST /pipeline/run` | Manual operator trigger for collection + matching. | proposed, not shipped (manual runs are `python -m app.collect` / `app.match`) |
 
 The portal should call the API rather than read the database directly.
 
@@ -428,7 +432,8 @@ The plan below is now a build plan, not only a stack comparison. It is intention
 
 **Acceptance criteria:**
 
-- [ ] `GET /profile` and `PUT /profile` work.
+- [ ] `GET /profile` and `PUT /profile` work (proposed; not shipped — profile
+      import is the `python -m app.profile` CLI).
 - [ ] CV text and preference notes can be stored locally.
 - [ ] Profile data is not logged accidentally.
 - [ ] API mutation is local-only or protected by an operator token before LAN exposure.
