@@ -352,7 +352,15 @@ action was run.
   events, closed occurrences, inactive recommendations, stale transit cache) and
   refuses to run in any non-dry-run mode. New settings
   `RETENTION_RAW_LISTING_DAYS` (365) and `RETENTION_ACTIVITY_DAYS` (180). No
-  deletion path exists. Tests: `tests/test_retention.py`.
+  deletion path exists. Tests: `tests/test_retention.py` plus a PostgreSQL
+  execution test (the first production run caught and fixed a regclass cast
+  error). Production dry run: `job_embeddings` 694.4 MB, `recommendations`
+  70.2 MB, `llm_evaluations` 8.5 MB; zero rows currently exceed the default
+  retention thresholds (raw 365 d, activity 180 d).
+- **P2-16 (completion):** a partial source fetch is now recorded with
+  `status='partial'` and its warnings in the run summary instead of
+  `status='success'`, so `/sources/status` does not report a degraded
+  collection as full success.
 
 ### Verification commands
 
