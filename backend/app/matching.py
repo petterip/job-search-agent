@@ -1445,6 +1445,16 @@ def commit_if_supported(connection: Connection) -> None:
         commit()
 
 
+def rollback_if_supported(connection: Connection) -> None:
+    """Recover from a failed statement instead of committing an aborted transaction."""
+    rollback = getattr(connection, "rollback", None)
+    if callable(rollback):
+        try:
+            rollback()
+        except Exception:
+            logger.warning("event=rollback_failed", exc_info=True)
+
+
 def evaluation_request_context(profile: dict[str, Any]) -> tuple[str, dict[str, Any]]:
     """One sanitized request assembly for selection, evaluation and inventory.
 
@@ -1710,6 +1720,7 @@ def run_llm_evaluations(
                 # Consume the paid budget before the call: a billable response
                 # that fails parsing still counts as an attempt.
                 paid_calls += 1
+                commit_if_supported(connection)
                 started = time.monotonic()
                 evaluation, metadata = evaluate_with_parse_retry(
                     provider,
@@ -1882,7 +1893,9 @@ def run_llm_evaluations(
                     row["job_id"],
                 )
         except Exception as exc:
-            commit_if_supported(connection)
+            # A database error leaves the transaction aborted; roll back so later
+            # candidates can still be processed.
+            rollback_if_supported(connection)
             failed += 1
             logger.exception("event=llm_evaluation_failed job_id=%s", row["job_id"])
             if isinstance(exc, EvaluationProviderUnavailable):

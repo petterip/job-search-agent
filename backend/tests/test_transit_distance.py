@@ -314,3 +314,48 @@ def test_provider_backoff_still_serves_cached_routes(monkeypatch, tmp_path):
     assert result["A, Finland"] is cached_result
     assert result.provider_backoff is True
     assert result.not_attempted_queries == {"B, Finland"}
+
+
+def test_transit_http_call_happens_outside_a_transaction(monkeypatch, tmp_path):
+    from app import transit_distance as transit_module
+
+    settings = _transit_settings(tmp_path)
+    monkeypatch.setattr(transit_module, "get_settings", lambda: settings)
+    monkeypatch.setattr(transit_module, "fetch_cached_transit_distances", lambda *a, **k: {})
+    monkeypatch.setattr(transit_module, "fetch_recent_transit_failures", lambda *a, **k: set())
+    monkeypatch.setattr(transit_module, "store_cached_transit_distance", lambda *a, **k: None)
+    monkeypatch.setattr(transit_module, "store_transit_failure", lambda *a, **k: None)
+
+    class TrackingConnection:
+        def __init__(self) -> None:
+            self.transaction_open = False
+
+        def commit(self) -> None:
+            self.transaction_open = False
+
+        def in_transaction(self) -> bool:
+            return self.transaction_open
+
+    connection = TrackingConnection()
+    seen: list[bool] = []
+
+    def fake_compute(destination, *, origin=None):  # noqa: ANN001, ARG001
+        seen.append(connection.in_transaction())
+        return transit_module.TransitDistanceResult(
+            origin="o",
+            destination=destination,
+            destination_query=f"{destination}, Finland",
+            distance_meters=1000,
+            distance_km=1,
+            duration_seconds=60,
+            duration_text="1 min",
+            summary_text="1 km · 1 min (julkiset)",
+        )
+
+    monkeypatch.setattr(transit_module, "compute_transit_distance", fake_compute)
+
+    transit_module.resolve_transit_for_queries(
+        connection, ["A, Finland", "B, Finland"], max_lookups=5
+    )
+
+    assert seen and all(state is False for state in seen)

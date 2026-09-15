@@ -362,11 +362,22 @@ action was run.
   `status='success'`, so `/sources/status` does not report a degraded
   collection as full success.
 
+### Tenth implementation batch (2026-09-16)
+
+- **P1-9a (partial):** embeddings, transit routing and the LLM evaluation now
+  commit any open write transaction immediately before the remote call, so no
+  HTTP/provider request runs inside an open transaction; embedding batches
+  commit as they complete and a failed evaluation rolls back rather than
+  committing an aborted transaction. Instrumented fakes assert
+  `in_transaction() is False` at every provider call (`tests/test_embeddings.py`,
+  `tests/test_transit_distance.py`). The full read-snapshot/short-write
+  restructure remains for a later batch.
+
 ### Verification commands
 
 ```bash
 cd backend
-python -m pytest --timeout=10 -q                       # 414 passed, 37 skipped
+python -m pytest --timeout=10 -q                       # 417 passed, 38 skipped
 TEST_DATABASE_URL=postgresql+psycopg://... python -m pytest --timeout=30 -q  # 451 passed
 cd ../web && npm run typecheck && npm run build
 ```

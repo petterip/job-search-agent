@@ -14,6 +14,18 @@ logger = logging.getLogger("matcher.embeddings")
 EMBEDDING_BATCH_SIZE = 64
 
 
+def _commit_if_supported(connection: Any) -> None:
+    """Close any open write transaction before a remote call.
+
+    Per-batch progress is committed as it is produced, so a later provider
+    failure does not roll back embeddings that already succeeded and no HTTP
+    request is issued while a transaction is open.
+    """
+    commit = getattr(connection, "commit", None)
+    if callable(commit):
+        commit()
+
+
 def embedding_hash(*, model: str, text: str) -> str:
     payload = {"model": model, "text": text}
     return hashlib.sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
@@ -121,6 +133,7 @@ def ensure_profile_embedding(
     ).scalar_one_or_none()
     if existing_hash == content_hash:
         return False
+    _commit_if_supported(connection)
     embedding = provider.embed_texts([text])[0]
     connection.execute(
         sa.text(
@@ -186,6 +199,7 @@ def ensure_job_embeddings(
     for start in range(0, len(missing_or_stale), EMBEDDING_BATCH_SIZE):
         batch_ids = missing_or_stale[start : start + EMBEDDING_BATCH_SIZE]
         texts = [text_by_job_id[job_id] for job_id in batch_ids]
+        _commit_if_supported(connection)
         embeddings = provider.embed_texts(texts)
         for job_id, embedding in zip(batch_ids, embeddings, strict=True):
             connection.execute(

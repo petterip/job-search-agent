@@ -17,6 +17,13 @@ from app.config import Settings, get_settings
 
 logger = logging.getLogger(__name__)
 
+
+def _commit_if_supported(connection: Connection) -> None:
+    """Close any open write transaction before an HTTP routing call."""
+    commit = getattr(connection, "commit", None)
+    if callable(commit):
+        commit()
+
 ROUTES_COMPUTE_URL = "https://routes.googleapis.com/directions/v2:computeRoutes"
 DEFAULT_ORIGIN = "Jalkatie 2, Oulu, Finland"
 DURATION_RE = re.compile(r"^(\d+)s$")
@@ -649,6 +656,8 @@ def resolve_transit_for_queries(
             continue
         # Every attempt consumes budget, including timeouts and parse failures.
         attempted += 1
+        # No transaction may be open while the provider call is in flight.
+        _commit_if_supported(connection)
         try:
             transit = compute_transit_distance(query.removesuffix(", Finland"), origin=origin)
         except TransitNoRouteError as exc:
