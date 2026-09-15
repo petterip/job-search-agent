@@ -219,6 +219,13 @@ remaining gaps plus new regression risks. All were addressed:
 
 ### Second implementation batch (2026-09-16)
 
+Deployed to production as `b4a03cf` (migration `20260916_0019`) and `0be1fad`
+(engine caching + docs); `alembic current` = `20260916_0019 (head)`, api/db
+healthy, web/worker up, `/health` ok, unauthenticated `/recommendations` still
+401 and the web home page 200. No paid backfill, profile import or destructive
+action was run.
+
+
 - **P1-3** required-language evidence (`backend/app/languages.py`): mandatory
   vs optional wording, negation, supported alternatives and level markers;
   failures are hard eligibility and cannot be recovered by semantic score.
@@ -247,8 +254,8 @@ remaining gaps plus new regression risks. All were addressed:
 
 ```bash
 cd backend
-python -m pytest --timeout=10 -q                       # 371 passed, 25 skipped
-TEST_DATABASE_URL=postgresql+psycopg://... python -m pytest --timeout=30 -q  # 396 passed
+python -m pytest --timeout=10 -q                       # 404 passed, 26 skipped
+TEST_DATABASE_URL=postgresql+psycopg://... python -m pytest --timeout=30 -q  # 430 passed
 cd ../web && npm run typecheck && npm run build
 ```
 
