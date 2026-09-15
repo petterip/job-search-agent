@@ -26,6 +26,14 @@ Concise record of what is actually implemented. Keep this file current when code
   serializable` failure was fixed. It reports the usual data-quality counters
   (for example `broken_duunitori_urls`), which are pre-existing and not caused
   by this deploy.
+- **Measured review backlog (dry run, `python -m app.match --inventory`):**
+  18,457 eligible stale requests — 2,822 commutable / 508 remote / 15,127
+  nationwide; 9,828 without an evaluation and 8,629 with a changed request
+  identity; 71 currently published of 18,457 eligible rows. The frozen cohort
+  hash is `1a4a2670…`. Estimated paid calls: 18,457, which is why the executor
+  refuses to spend without an explicit authorization flag and budget. This
+  supersedes the audit's earlier `2134` deterministic-pass figure as the current
+  measured backlog.
 - **Not verified:** the Cloudflare tunnel ingress/Access policy itself is
   remote-managed (`cloudflared tunnel run --token-file`) and was not
   inspectable locally; the application-level token and origin checks are the
