@@ -71,6 +71,8 @@ class TalentechRegionalAdapter:
             follow_redirects=True,
             event_hooks={"response": [async_source_redirect_guard(self.source_name)]},
         ) as client:
+            partial = False
+            partial_warnings: list[str] = []
             for regional_path in self.config.regional_paths:
                 shard_url = f"{self.config.base_url}/fi/tyopaikat/{regional_path}?format=json"
                 response = None
@@ -84,6 +86,8 @@ class TalentechRegionalAdapter:
                 if response is None:
                     raise RuntimeError(f"failed to fetch shard for {shard_url}")
                 if response.status_code == 429:
+                    partial = True
+                    partial_warnings.append("shard_rate_limited")
                     logger.warning("event=talentech_shard_rate_limited url=%s", shard_url)
                     continue
                 response.raise_for_status()
@@ -134,6 +138,8 @@ class TalentechRegionalAdapter:
                 if detail_response is None:
                     raise RuntimeError(f"failed to fetch detail for {detail_url}")
                 if detail_response.status_code == 429:
+                    partial = True
+                    partial_warnings.append("detail_rate_limited")
                     logger.warning("event=talentech_detail_rate_limited url=%s", detail_url)
                     continue
                 if self.config.detail_fetch_delay_s > 0:
@@ -156,4 +162,6 @@ class TalentechRegionalAdapter:
             listings=listings,
             newest_watermark=newest_watermark,
             pages_fetched=pages_fetched,
+            outcome="partial" if partial else "delta",
+            warnings=sorted(set(partial_warnings)),
         )

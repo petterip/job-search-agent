@@ -95,6 +95,8 @@ class TalentechOrgShardAdapter:
             if max_pages is not None:
                 organisation_ids = organisation_ids[:max_pages]
 
+            partial = False
+            partial_warnings: list[str] = []
             for organisation_id in organisation_ids:
                 shard_url = (
                     f"{self.config.site_root.rstrip('/')}/fi/tyopaikat/"
@@ -113,6 +115,8 @@ class TalentechOrgShardAdapter:
                 if shard_response is None:
                     raise RuntimeError(f"failed to fetch shard for {shard_url}")
                 if shard_response.status_code == 429:
+                    partial = True
+                    partial_warnings.append("shard_rate_limited")
                     logger.warning(
                         "event=talentech_org_shard_rate_limited organisation=%s",
                         organisation_id,
@@ -166,6 +170,8 @@ class TalentechOrgShardAdapter:
                 if detail_response is None:
                     raise RuntimeError(f"failed to fetch detail for {detail_url}")
                 if detail_response.status_code == 429:
+                    partial = True
+                    partial_warnings.append("detail_rate_limited")
                     logger.warning("event=talentech_detail_rate_limited url=%s", detail_url)
                     continue
                 if self.config.shard_fetch_delay_s > 0:
@@ -190,4 +196,6 @@ class TalentechOrgShardAdapter:
             listings=listings,
             newest_watermark=newest_watermark,
             pages_fetched=pages_fetched,
+            outcome="partial" if partial else "delta",
+            warnings=sorted(set(partial_warnings)),
         )

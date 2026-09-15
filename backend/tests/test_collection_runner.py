@@ -224,3 +224,43 @@ def test_upsert_existing_source_listing_relinks_to_cross_source_duplicate() -> N
     assert result == "deduplicated"
     assert "set job_id = :job_id" in executed_sql
     assert "status = 'superseded'" in executed_sql
+
+
+def test_partial_fetch_cannot_establish_absence() -> None:
+    from app.collection.runner import should_mark_missing_source_listings_removed
+
+    assert (
+        should_mark_missing_source_listings_removed(
+            watermark=None,
+            fetched_count=10,
+            stopped_at_watermark=False,
+            max_urls=None,
+            max_pages=None,
+            complete=False,
+        )
+        is False
+    )
+    assert (
+        should_mark_missing_source_listings_removed(
+            watermark=None,
+            fetched_count=10,
+            stopped_at_watermark=False,
+            max_urls=None,
+            max_pages=None,
+            complete=True,
+        )
+        is True
+    )
+
+
+def test_fetch_result_completeness_outcomes() -> None:
+    from app.adapters.base import CollectionFetchResult
+
+    assert CollectionFetchResult(listings=[]).complete is True
+    assert CollectionFetchResult(listings=[], outcome="delta").complete is True
+    assert CollectionFetchResult(listings=[], outcome="full_snapshot").complete is True
+    partial = CollectionFetchResult(
+        listings=[], outcome="partial", warnings=["shard_rate_limited"]
+    )
+    assert partial.complete is False
+    assert partial.warnings == ["shard_rate_limited"]

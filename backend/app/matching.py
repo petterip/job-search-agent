@@ -39,6 +39,7 @@ from app.llm import (
     EvaluationProviderUnavailable,
     build_evaluation_provider,
     configured_eval_model,
+    evaluate_with_parse_retry,
     evaluation_request_hash,
     job_summary,
     mark_provider_unavailable,
@@ -46,6 +47,7 @@ from app.llm import (
     normalized_evaluation_payload,
     validated_evaluation_payload,
 )
+from app.languages import evaluate_language_requirements
 from app.privacy import (
     PrivacyConfigurationError,
     collect_forbidden_values,
@@ -53,6 +55,7 @@ from app.privacy import (
     sanitize_learned_payload,
     sanitize_outbound,
 )
+from app.qualifications import evaluate_qualification_checks
 from app.transit_distance import (
     LocationEvidence,
     apply_location_evidence_to_concerns,
@@ -346,8 +349,15 @@ def score_job(profile: dict[str, Any], job: JobForScoring) -> ScoreResult:
     negative_keyword_term_set = negative_keyword_terms(profile)
     caution_terms = qualification_caution_terms(profile)
 
+    raw_job_text = " ".join(part or "" for part in (job.title, job.employer, job.description))
+    language_gate = evaluate_language_requirements(
+        profile, title=job.title, text=raw_job_text
+    )
+    qualification_gate = evaluate_qualification_checks(
+        profile, title=job.title, text=raw_job_text
+    )
     job_title_terms = expanded_tokens(job.title)
-    job_text = normalized_text(" ".join(part or "" for part in (job.title, job.employer, job.description)))
+    job_text = normalized_text(raw_job_text)
     job_text_terms = expanded_tokens(" ".join(part or "" for part in (job.title, job.employer, job.description)))
     job_location_terms = expanded_tokens(job.location)
 
@@ -383,6 +393,10 @@ def score_job(profile: dict[str, Any], job: JobForScoring) -> ScoreResult:
         concerns.append("Ilmoitus edellyttää kelpoisuutta, jota hakijalla ei ole.")
     if caution_matches:
         concerns.append("Kelpoisuusvaatimus pitää tarkistaa ennen hakemista.")
+    if qualification_gate.cautions:
+        concerns.append("Kelpoisuus pitää tarkistaa ennen hakemista.")
+    if language_gate.requires_review:
+        concerns.append("Kielivaatimuksen taso pitää tarkistaa ennen hakemista.")
     if job.location and not location_matches:
         concerns.append("Sijainti ei osu hakijan ensisijaiseen alueeseen.")
 
@@ -418,6 +432,8 @@ def score_job(profile: dict[str, Any], job: JobForScoring) -> ScoreResult:
         unpenalized_machine_score >= 15
         and not negative_matches
         and not missing_qualification_matches
+        and not language_gate.failed
+        and not qualification_gate.hard_reject
     )
 
     candidate_lanes: list[str] = []
@@ -465,6 +481,9 @@ def score_job(profile: dict[str, Any], job: JobForScoring) -> ScoreResult:
         hard_reasons.append("negative_match")
     if missing_qualification_matches:
         hard_reasons.append("missing_qualification")
+    if language_gate.failed:
+        hard_reasons.append("language_requirement")
+    hard_reasons.extend(qualification_gate.reasons)
     return ScoreResult(
         passes=passes,
         machine_score=round(score, 2),
@@ -493,6 +512,8 @@ def score_job(profile: dict[str, Any], job: JobForScoring) -> ScoreResult:
             "missing_qualification_matches": missing_qualification_matches,
             "candidate_lanes": candidate_lanes,
             "hidden_opportunity": hidden_opportunity,
+            "language_gate": language_gate.to_audit_dict(),
+            "qualification_gate": qualification_gate.to_audit_dict(),
         },
     )
 
@@ -1597,11 +1618,13 @@ def run_llm_evaluations(
                 # that fails parsing still counts as an attempt.
                 paid_calls += 1
                 started = time.monotonic()
-                evaluation, metadata = provider.evaluate_job_fit(
+                evaluation, metadata = evaluate_with_parse_retry(
+                    provider,
                     profile_summary=augmented_profile_summary,
                     job_summary=job_summary_text,
                     model=eval_model,
                     prompt_version=settings.llm_prompt_version,
+                    max_retries=settings.llm_eval_parse_retries,
                 )
                 latency_ms = int((time.monotonic() - started) * 1000)
                 response_payload = evaluation.model_dump()
@@ -1681,7 +1704,7 @@ def run_llm_evaluations(
                                 :output_tokens,
                                 :cached_tokens,
                                 :latency_ms,
-                                1,
+                                :attempts,
                                 'succeeded',
                                 :provider_request_id,
                                 :usage_present
@@ -1721,6 +1744,7 @@ def run_llm_evaluations(
                             "output_tokens": accounting.get("output_tokens"),
                             "cached_tokens": accounting.get("cached_tokens"),
                             "latency_ms": latency_ms,
+                            "attempts": int(metadata.get("attempts") or 1),
                             "provider_request_id": metadata.get("request_id"),
                             "usage_present": bool(accounting.get("usage_present")),
                         },

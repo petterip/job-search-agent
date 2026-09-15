@@ -382,10 +382,19 @@ def recompute_learned_preference_embeddings(
             positive_job_ids.append(job_id)
         elif rating <= 2:
             negative_job_ids.append(job_id)
-    result: dict[str, Any] = {}
-    positive_vectors = list(_load_job_embedding_vectors(
+    result: dict[str, Any] = {
+        "model": model,
+        "dimension": dimension,
+        "positive_job_ids": sorted(set(positive_job_ids)),
+        "negative_job_ids": sorted(set(negative_job_ids)),
+    }
+    positive_vectors_by_job = _load_job_embedding_vectors(
         connection, job_ids=sorted(set(positive_job_ids)), model=model, dimension=dimension
-    ).values())
+    )
+    positive_vectors = list(positive_vectors_by_job.values())
+    result["positive_missing_embeddings"] = sorted(
+        set(positive_job_ids) - set(positive_vectors_by_job)
+    )
     if len(positive_vectors) >= MIN_CENTROID_SUPPORT:
         store_learned_preference_embedding(
             connection,
@@ -406,9 +415,13 @@ def recompute_learned_preference_embeddings(
             dimension=dimension,
         )
         result["preference"] = "skipped"
-    negative_vectors = list(_load_job_embedding_vectors(
+    negative_vectors_by_job = _load_job_embedding_vectors(
         connection, job_ids=sorted(set(negative_job_ids)), model=model, dimension=dimension
-    ).values())
+    )
+    negative_vectors = list(negative_vectors_by_job.values())
+    result["negative_missing_embeddings"] = sorted(
+        set(negative_job_ids) - set(negative_vectors_by_job)
+    )
     if len(negative_vectors) >= MIN_CENTROID_SUPPORT:
         store_learned_preference_embedding(
             connection,

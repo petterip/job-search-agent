@@ -1,11 +1,11 @@
 {
     "schema_version": 2,
-    "commit": "e6b4fed58fd1d8f4f88e1c515ffe70b85533aaf5",
-    "indexed_at": "2026-09-15T22:39:54Z",
+    "commit": "68c90e96a9042749715aaa04745c0dda3dcbdcab",
+    "indexed_at": "2026-09-15T22:46:54Z",
     "project": "home-petterip-git-job-search-agent",
-    "nodes": 2429,
-    "edges": 9654,
-    "original_size": 12386304,
-    "compressed_size": 2275346,
+    "nodes": 2517,
+    "edges": 10044,
+    "original_size": 12845056,
+    "compressed_size": 2357071,
     "compression_level": 3
 }

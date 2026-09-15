@@ -372,6 +372,8 @@ def test_source_status_endpoint_returns_latest_run_summary(monkeypatch: Any) -> 
                 "poll_interval_min": 5,
                 "active_jobs": 32,
                 "stored_listings": 32,
+                "stale": True,
+                "last_success_at": None,
                 "last_run_status": "succeeded",
                 "last_run_started_at": "2026-06-20T10:00:00Z",
                 "last_run_finished_at": "2026-06-20T10:01:00Z",

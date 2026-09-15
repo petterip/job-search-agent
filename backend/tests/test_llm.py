@@ -480,3 +480,76 @@ def test_normalize_provider_usage_flags_missing_and_maps_providers() -> None:
         "cached_tokens": 5,
         "usage_present": True,
     }
+
+
+def test_is_retryable_output_error_classification() -> None:
+    from app.llm import EvaluationProviderUnavailable, is_retryable_output_error
+
+    assert is_retryable_output_error(ValueError("bad json")) is True
+    assert is_retryable_output_error(json.JSONDecodeError("x", "y", 0)) is True
+    assert is_retryable_output_error(EvaluationProviderUnavailable("quota")) is False
+    assert is_retryable_output_error(RuntimeError("transport")) is False
+
+
+def test_evaluate_with_parse_retry_retries_once_then_succeeds() -> None:
+    from app.llm import evaluate_with_parse_retry
+
+    class Provider:
+        provider_name = "openai"
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def evaluate_job_fit(self, **_kwargs):
+            self.calls += 1
+            if self.calls == 1:
+                raise ValueError("malformed json")
+            return (
+                JobFitEvaluation(
+                    score=70,
+                    fit_tier="transferable_weaker",
+                    rationale="Sopii.",
+                    concerns=[],
+                    suggested_action="consider",
+                ),
+                {"returned_model": "m", "usage_normalized": {}},
+            )
+
+    provider = Provider()
+    _evaluation, metadata = evaluate_with_parse_retry(
+        provider,  # type: ignore[arg-type]
+        profile_summary="{}",
+        job_summary="{}",
+        model="m",
+        prompt_version=8,
+    )
+
+    assert provider.calls == 2
+    assert metadata["attempts"] == 2
+
+
+def test_evaluate_with_parse_retry_does_not_retry_quota() -> None:
+    import pytest as _pytest
+
+    from app.llm import EvaluationProviderUnavailable, evaluate_with_parse_retry
+
+    class Provider:
+        provider_name = "openai"
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def evaluate_job_fit(self, **_kwargs):
+            self.calls += 1
+            raise EvaluationProviderUnavailable("quota")
+
+    provider = Provider()
+    with _pytest.raises(EvaluationProviderUnavailable):
+        evaluate_with_parse_retry(
+            provider,  # type: ignore[arg-type]
+            profile_summary="{}",
+            job_summary="{}",
+            model="m",
+            prompt_version=8,
+        )
+    assert provider.calls == 1

@@ -217,6 +217,32 @@ remaining gaps plus new regression risks. All were addressed:
 - the remaining rating-2 "hidden" thresholds in the API and detail page were
   corrected to rating 1.
 
+### Second implementation batch (2026-09-16)
+
+- **P1-3** required-language evidence (`backend/app/languages.py`): mandatory
+  vs optional wording, negation, supported alternatives and level markers;
+  failures are hard eligibility and cannot be recovered by semantic score.
+- **P1-4** completed with configurable `exclusions.qualification_checks`
+  (`backend/app/qualifications.py`): reject, adjacent-role caution,
+  do-not-title-reject and required-phrase caution rules, with inflected phrase
+  matching.
+- **P1-7a** fetch completeness: `CollectionFetchResult.outcome`
+  (`delta`/`full_snapshot`/`partial`) plus warnings; a partial fetch cannot
+  advance the incremental cursor or remove listings; talentech shard/detail
+  429 exhaustion is recorded as partial instead of silently continuing.
+- **P1-13** canonical content: deterministic `canonical_field` precedence and a
+  description guard so a short source summary cannot replace a richer enriched
+  body and unchanged sources keep the canonical text.
+- **P2-8** retryable feedback: migration `20260916_0019` adds
+  `analysis_attempts`/`next_attempt_at`/`analysis_reason`; transient failures
+  retry within a bounded budget while publication stays row-locked and
+  input-hash conditional.
+- **P2-4** bounded parse/schema retry and attempt-count persistence.
+- **P2-11** casefolded learned exclusions and centroid provenance (model,
+  dimension, contributing and missing job ids).
+- **P2-16** source data-freshness `stale`/`last_success_at` diagnostics,
+  separate from container liveness.
+
 ### Verification commands
 
 ```bash

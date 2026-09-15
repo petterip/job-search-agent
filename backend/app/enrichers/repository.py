@@ -125,20 +125,60 @@ def _load_job_description(connection: Connection, job_id: int) -> str | None:
     return text or None
 
 
+def canonical_field(existing: str | None, incoming: str | None) -> str | None:
+    """Deterministic canonical precedence for a scalar job field.
+
+    A richer value wins; ties fall back to the lexicographically smaller value
+    so two sources collected in either order produce the same canonical row.
+    """
+    current = (existing or "").strip()
+    candidate = (incoming or "").strip()
+    if not current:
+        return candidate or None
+    if not candidate:
+        return current
+    if len(candidate) > len(current):
+        return candidate
+    if len(candidate) == len(current):
+        return min(current, candidate)
+    return current
+
+
 def preserve_enriched_description_on_upsert(
     connection: Connection,
     *,
     job_id: int,
     source_description: str | None,
     job_source_id: int,
+    content_changed: bool = True,
 ) -> str | None:
+    """Choose the canonical description, keeping the richer text.
+
+    A short nonempty source summary must not replace a complete enriched body,
+    and an unchanged source keeps the canonical text. A genuine source edit from
+    the same occurrence may replace an equally rich source body.
+    """
     existing_description = _load_job_description(connection, job_id)
-
-    if source_description and source_description.strip():
+    incoming = (source_description or "").strip()
+    if not incoming:
+        return None
+    if not existing_description or not existing_description.strip():
         record_source_provenance(connection, job_id=job_id, job_source_id=job_source_id)
-        return source_description.strip()
-
-    return existing_description
+        return incoming
+    if not content_changed:
+        return None
+    existing_text = existing_description.strip()
+    state = load_description_state(connection, job_id)
+    if state and state.get("provenance") == "enriched" and len(incoming) <= len(existing_text):
+        return None
+    if len(incoming) < len(existing_text):
+        same_occurrence = bool(state and state.get("job_source_id") == job_source_id)
+        if not same_occurrence:
+            return None
+    if len(incoming) == len(existing_text) and incoming > existing_text:
+        return None
+    record_source_provenance(connection, job_id=job_id, job_source_id=job_source_id)
+    return incoming
 
 
 def apply_enrichment_result(

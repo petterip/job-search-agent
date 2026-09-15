@@ -751,14 +751,24 @@ def _mark_status_if_current(
     feedback_id: int,
     expected_updated_at: Any,
     status: str,
+    reason: str | None = None,
+    schedule_retry_at: Any = None,
+    count_attempt: bool = False,
 ) -> bool:
-    """Terminal status update that refuses to overwrite a newer user edit."""
+    """Status update that refuses to overwrite a newer user edit.
+
+    A retryable failure keeps the row `pending` with `next_attempt_at` and an
+    attempt count; only an explicitly terminal status clears the retry schedule.
+    """
     result = connection.execute(
         sa.text(
             """
             update recommendation_feedback
             set analysis_status = :status,
-                updated_at = now()
+                updated_at = now(),
+                analysis_reason = :reason,
+                analysis_attempts = analysis_attempts + :attempt_increment,
+                next_attempt_at = :next_attempt_at
             where id = :feedback_id
               and updated_at = :expected_updated_at
             """
@@ -766,6 +776,9 @@ def _mark_status_if_current(
         {
             "feedback_id": feedback_id,
             "status": status,
+            "reason": reason,
+            "attempt_increment": 1 if count_attempt else 0,
+            "next_attempt_at": schedule_retry_at,
             "expected_updated_at": expected_updated_at,
         },
     )
@@ -815,25 +828,47 @@ def analyze_feedback_row(
         )
         latency_ms = int((time.monotonic() - started) * 1000)
     except EvaluationProviderUnavailable as exc:
+        mark_feedback_analysis_unavailable(settings, str(exc))
+        attempts = int(row.get("analysis_attempts") or 0) + 1
+        retryable = attempts < settings.feedback_analysis_max_attempts
         with engine.begin() as connection:
-            mark_feedback_analysis_unavailable(settings, str(exc))
             stored = _mark_status_if_current(
                 connection,
                 feedback_id=feedback_id,
                 expected_updated_at=row.get("updated_at"),
-                status="skipped",
+                status="pending" if retryable else "skipped",
+                reason="provider_unavailable" if retryable else "attempt_budget_exhausted",
+                schedule_retry_at=(
+                    datetime.now(timezone.utc)
+                    + timedelta(minutes=settings.feedback_analysis_retry_minutes)
+                    if retryable
+                    else None
+                ),
+                count_attempt=True,
             )
-        return "skipped" if stored else "stale"
-    except Exception:
+        return "deferred" if retryable and stored else ("skipped" if stored else "stale")
+    except Exception as exc:
         logger.exception("event=feedback_analysis_failed feedback_id=%s", feedback_id)
+        attempts = int(row.get("analysis_attempts") or 0) + 1
+        retryable = isinstance(exc, (ValueError, json.JSONDecodeError)) and (
+            attempts < settings.feedback_analysis_max_attempts
+        )
         with engine.begin() as connection:
             stored = _mark_status_if_current(
                 connection,
                 feedback_id=feedback_id,
                 expected_updated_at=row.get("updated_at"),
-                status="failed",
+                status="pending" if retryable else "failed",
+                reason="retryable_response_error" if retryable else "permanent_failure",
+                schedule_retry_at=(
+                    datetime.now(timezone.utc)
+                    + timedelta(minutes=settings.feedback_analysis_retry_minutes)
+                    if retryable
+                    else None
+                ),
+                count_attempt=True,
             )
-        return "failed" if stored else "stale"
+        return "deferred" if retryable and stored else ("failed" if stored else "stale")
 
     grounded = apply_grounding_guard(
         analysis,
@@ -873,6 +908,8 @@ def analyze_feedback_row(
             feedback_id=feedback_id,
             expected_updated_at=current.get("updated_at"),
             status="completed",
+            reason=None,
+            schedule_retry_at=None,
         ):
             logger.info("event=feedback_analysis_stale_on_publish feedback_id=%s", feedback_id)
             return "stale"
@@ -898,6 +935,8 @@ def pending_feedback_rows(connection: Connection, *, limit: int) -> list[dict[st
                 rf.comment,
                 rf.scoring_snapshot,
                 rf.updated_at,
+                rf.analysis_attempts,
+                rf.analysis_reason,
                 j.title,
                 j.employer,
                 j.location,
@@ -905,6 +944,7 @@ def pending_feedback_rows(connection: Connection, *, limit: int) -> list[dict[st
             from recommendation_feedback rf
             join jobs j on j.id = rf.job_id
             where rf.analysis_status = 'pending'
+              and (rf.next_attempt_at is null or rf.next_attempt_at <= now())
             order by rf.updated_at asc, rf.id asc
             limit :limit
             """
@@ -916,7 +956,15 @@ def pending_feedback_rows(connection: Connection, *, limit: int) -> list[dict[st
 
 def run_analyze_feedback(*, limit: int = 20) -> dict[str, int]:
     settings = get_settings()
-    counts = {"pending": 0, "completed": 0, "reused": 0, "failed": 0, "skipped": 0, "stale": 0}
+    counts = {
+        "pending": 0,
+        "completed": 0,
+        "reused": 0,
+        "failed": 0,
+        "skipped": 0,
+        "stale": 0,
+        "deferred": 0,
+    }
     engine = get_engine()
     with engine.connect() as connection:
         profile = load_profile_for_analysis(connection)

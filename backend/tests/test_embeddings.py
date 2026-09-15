@@ -50,3 +50,47 @@ def test_profile_embedding_text_uses_positive_matching_signals_not_exclusions() 
     assert "library" in text
     assert "lähihoitaja" not in text
     assert "healthcare" not in text
+
+
+def test_centroid_provenance_reports_missing_embeddings() -> None:
+    from app.config import Settings
+    from app.embeddings import recompute_learned_preference_embeddings
+
+    class Rows:
+        def __init__(self, rows: list[dict]) -> None:
+            self.rows = rows
+
+        def mappings(self) -> "Rows":
+            return self
+
+        def __iter__(self):
+            return iter(self.rows)
+
+    class Connection:
+        def execute(self, statement, params=None):  # noqa: ANN001, ARG002
+            sql = str(statement)
+            if "from job_embeddings" in sql and "embedding::text" in sql:
+                return Rows(
+                    [
+                        {"job_id": 10, "embedding_text": "[0.1,0.2]"},
+                        {"job_id": 11, "embedding_text": "[0.3,0.4]"},
+                        {"job_id": 12, "embedding_text": "[0.5,0.6]"},
+                    ]
+                )
+            return Rows([])
+
+    rows = [
+        {"rating": 5, "applied": False, "scoring_snapshot": {"job_id": jid}}
+        for jid in (10, 11, 12, 13, 14)
+    ]
+    result = recompute_learned_preference_embeddings(
+        Connection(),  # type: ignore[arg-type]
+        profile_id=1,
+        rows=rows,
+        settings=Settings(openai_api_key="k", openai_embedding_dimension=1536),
+    )
+
+    assert result["positive_job_ids"] == [10, 11, 12, 13, 14]
+    assert result["positive_missing_embeddings"] == [13, 14]
+    assert result["model"]
+    assert result["dimension"] == 1536

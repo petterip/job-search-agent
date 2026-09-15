@@ -386,3 +386,30 @@ def test_learner_version_bumps_when_effective_state_changes() -> None:
     assert second_changes["learned_state_changed"] is True
     assert second_changes["learned_version"] == 2
     assert second_profile["learned"]["version"] == 2
+
+
+def test_learned_exclusion_penalty_is_case_insensitive() -> None:
+    profile = {
+        "learned": {
+            "exclusions": {
+                "terms_fi": ["Myynti"],
+                "employers": ["Retail Oy"],
+                "sectors": ["Kaupan Ala"],
+            }
+        }
+    }
+    lower = learned_exclusion_penalty(
+        job_title="Myyntiedustaja",
+        job_employer="retail oy",
+        job_description="myynti ja kaupan ala",
+        profile=profile,
+    )
+    upper = learned_exclusion_penalty(
+        job_title="MYYNTIEDUSTAJA",
+        job_employer="RETAIL OY",
+        job_description="MYYNTI JA KAUPAN ALA",
+        profile=profile,
+    )
+
+    assert lower == upper
+    assert lower[0] > 0

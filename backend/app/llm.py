@@ -459,6 +459,55 @@ class GeminiEvaluationProvider:
         return parsed, metadata
 
 
+def is_retryable_output_error(exc: BaseException) -> bool:
+    """A malformed/refused structured response is worth one bounded retry.
+
+    Transport retries already live in the provider clients; this covers a
+    parsed-but-invalid or unparsable JSON body, not provider/quota failures.
+    """
+    if isinstance(exc, EvaluationProviderUnavailable):
+        return False
+    if isinstance(exc, (ValueError, json.JSONDecodeError)):
+        return True
+    try:
+        from pydantic import ValidationError
+
+        return isinstance(exc, ValidationError)
+    except Exception:  # pragma: no cover - pydantic is a hard dependency
+        return False
+
+
+def evaluate_with_parse_retry(
+    provider: EvaluationProvider,
+    *,
+    profile_summary: str,
+    job_summary: str,
+    model: str,
+    prompt_version: int,
+    max_retries: int = 1,
+) -> tuple[JobFitEvaluation, dict[str, Any]]:
+    attempts = 0
+    while True:
+        attempts += 1
+        try:
+            evaluation, metadata = provider.evaluate_job_fit(
+                profile_summary=profile_summary,
+                job_summary=job_summary,
+                model=model,
+                prompt_version=prompt_version,
+            )
+        except Exception as exc:
+            if attempts > max_retries or not is_retryable_output_error(exc):
+                raise
+            logger.warning(
+                "event=llm_evaluation_parse_retry attempt=%s error=%s",
+                attempts,
+                exc.__class__.__name__,
+            )
+            continue
+        return evaluation, {**metadata, "attempts": attempts}
+
+
 def configured_eval_model(settings: Settings, provider_name: str | None = None) -> str:
     provider = provider_name or settings.llm_provider
     if provider == "gemini":

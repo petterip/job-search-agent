@@ -17,7 +17,11 @@ from app.collection.events import (
     insert_source_run_event,
 )
 from app.db import get_engine
-from app.enrichers.repository import preserve_enriched_description_on_upsert, record_source_provenance
+from app.enrichers.repository import (
+    canonical_field,
+    preserve_enriched_description_on_upsert,
+    record_source_provenance,
+)
 
 logger = logging.getLogger("collector")
 
@@ -336,7 +340,10 @@ def should_mark_missing_source_listings_removed(
     stopped_at_watermark: bool,
     max_urls: int | None,
     max_pages: int | None,
+    complete: bool = True,
 ) -> bool:
+    if not complete:
+        return False
     if watermark is not None:
         return False
     if stopped_at_watermark:
@@ -559,15 +566,37 @@ def upsert_listing(
                     source_description=listing.description,
                     job_source_id=int(inserted_job_source_id),
                 )
+                current = connection.execute(
+                    sa.text("select title, employer, location from jobs where id = :job_id"),
+                    {"job_id": job_id},
+                ).mappings().one()
+                effective_title = canonical_field(current["title"], listing.title)
+                effective_employer = canonical_field(current["employer"], listing.employer)
+                effective_location = canonical_field(current["location"], listing.location)
+                if (
+                    effective_description is not None
+                    or effective_title != current["title"]
+                    or effective_employer != current["employer"]
+                    or effective_location != current["location"]
+                ):
+                    record_source_provenance(
+                        connection,
+                        job_id=int(job_id),
+                        job_source_id=int(inserted_job_source_id),
+                    )
                 connection.execute(
                     sa.text(
                         """
                         update jobs
-                        set description = coalesce(:effective_description, jobs.description),
-                            employer = coalesce(jobs.employer, :employer),
+                        set title = coalesce(:title, jobs.title),
+                            employer = coalesce(:employer, jobs.employer),
+                            description = coalesce(:effective_description, jobs.description),
+                            location = coalesce(:location, jobs.location),
                             updated_at = case
+                                when jobs.title is distinct from coalesce(:title, jobs.title) then now()
+                                when jobs.employer is distinct from coalesce(:employer, jobs.employer) then now()
                                 when jobs.description is null and :effective_description is not null then now()
-                                when jobs.employer is null and :employer is not null then now()
+                                when jobs.location is distinct from coalesce(:location, jobs.location) then now()
                                 else jobs.updated_at
                             end
                         where id = :job_id
@@ -575,8 +604,10 @@ def upsert_listing(
                     ),
                     {
                         "job_id": job_id,
+                        "title": effective_title,
+                        "employer": effective_employer,
                         "effective_description": effective_description,
-                        "employer": listing.employer,
+                        "location": effective_location,
                     },
                 )
         return result
@@ -589,6 +620,7 @@ def upsert_listing(
             job_id=int(existing_job),
             source_description=listing.description,
             job_source_id=existing_job_source_id,
+            content_changed=False,
         )
         connection.execute(
             sa.text(
@@ -934,6 +966,8 @@ async def run_source_collection(
                 "removed": 0,
                 "pages_fetched": fetch_result.pages_fetched,
                 "stopped_at_watermark": fetch_result.stopped_at_watermark,
+                "outcome": fetch_result.outcome,
+                "warnings": list(fetch_result.warnings),
             }
 
             with engine.begin() as connection:
@@ -948,6 +982,7 @@ async def run_source_collection(
                     stopped_at_watermark=fetch_result.stopped_at_watermark,
                     max_urls=max_urls,
                     max_pages=max_pages,
+                    complete=fetch_result.complete,
                 ):
                     counts["removed"] = mark_missing_source_listings_removed(
                         connection,
@@ -955,12 +990,22 @@ async def run_source_collection(
                         seen_external_ids=seen_external_ids,
                     )
 
-                next_watermark = advance_watermark(
-                    connection,
-                    source_id,
-                    watermark,
-                    fetch_result.newest_watermark,
-                )
+                if fetch_result.complete:
+                    next_watermark = advance_watermark(
+                        connection,
+                        source_id,
+                        watermark,
+                        fetch_result.newest_watermark,
+                    )
+                else:
+                    # A partial fetch must not move the cursor: unprocessed
+                    # URLs older than the partial batch would be skipped.
+                    next_watermark = watermark
+                    logger.warning(
+                        "event=source_collection_partial source=%s warnings=%s",
+                        adapter.source_name,
+                        fetch_result.warnings,
+                    )
 
                 finished = finish_source_run(
                     connection,

@@ -411,3 +411,95 @@ def test_openai_feedback_provider_returns_normalized_usage(monkeypatch: pytest.M
     assert metadata["usage_normalized"]["usage_present"] is True
     assert metadata["request_id"] == "req-1"
     assert metadata["attempts"] == 1
+
+
+def test_transient_provider_failure_schedules_retry(monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.feedback_analysis import EvaluationProviderUnavailable, analyze_feedback_row
+    from app.config import get_settings
+
+    connection = AnalyzeConnection()
+    engine = AnalyzeEngine(connection)
+    captured: dict[str, Any] = {}
+
+    def fake_mark(*_args: Any, **kwargs: Any) -> bool:
+        captured.update(kwargs)
+        return True
+
+    monkeypatch.setattr(feedback_analysis_module, "_mark_status_if_current", fake_mark)
+    monkeypatch.setattr(
+        feedback_analysis_module,
+        "mark_feedback_analysis_unavailable",
+        lambda *_args, **_kwargs: None,
+    )
+
+    class FailingProvider:
+        provider_name = "openai"
+
+        def analyze_feedback(self, **_kwargs: Any) -> Any:
+            raise EvaluationProviderUnavailable("quota")
+
+    row = {
+        **connection.rows[0],
+        "analysis_attempts": 1,
+        "updated_at": datetime.now(timezone.utc),
+    }
+    outcome = analyze_feedback_row(
+        row,
+        provider=FailingProvider(),
+        settings=get_settings(),
+        profile=connection.profile,
+        engine=engine,
+    )
+
+    assert outcome == "deferred"
+    assert captured["status"] == "pending"
+    assert captured["reason"] == "provider_unavailable"
+    assert captured["schedule_retry_at"] is not None
+    assert captured["count_attempt"] is True
+
+
+def test_attempt_budget_exhaustion_is_terminal(monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.feedback_analysis import EvaluationProviderUnavailable, analyze_feedback_row
+    from app.config import Settings
+
+    connection = AnalyzeConnection()
+    engine = AnalyzeEngine(connection)
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(
+        feedback_analysis_module,
+        "_mark_status_if_current",
+        lambda *_a, **kw: (captured.update(kw), True)[1],
+    )
+    monkeypatch.setattr(
+        feedback_analysis_module,
+        "mark_feedback_analysis_unavailable",
+        lambda *_args, **_kwargs: None,
+    )
+
+    class FailingProvider:
+        provider_name = "openai"
+
+        def analyze_feedback(self, **_kwargs: Any) -> Any:
+            raise EvaluationProviderUnavailable("quota")
+
+    row = {
+        **connection.rows[0],
+        "analysis_attempts": 99,
+        "updated_at": datetime.now(timezone.utc),
+    }
+    outcome = analyze_feedback_row(
+        row,
+        provider=FailingProvider(),
+        settings=Settings(
+            llm_provider="openai",
+            openai_api_key="k",
+            feedback_analysis_max_attempts=5,
+        ),
+        profile=connection.profile,
+        engine=engine,
+    )
+
+    assert outcome == "skipped"
+    assert captured["status"] == "skipped"
+    assert captured["reason"] == "attempt_budget_exhausted"
+    assert captured["schedule_retry_at"] is None

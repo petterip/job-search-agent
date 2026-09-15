@@ -19,11 +19,14 @@ class Settings(BaseModel):
     gemini_api_key: str = ""
     gemini_eval_model: str = "gemini-3.5-flash"
     llm_eval_batch_size: int = 8
+    llm_eval_parse_retries: int = 1
     llm_eval_max_jobs: int = 800
     llm_provider_failure_cooldown_min: int = 360
     storage_dir: str = "/storage"
     llm_prompt_version: int = 8
     feedback_analysis_poll_minutes: int = 5
+    feedback_analysis_max_attempts: int = 5
+    feedback_analysis_retry_minutes: int = 30
     learner_analysis_drain_budget_minutes: int = 5
     learner_daily_hour: int = 16
     learner_daily_minute: int = 45
@@ -209,6 +212,9 @@ def get_settings() -> Settings:
         gemini_api_key=getenv("GEMINI_API_KEY", ""),
         gemini_eval_model=getenv("GEMINI_EVAL_MODEL", defaults.gemini_eval_model),
         llm_eval_batch_size=_int_env("LLM_EVAL_BATCH_SIZE", defaults.llm_eval_batch_size),
+        llm_eval_parse_retries=_int_env(
+            "LLM_EVAL_PARSE_RETRIES", defaults.llm_eval_parse_retries
+        ),
         llm_eval_max_jobs=_int_env("LLM_EVAL_MAX_JOBS", defaults.llm_eval_max_jobs),
         llm_provider_failure_cooldown_min=_int_env(
             "LLM_PROVIDER_FAILURE_COOLDOWN_MIN",
@@ -219,6 +225,14 @@ def get_settings() -> Settings:
         feedback_analysis_poll_minutes=_int_env(
             "FEEDBACK_ANALYSIS_POLL_MINUTES",
             defaults.feedback_analysis_poll_minutes,
+        ),
+        feedback_analysis_max_attempts=_int_env(
+            "FEEDBACK_ANALYSIS_MAX_ATTEMPTS",
+            defaults.feedback_analysis_max_attempts,
+        ),
+        feedback_analysis_retry_minutes=_int_env(
+            "FEEDBACK_ANALYSIS_RETRY_MINUTES",
+            defaults.feedback_analysis_retry_minutes,
         ),
         learner_analysis_drain_budget_minutes=_int_env(
             "LEARNER_ANALYSIS_DRAIN_BUDGET_MINUTES",

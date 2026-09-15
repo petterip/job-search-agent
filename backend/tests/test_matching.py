@@ -1066,3 +1066,78 @@ def test_discovery_pool_terms_respects_budget_without_private_logging() -> None:
 
     assert len(terms) == 10
     assert terms[0] == "kirjastonhoitaja"
+
+
+def _language_profile() -> dict:
+    from support import with_privacy
+
+    return with_privacy(
+        {
+            "languages": [
+                {"code": "fi", "level": "C2", "hard_filter": "pass"},
+                {"code": "de", "level": "A2", "hard_filter": "reject_if_required"},
+            ],
+            "role_clusters": [{"titles_fi": ["asiantuntija"], "keywords_fi": ["asiantuntija"]}],
+        }
+    )
+
+
+def test_score_job_language_failure_is_hard_eligibility() -> None:
+    job = JobForScoring(
+        id=1,
+        title="Asiantuntija",
+        employer="Example Oy",
+        description="Tehtävä edellyttää saksan kielen taitoa.",
+        location="Oulu",
+    )
+
+    result = score_job(_language_profile(), job)
+
+    assert result.hard_eligible is False
+    assert "language_requirement" in result.hard_reasons
+    assert result.passes is False
+
+
+def test_semantic_promotion_cannot_bypass_language_failure() -> None:
+    job = JobForScoring(
+        id=1,
+        title="Asiantuntija",
+        employer="Example Oy",
+        description="Tehtävä edellyttää saksan kielen taitoa.",
+        location="Oulu",
+    )
+    result = score_job(_language_profile(), job)
+
+    merged = merge_semantic_scores([(job, result)], {job.id: 0.99})  # type: ignore[arg-type]
+
+    assert merged[0][1].passes is False
+    assert merged[0][1].hard_eligible is False
+
+
+def test_score_job_configurable_qualification_check_rejects() -> None:
+    from support import with_privacy
+
+    profile = with_privacy(
+        {
+            "role_clusters": [{"titles_fi": ["sosiaalityöntekijä"], "keywords_fi": ["sosiaalityö"]}],
+            "exclusions": {
+                "qualification_checks": {
+                    "sosiaalityontekija": {
+                        "reject_when_phrases_present": ["sosiaalityöntekijän kelpoisuus"]
+                    }
+                }
+            },
+        }
+    )
+    job = JobForScoring(
+        id=1,
+        title="Sosiaalityöntekijä",
+        employer="Hyvinvointialue",
+        description="Kelpoisuusvaatimuksena sosiaalityöntekijän kelpoisuus.",
+        location="Oulu",
+    )
+
+    result = score_job(profile, job)
+
+    assert result.hard_eligible is False
+    assert "sosiaalityontekija" in result.hard_reasons

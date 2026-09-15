@@ -1,11 +1,11 @@
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from hashlib import sha256
 import ipaddress
 import json
 import re
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 from urllib.parse import urljoin, urlsplit
 
 from dateutil.parser import isoparse
@@ -299,10 +299,24 @@ class NormalizedListing:
 
 @dataclass(frozen=True)
 class CollectionFetchResult:
+    """Result of one source fetch, with explicit completeness evidence.
+
+    ``outcome`` distinguishes a legitimate empty delta from a partial fetch.
+    Only a complete fetch may establish absence (remove listings) or advance the
+    incremental cursor.
+    """
+
     listings: list[NormalizedListing]
     newest_watermark: datetime | None = None
     pages_fetched: int = 0
     stopped_at_watermark: bool = False
+    outcome: Literal["delta", "full_snapshot", "partial"] = "delta"
+    warnings: list[str] = field(default_factory=list)
+    errors: list[str] = field(default_factory=list)
+
+    @property
+    def complete(self) -> bool:
+        return self.outcome != "partial"
 
 
 def payload_content_hash(payload: dict) -> str:

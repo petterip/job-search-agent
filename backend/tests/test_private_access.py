@@ -123,3 +123,32 @@ def test_without_configured_token_private_reads_are_open(monkeypatch: pytest.Mon
         assert response.status_code == 200
     finally:
         main_module.get_settings.cache_clear()
+
+
+def test_source_staleness_is_a_diagnostic() -> None:
+    from datetime import datetime, timedelta, timezone
+
+    from app.main import source_is_stale
+
+    now = datetime(2026, 9, 16, 12, 0, tzinfo=timezone.utc)
+
+    assert source_is_stale(enabled=False, poll_interval_min=5, last_success_at=None, now=now) is False
+    assert source_is_stale(enabled=True, poll_interval_min=5, last_success_at=None, now=now) is True
+    assert (
+        source_is_stale(
+            enabled=True,
+            poll_interval_min=60,
+            last_success_at=now - timedelta(minutes=30),
+            now=now,
+        )
+        is False
+    )
+    assert (
+        source_is_stale(
+            enabled=True,
+            poll_interval_min=60,
+            last_success_at=now - timedelta(minutes=130),
+            now=now,
+        )
+        is True
+    )

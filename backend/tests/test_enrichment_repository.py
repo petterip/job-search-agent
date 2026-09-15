@@ -129,7 +129,8 @@ def test_preserve_enriched_keeps_existing_when_source_has_no_body() -> None:
         job_source_id=10,
     )
 
-    assert preserved == "Enriched body that must survive source re-collection."
+    # None means "keep the current canonical description".
+    assert preserved is None
     assert not any("insert into job_description_state" in sql for sql in connection.statements)
 
 
@@ -249,3 +250,59 @@ def test_apply_enrichment_result_ignores_a_stale_response() -> None:
 
     assert applied is False
     assert not any("update jobs" in sql and "set description" in sql for sql in connection.statements)
+
+
+def test_short_source_summary_does_not_replace_richer_enriched_body() -> None:
+    connection = ProvenanceConnection(
+        description="Enriched body that is much longer than the incoming summary.",
+        provenance="enriched",
+    )
+
+    preserved = preserve_enriched_description_on_upsert(
+        connection,  # type: ignore[arg-type]
+        job_id=42,
+        source_description="Short summary.",
+        job_source_id=10,
+    )
+
+    assert preserved is None
+
+
+def test_unchanged_source_keeps_canonical_description() -> None:
+    connection = ProvenanceConnection(description="Canonical body.", provenance="source")
+
+    preserved = preserve_enriched_description_on_upsert(
+        connection,  # type: ignore[arg-type]
+        job_id=42,
+        source_description="A different but equal-length summary.",
+        job_source_id=10,
+        content_changed=False,
+    )
+
+    assert preserved is None
+
+
+def test_richer_source_edit_replaces_weaker_body() -> None:
+    connection = ProvenanceConnection(description="Short.", provenance="source")
+
+    preserved = preserve_enriched_description_on_upsert(
+        connection,  # type: ignore[arg-type]
+        job_id=42,
+        source_description="A clearly longer and corrected source description.",
+        job_source_id=10,
+        content_changed=True,
+    )
+
+    assert preserved == "A clearly longer and corrected source description."
+
+
+def test_canonical_field_is_order_independent() -> None:
+    from app.enrichers.repository import canonical_field
+
+    assert canonical_field("Suomi", "Kokkola") == "Kokkola"
+    assert canonical_field("Kokkola", "Suomi") == "Kokkola"
+    assert canonical_field(None, "Oulu") == "Oulu"
+    assert canonical_field("Oulu", None) == "Oulu"
+    # Equal length resolves to the lexicographically smaller value both ways.
+    assert canonical_field("abcd", "abce") == "abcd"
+    assert canonical_field("abce", "abcd") == "abcd"

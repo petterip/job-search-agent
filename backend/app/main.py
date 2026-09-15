@@ -110,6 +110,8 @@ class SourceStatusItem(BaseModel):
     poll_interval_min: int
     active_jobs: int
     stored_listings: int
+    stale: bool = False
+    last_success_at: datetime | None = None
     last_run_status: str | None
     last_run_started_at: datetime | None
     last_run_finished_at: datetime | None
@@ -234,6 +236,24 @@ def current_travel_policy_params(profile: dict[str, Any] | None = None) -> dict[
             commute_limit_minutes=settings.recommendation_commute_limit_minutes,
         ),
     }
+
+
+def source_is_stale(
+    *,
+    enabled: bool,
+    poll_interval_min: int,
+    last_success_at: datetime | None,
+    now: datetime | None = None,
+) -> bool:
+    """Data-freshness diagnostic, deliberately separate from container liveness."""
+    if not enabled:
+        return False
+    moment = now or datetime.now(timezone.utc)
+    if last_success_at is None:
+        return True
+    if last_success_at.tzinfo is None:
+        last_success_at = last_success_at.replace(tzinfo=timezone.utc)
+    return (moment - last_success_at).total_seconds() > poll_interval_min * 60 * 2
 
 
 def current_publication_predicate(connection: Any) -> tuple[str, dict[str, Any]]:
@@ -994,6 +1014,7 @@ async def list_source_status() -> SourceStatusResponse:
                     coalesce(latest_run.unchanged_count, 0) as unchanged_count,
                     coalesce(latest_run.failed_count, 0) as failed_count,
                     latest_run.error_summary,
+                    last_success.finished_at as last_success_at,
                     coalesce(event_counts.recent_error_events, 0) as recent_error_events,
                     coalesce(event_counts.recent_warning_events, 0) as recent_warning_events
                 from sources s
@@ -1023,6 +1044,14 @@ async def list_source_status() -> SourceStatusResponse:
                     limit 1
                 ) latest_run on true
                 left join lateral (
+                    select sr.finished_at
+                    from source_runs sr
+                    where sr.source_id = s.id
+                      and sr.status = 'success'
+                    order by sr.finished_at desc nulls last, sr.id desc
+                    limit 1
+                ) last_success on true
+                left join lateral (
                     select
                         count(*) filter (where sre.level in ('ERROR', 'CRITICAL')) as recent_error_events,
                         count(*) filter (where sre.level = 'WARNING') as recent_warning_events
@@ -1034,7 +1063,21 @@ async def list_source_status() -> SourceStatusResponse:
                 """
             )
         ).mappings()
-        sources = [SourceStatusItem(**row) for row in rows]
+        now = datetime.now(timezone.utc)
+        sources = []
+        for row in rows:
+            item = SourceStatusItem(**row)
+            # Data freshness is a diagnostic; liveness stays separate.
+            last_success = item.last_success_at
+            if last_success is not None and last_success.tzinfo is None:
+                last_success = last_success.replace(tzinfo=timezone.utc)
+            stale = source_is_stale(
+                enabled=item.enabled,
+                poll_interval_min=item.poll_interval_min,
+                last_success_at=item.last_success_at,
+                now=now,
+            )
+            sources.append(item.model_copy(update={"stale": stale}))
         enrichment_row = latest_enrichment_run_summary(connection)
         enrichment_queue = enrichment_queue_health(connection)
     return SourceStatusResponse(

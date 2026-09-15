@@ -819,17 +819,20 @@ def learned_exclusion_penalty(
     profile: dict[str, Any],
 ) -> tuple[float, list[str]]:
     job_text = " ".join(part or "" for part in (job_title, job_employer, job_description))
+    job_text_folded = job_text.casefold()
     job_text_terms = _expanded_tokens(job_text)
     employer_text = (job_employer or "").casefold()
     matches: list[str] = []
     for term in learned_exclusion_term_set(profile):
-        if term in job_text or term in job_text_terms:
+        folded = term.casefold()
+        if folded in job_text_folded or folded in job_text_terms:
             matches.append(term)
     for employer in learned_exclusion_employers(profile):
-        if employer and employer in employer_text:
+        folded = employer.casefold()
+        if folded and folded in employer_text:
             matches.append(employer)
     for sector in learned_exclusion_sectors(profile):
-        if sector in job_text:
+        if sector.casefold() in job_text_folded:
             matches.append(sector)
     penalty = len(matches) * LEARNED_EXCLUSION_PENALTY_PER_MATCH
     return penalty, sorted(set(matches))

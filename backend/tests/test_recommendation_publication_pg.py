@@ -851,3 +851,17 @@ def test_prompt_only_identity_change_is_compatible_but_model_change_is_not(
         )
         assert _is_active(connection, prompt_rec) is True
         assert _is_active(connection, model_rec) is False
+
+
+def test_feedback_retry_columns_exist(pg_engine: Any) -> None:
+    expected = {"analysis_attempts", "next_attempt_at", "analysis_reason"}
+    with pg_engine.begin() as connection:
+        columns = {
+            str(row[0])
+            for row in connection.execute(
+                sa.text(
+                    "select column_name from information_schema.columns where table_name = 'recommendation_feedback'"
+                )
+            )
+        }
+    assert expected <= columns, expected - columns
