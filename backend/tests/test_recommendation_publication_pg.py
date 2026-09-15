@@ -963,3 +963,14 @@ def test_upsert_listing_stores_source_deadline_monotonically(pg_engine: Any) -> 
     assert first is not None
     assert second == first
     assert third > second
+
+
+def test_retention_report_runs_against_postgres(pg_engine: Any) -> None:
+    from app.retention import retention_report
+
+    with pg_engine.connect() as connection:
+        report = retention_report(connection)
+
+    assert report["dry_run"] is True
+    assert report["table_sizes"]["jobs"]["total_bytes"] >= 0
+    assert "raw_listings_not_seen_since_cutoff" in report["candidates"]

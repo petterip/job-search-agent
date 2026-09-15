@@ -1131,15 +1131,22 @@ async def run_source_collection(
                         fetch_result.warnings,
                     )
 
+                # A partial fetch is not full success; surface it in the run
+                # status and summary that /sources/status reads.
+                run_status = "success" if fetch_result.complete else "partial"
+                run_error_summary = (
+                    "; ".join(fetch_result.warnings) if fetch_result.warnings else None
+                )
                 finished = finish_source_run(
                     connection,
                     run_id=run_id,
                     owner_token=owner_token,
-                    status="success",
+                    status=run_status,
                     fetched_count=counts["fetched"],
                     inserted_count=counts["inserted"],
                     updated_count=counts["updated"],
                     unchanged_count=counts["unchanged"],
+                    error_summary=run_error_summary,
                 )
                 if not finished:
                     logger.warning(

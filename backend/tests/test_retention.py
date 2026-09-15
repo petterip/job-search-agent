@@ -21,7 +21,7 @@ class _Connection:
     def execute(self, statement, params=None):  # noqa: ANN001, ARG002
         sql = str(statement)
         if "pg_total_relation_size" in sql:
-            return _Rows({"total_bytes": 1024 * 1024, "columns": 5})
+            return _Rows(1024 * 1024)
         return _Rows(3)
 
 

@@ -24,17 +24,13 @@ from app.db import get_engine
 def _table_sizes(connection: Connection, tables: list[str]) -> dict[str, dict[str, int]]:
     sizes: dict[str, dict[str, int]] = {}
     for table in tables:
-        row = connection.execute(
-            sa.text(
-                """
-                select
-                    pg_total_relation_size(:table) as total_bytes,
-                    (select count(*) from information_schema.columns where table_name = :table) as columns
-                """
-            ),
-            {"table": table},
-        ).mappings().one()
-        total_bytes = int(row["total_bytes"] or 0)
+        total_bytes = int(
+            connection.execute(
+                sa.text("select pg_total_relation_size(cast(:table as regclass))"),
+                {"table": table},
+            ).scalar_one()
+            or 0
+        )
         sizes[table] = {"total_bytes": total_bytes, "total_mb": round(total_bytes / 1048576, 2)}
     return sizes
 
