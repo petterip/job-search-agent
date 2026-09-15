@@ -103,6 +103,8 @@ class Settings(BaseModel):
     collector_stale_run_minutes: int = 30
     pipeline_catchup_delay_minutes: int = 30
     source_stale_after_minutes: int = 1560
+    retention_raw_listing_days: int = 365
+    retention_activity_days: int = 180
     kuntarekry_collection_mode: str = "regional"
     browserbase_api_key: str = ""
     google_maps_api_key: str = ""
@@ -301,6 +303,12 @@ def get_settings() -> Settings:
         source_stale_after_minutes=_int_env(
             "SOURCE_STALE_AFTER_MINUTES",
             defaults.source_stale_after_minutes,
+        ),
+        retention_raw_listing_days=_int_env(
+            "RETENTION_RAW_LISTING_DAYS", defaults.retention_raw_listing_days
+        ),
+        retention_activity_days=_int_env(
+            "RETENTION_ACTIVITY_DAYS", defaults.retention_activity_days
         ),
         kuntarekry_collection_mode=getenv(
             "KUNTAREKRY_COLLECTION_MODE",

@@ -345,12 +345,21 @@ action was run.
   gate and the recommendation structural predicate. Tested with real
   PostgreSQL.
 
+### Ninth implementation batch (2026-09-16)
+
+- **P1-10 retention dry-run.** `app/retention.py` reports `pg_total_relation_size`
+  per table plus age-based candidate counts (raw listings not seen, old source
+  events, closed occurrences, inactive recommendations, stale transit cache) and
+  refuses to run in any non-dry-run mode. New settings
+  `RETENTION_RAW_LISTING_DAYS` (365) and `RETENTION_ACTIVITY_DAYS` (180). No
+  deletion path exists. Tests: `tests/test_retention.py`.
+
 ### Verification commands
 
 ```bash
 cd backend
-python -m pytest --timeout=10 -q                       # 413 passed, 37 skipped
-TEST_DATABASE_URL=postgresql+psycopg://... python -m pytest --timeout=30 -q  # 450 passed
+python -m pytest --timeout=10 -q                       # 414 passed, 37 skipped
+TEST_DATABASE_URL=postgresql+psycopg://... python -m pytest --timeout=30 -q  # 451 passed
 cd ../web && npm run typecheck && npm run build
 ```
 
