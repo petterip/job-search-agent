@@ -922,3 +922,44 @@ def test_dedupe_expression_index_exists(pg_engine: Any) -> None:
             )
         }
     assert "ix_jobs_dedupe_normalized" in indexes
+
+
+def test_upsert_listing_stores_source_deadline_monotonically(pg_engine: Any) -> None:
+    from datetime import datetime, timedelta, timezone
+
+    from app.adapters.base import NormalizedListing
+    from app.collection.runner import upsert_listing
+
+    now = datetime.now(timezone.utc)
+
+    def listing(*, expires_at: datetime | None, url: str, title: str = "Kirjastonhoitaja") -> Any:
+        return NormalizedListing(
+            external_id="deadline-1",
+            canonical_source_url=url,
+            title=title,
+            employer="Kaupunki",
+            description="Kirjasto.",
+            location="Oulu",
+            published_at=now - timedelta(days=1),
+            content_hash="hash-1",
+            payload={"source_url": url},
+            application_url=url,
+            expires_at=expires_at,
+        )
+
+    with pg_engine.begin() as connection:
+        source_id = seed_source(connection, name="deadline_source", enabled=True)
+        upsert_listing(connection, source_id, listing(expires_at=now + timedelta(days=10), url="https://x.invalid/a"))
+        first = connection.execute(sa.text("select expires_at from jobs")).scalar_one()
+
+        # An earlier deadline must not move the stored value backwards.
+        upsert_listing(connection, source_id, listing(expires_at=now + timedelta(days=2), url="https://x.invalid/a"))
+        second = connection.execute(sa.text("select expires_at from jobs")).scalar_one()
+
+        # A later deadline replaces it.
+        upsert_listing(connection, source_id, listing(expires_at=now + timedelta(days=20), url="https://x.invalid/a"))
+        third = connection.execute(sa.text("select expires_at from jobs")).scalar_one()
+
+    assert first is not None
+    assert second == first
+    assert third > second

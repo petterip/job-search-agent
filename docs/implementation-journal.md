@@ -336,8 +336,8 @@ action was run.
 
 ```bash
 cd backend
-python -m pytest --timeout=10 -q                       # 413 passed, 35 skipped
-TEST_DATABASE_URL=postgresql+psycopg://... python -m pytest --timeout=30 -q  # 448 passed
+python -m pytest --timeout=10 -q                       # 413 passed, 36 skipped
+TEST_DATABASE_URL=postgresql+psycopg://... python -m pytest --timeout=30 -q  # 449 passed
 cd ../web && npm run typecheck && npm run build
 ```
 
