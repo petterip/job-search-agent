@@ -452,12 +452,42 @@ source and fixed:
   paid runs. `mark_provider_unavailable` now tolerates an unwritable cooldown
   path.
 
+### Fourteenth implementation batch (2026-09-16)
+
+- **P2-23 (sample builder):** `python -m app.labelled_evaluation --build-sample
+  PATH` writes an unlabelled private template for the strata the plan requires.
+  Scope strata reuse the API's travel-policy-aware scope predicate
+  (`recommendation_scope_sql` + `current_travel_policy_params`) and the
+  publication predicate, so a stored `commutable` flag assessed under an older
+  policy cannot enter the local/remote strata. Jobs with no recommendation row
+  are classified with the pipeline's own `score_job` and
+  `apply_hard_eligibility`, so only gates-passing missing jobs count as
+  `not_retrieved` recall misses; deterministic and hard rejects are recorded
+  separately and share the per-stratum budget. The template records stratum
+  definitions and scan counts.
+- **Private-data handling:** the destination must be outside the repository or
+  inside the ignored `profile/` tree. No path component is followed through a
+  symlink (each component is opened with `O_DIRECTORY|O_NOFOLLOW` relative to a
+  held descriptor), the payload is published atomically from an owner-only
+  temporary file (`0600`, `fchmod`, `link`/`replace`), an existing file is
+  refused without `--force`, and a hard-linked destination cannot truncate
+  another name.
+- **coWork review rounds 3-6 (Astra Low):** round 3 (`not_retrieved` conflated
+  rejects with retrieval misses; `unreviewed` ignored stale identities; writer
+  accepted repository destinations; re-runs overwrote labels; weak tests),
+  round 4 (scope strata ignored the current travel policy; symlink swap race;
+  `--force` did not tighten permissions; hard-rejection budget), round 5
+  (ancestor symlink swaps bypassed validation; wrong `ENOTDIR` diagnosis) and
+  round 6 (`resolve()` collapsed symlinked ancestors before the walk; temp
+  cleanup could delete a collision file) were all fixed with regression tests.
+  Verification continued until no concrete sampling defect remained.
+
 ### Verification commands
 
 ```bash
 cd backend
-python -m pytest --timeout=10 -q                       # 433 passed, 43 skipped
-TEST_DATABASE_URL=postgresql+psycopg://... python -m pytest --timeout=30 -q  # 451 passed
+python -m pytest --timeout=10 -q                       # 436 passed, 50 skipped
+TEST_DATABASE_URL=postgresql+psycopg://... python -m pytest --timeout=30 -q  # 486 passed
 cd ../web && npm run typecheck && npm run build
 ```
 

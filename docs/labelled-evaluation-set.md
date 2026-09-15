@@ -24,34 +24,85 @@ example `profile/inkeri/labelled-evaluation.json`) and never commit it.
 `relevant` is the user's judgement of whether the job is a genuine fit. The
 tooling never infers it.
 
-## Suggested strata
+## Strata
 
 At least one stratum per bucket, with the skipped-local sample (about 50 jobs)
-as one stratum rather than the whole benchmark:
+as one stratum rather than the whole benchmark. The sampler emits these exact
+strata, each defined by an observable pipeline state:
 
-- `oulu_local` — local/commutable jobs.
-- `nationwide` — otherwise valid distant jobs.
-- `remote` — full-remote listings.
-- `application_family` — the three application-role families
-  (kirjastonhoitaja, kirjastovirkailija, tietoasiantuntija).
-- `non_obvious` — transferable/non-obvious roles.
-- `hard_rejection` — jobs expected to fail a hard gate.
-- `not_retrieved` — jobs known to exist but outside the candidate window.
-- `unreviewed` — deterministic passes with no current LLM evaluation.
-- `accepted` — jobs the user applied to.
+- `oulu_local` — published commutable recommendation, using the API's own
+  travel-policy-aware scope predicate (structural eligibility applied).
+- `nationwide` — published non-commutable, non-remote recommendation
+  (structural eligibility applied).
+- `remote` — published non-commutable, full-remote recommendation, using the
+  API's travel-policy-aware scope predicate (structural eligibility applied).
+
+A stored `commutable`/`commutable_or_full_remote` flag is not enough: the scope
+predicate also requires the current origin, commute limit and routing profile
+(or a matching shortcut fingerprint). Rows assessed under an older policy are
+excluded from the local/remote strata exactly as the API excludes them.
+- `hard_rejection` — persisted hard-gate rejection, plus source-backed jobs with
+  no row that the current gates already reject (language, qualification,
+  negative-term or freshness).
+- `unreviewed` — structurally eligible row whose linked evaluation is missing or
+  has a different prompt version.
+- `accepted` — recommendation the user rated 4–5 or applied to.
+- `not_retrieved` — source-backed job with no row that the current deterministic
+  and hard gates would pass. This is the recall-miss bucket.
+
+The last point matters: "no recommendation row" alone does **not** mean "not
+retrieved". Matching persists only deterministic passes, so the sampler replays
+the pipeline's own `score_job` and hard-eligibility gates over missing rows and
+sends rejects to `hard_rejection` or the diagnostic `deterministic_rejection`
+bucket. Only gates-passing missing rows count toward measured recall.
+
+`application_family` and `non_obvious` are relevance classes, not observable
+states: tag them yourself with `stratum` values when labelling the rows the
+sampler produced.
+
+Strata may overlap (a published local job can also be accepted and unreviewed).
+That is intentional: per-stratum metrics keep every membership, while overall
+recall and precision count each job exactly once, and a job labelled with
+conflicting relevance values is rejected instead of silently double-counted.
 
 ## Running
 
+Build an unlabelled private template first (deterministic seeded sample across
+the implemented strata: `oulu_local`, `nationwide`, `remote`, `hard_rejection`,
+`unreviewed`, `not_retrieved`, `accepted`):
+
 ```bash
 cd backend
+python -m app.labelled_evaluation --build-sample ../profile/inkeri/labelled-evaluation.json --per-stratum 50
+```
+
+This writes `relevant: null` placeholders with the job title/employer/location
+as context, then you fill in `true`/`false`. Evaluation refuses to run while any
+`relevant` is still `null`, so an unlabelled template cannot produce a report.
+
+The destination must be outside the repository or inside the ignored `profile/`
+tree, and an existing file is never replaced: a second run fails rather than
+discarding labels you have already written. Use `--force` only to discard a
+template deliberately; `--force` still rewrites the file with owner-only
+permissions, publishes atomically from a temporary file, never follows a symlink
+at any path component, and never truncates another name for a hard-linked file. `--seed` selects the deterministic sample, `--scan-limit`
+bounds how many missing-row jobs are classified by the gates (the output records
+`scanned` and whether the limit was reached).
+
+```bash
 python -m app.labelled_evaluation --labels ../profile/inkeri/labelled-evaluation.json
 # or configure LABELLED_EVALUATION_PATH and run without --labels
 ```
 
+`application_family` and `non_obvious` are refinements of the labelled rows: tag
+them with `stratum` values from the list above when labelling, since the
+sampler's strata are observable pipeline states, not relevance classes.
+
 The report gives, per stratum and overall:
 
 - recall at each pipeline stage (`recommendation_row`, `hard_eligible`,
-  `llm_reviewed`, `published`, `accepted`) over labelled **positives**;
+  `llm_reviewed`, `published`, `accepted`) over labelled **positives**
+  (deduplicated by job for the overall figure);
 - published precision over published labelled rows (a different denominator);
 - a Wilson 95% interval for every proportion.
 
