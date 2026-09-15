@@ -270,12 +270,25 @@ action was run.
 - **P2-16** data-freshness `stale`/`last_success_at` source diagnostics plus a
   persisted pipeline skip and one bounded catch-up run per UTC day.
 
+### Fourth implementation batch (2026-09-16)
+
+- **P1-8a** occurrence identity: a read-only production census found **0**
+  duplicate `(source_id, external_id)` groups and **0** blank external ids in
+  `job_sources`. Migration `20260916_0020` adds the partial unique index
+  `uq_job_sources_source_external_id` with `CREATE UNIQUE INDEX CONCURRENTLY`
+  (autocommit block, idempotent, reversible), and the occurrence insert is a
+  race-safe `ON CONFLICT` upsert. Up/down migration was exercised on a
+  disposable database.
+- **P2-16 fix:** the source `stale` threshold now uses
+  `SOURCE_STALE_AFTER_MINUTES` (default 1560) rather than the nominal poll
+  interval, so a daily collector is not permanently reported stale.
+
 ### Verification commands
 
 ```bash
 cd backend
-python -m pytest --timeout=10 -q                       # 409 passed, 26 skipped
-TEST_DATABASE_URL=postgresql+psycopg://... python -m pytest --timeout=30 -q  # 435 passed
+python -m pytest --timeout=10 -q                       # 409 passed, 27 skipped
+TEST_DATABASE_URL=postgresql+psycopg://... python -m pytest --timeout=30 -q  # 436 passed
 cd ../web && npm run typecheck && npm run build
 ```
 

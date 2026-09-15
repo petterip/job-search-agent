@@ -865,3 +865,49 @@ def test_feedback_retry_columns_exist(pg_engine: Any) -> None:
             )
         }
     assert expected <= columns, expected - columns
+
+
+def test_job_sources_occurrence_identity_is_unique(pg_engine: Any) -> None:
+    with pg_engine.begin() as connection:
+        profile_id = seed_profile(connection)
+        source_id = seed_source(connection, name="enabled", enabled=True)
+        job_id = seed_job(connection, source_id=source_id)
+        indexes = {
+            str(row[0])
+            for row in connection.execute(
+                sa.text("select indexname from pg_indexes where tablename = 'job_sources'")
+            )
+        }
+        assert "uq_job_sources_source_external_id" in indexes
+
+        # The occurrence upsert is idempotent for the same external id.
+        for _attempt in range(2):
+            connection.execute(
+                sa.text(
+                    """
+                    insert into job_sources (
+                        job_id, source_id, raw_listing_id, external_id,
+                        application_url, last_content_hash, last_seen_at
+                    )
+                    values (
+                        :job_id, :source_id,
+                        (select id from raw_listings where source_id = :source_id limit 1),
+                        'identity-1', 'https://example.invalid/a', 'h', now()
+                    )
+                    on conflict (source_id, external_id) where external_id is not null
+                    do update set
+                        raw_listing_id = excluded.raw_listing_id,
+                        application_url = excluded.application_url,
+                        last_content_hash = excluded.last_content_hash,
+                        last_seen_at = now()
+                    """
+                ),
+                {"job_id": job_id, "source_id": source_id},
+            )
+        count = connection.execute(
+            sa.text(
+                "select count(*) from job_sources where source_id = :source_id and external_id = 'identity-1'"
+            ),
+            {"source_id": source_id},
+        ).scalar_one()
+        assert count == 1

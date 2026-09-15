@@ -241,11 +241,16 @@ def current_travel_policy_params(profile: dict[str, Any] | None = None) -> dict[
 def source_is_stale(
     *,
     enabled: bool,
-    poll_interval_min: int,
     last_success_at: datetime | None,
+    stale_after_minutes: int,
     now: datetime | None = None,
 ) -> bool:
-    """Data-freshness diagnostic, deliberately separate from container liveness."""
+    """Data-freshness diagnostic, deliberately separate from container liveness.
+
+    The threshold is the expected collection cadence, not the source's nominal
+    poll interval (collection currently runs on a daily schedule, so a
+    5-minute poll interval would flag every source as stale).
+    """
     if not enabled:
         return False
     moment = now or datetime.now(timezone.utc)
@@ -253,7 +258,7 @@ def source_is_stale(
         return True
     if last_success_at.tzinfo is None:
         last_success_at = last_success_at.replace(tzinfo=timezone.utc)
-    return (moment - last_success_at).total_seconds() > poll_interval_min * 60 * 2
+    return (moment - last_success_at).total_seconds() > stale_after_minutes * 60
 
 
 def current_publication_predicate(connection: Any) -> tuple[str, dict[str, Any]]:
@@ -1073,8 +1078,8 @@ async def list_source_status() -> SourceStatusResponse:
                 last_success = last_success.replace(tzinfo=timezone.utc)
             stale = source_is_stale(
                 enabled=item.enabled,
-                poll_interval_min=item.poll_interval_min,
                 last_success_at=item.last_success_at,
+                stale_after_minutes=get_settings().source_stale_after_minutes,
                 now=now,
             )
             sources.append(item.model_copy(update={"stale": stale}))

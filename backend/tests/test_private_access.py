@@ -132,13 +132,23 @@ def test_source_staleness_is_a_diagnostic() -> None:
 
     now = datetime(2026, 9, 16, 12, 0, tzinfo=timezone.utc)
 
-    assert source_is_stale(enabled=False, poll_interval_min=5, last_success_at=None, now=now) is False
-    assert source_is_stale(enabled=True, poll_interval_min=5, last_success_at=None, now=now) is True
+    assert (
+        source_is_stale(
+            enabled=False, last_success_at=None, stale_after_minutes=60, now=now
+        )
+        is False
+    )
+    assert (
+        source_is_stale(
+            enabled=True, last_success_at=None, stale_after_minutes=60, now=now
+        )
+        is True
+    )
     assert (
         source_is_stale(
             enabled=True,
-            poll_interval_min=60,
             last_success_at=now - timedelta(minutes=30),
+            stale_after_minutes=60,
             now=now,
         )
         is False
@@ -146,8 +156,8 @@ def test_source_staleness_is_a_diagnostic() -> None:
     assert (
         source_is_stale(
             enabled=True,
-            poll_interval_min=60,
             last_success_at=now - timedelta(minutes=130),
+            stale_after_minutes=60,
             now=now,
         )
         is True

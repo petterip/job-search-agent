@@ -539,6 +539,13 @@ def upsert_listing(
                     :last_content_hash,
                     now()
                 )
+                on conflict (source_id, external_id) where external_id is not null
+                do update set
+                    raw_listing_id = excluded.raw_listing_id,
+                    application_url = excluded.application_url,
+                    attribution = coalesce(excluded.attribution, job_sources.attribution),
+                    last_content_hash = excluded.last_content_hash,
+                    last_seen_at = now()
                 returning id
                 """
             ),
