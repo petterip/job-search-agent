@@ -2,8 +2,11 @@ import hashlib
 import json
 import logging
 import re
+import threading
 import time
-from dataclasses import dataclass, replace
+from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from typing import Any
 
@@ -1499,32 +1502,15 @@ def evaluation_request_context(profile: dict[str, Any]) -> tuple[str, dict[str, 
     return summary, {"few_shot_examples": few_shot_examples, "eval_hints": eval_hints}
 
 
-def run_llm_evaluations(
+def select_llm_review_candidates(
     connection: Connection,
     *,
-    provider: EvaluationProvider,
+    profile_id: int,
+    profile: dict[str, Any],
+    settings: Any,
     max_jobs: int,
-) -> dict[str, int]:
-    settings = get_settings()
-    profile_row = connection.execute(
-        sa.text(
-            """
-            select id, profile
-            from job_seeker_profiles
-            order by id
-            limit 1
-            """
-        )
-    ).mappings().one_or_none()
-    if profile_row is None:
-        return {"llm_evaluated": 0, "llm_failed": 0}
-
-    profile_id = int(profile_row["id"])
-    profile = dict(profile_row["profile"])
-    learned = profile.get("learned", {})
-    if not isinstance(learned, dict):
-        learned = {}
-    augmented_profile_summary, learned_input = evaluation_request_context(profile)
+) -> list[dict[str, Any]]:
+    """Select the bounded review candidate rows (shared by sequential and concurrent runs)."""
     bucket_limits = llm_review_bucket_limits(max_jobs)
     # Over-select so current cache hits (which cost nothing) cannot consume the
     # limited paid-review slots and starve changed requests further down.
@@ -1644,6 +1630,42 @@ def run_llm_evaluations(
         scan_limits["remote"],
         scan_limits["nationwide"],
         settings.llm_prompt_version,
+    )
+    return [dict(row) for row in rows]
+
+
+def run_llm_evaluations(
+    connection: Connection,
+    *,
+    provider: EvaluationProvider,
+    max_jobs: int,
+) -> dict[str, int]:
+    settings = get_settings()
+    profile_row = connection.execute(
+        sa.text(
+            """
+            select id, profile
+            from job_seeker_profiles
+            order by id
+            limit 1
+            """
+        )
+    ).mappings().one_or_none()
+    if profile_row is None:
+        return {"llm_evaluated": 0, "llm_failed": 0}
+
+    profile_id = int(profile_row["id"])
+    profile = dict(profile_row["profile"])
+    learned = profile.get("learned", {})
+    if not isinstance(learned, dict):
+        learned = {}
+    augmented_profile_summary, learned_input = evaluation_request_context(profile)
+    rows = select_llm_review_candidates(
+        connection,
+        profile_id=profile_id,
+        profile=profile,
+        settings=settings,
+        max_jobs=max_jobs,
     )
     commit_if_supported(connection)
 
@@ -1933,6 +1955,317 @@ def run_llm_evaluations(
         "llm_failed": failed,
         "llm_skipped": skipped,
         "llm_deferred": deferred,
+    }
+
+
+@dataclass
+class _PaidBudget:
+    """Thread-safe aggregate paid-call budget shared across evaluation workers."""
+
+    limit: int
+    used: int = 0
+    lock: threading.Lock = field(default_factory=threading.Lock)
+
+    def claim(self) -> bool:
+        with self.lock:
+            if self.used >= self.limit:
+                return False
+            self.used += 1
+            return True
+
+
+def _process_llm_candidate(
+    engine: Any,
+    row: dict[str, Any],
+    *,
+    provider: EvaluationProvider,
+    settings: Any,
+    profile_id: int,
+    augmented_profile_summary: str,
+    learned_input: dict[str, Any],
+    eval_model: str,
+    profile_revision: str | None,
+    budget: _PaidBudget,
+    stop: threading.Event,
+) -> str:
+    """Evaluate one candidate using short transactions and conditional writes.
+
+    Every database interaction is a separate short transaction, so provider
+    calls never run inside one and a stale input is never published.
+    """
+    job_summary_text = job_summary(dict(row))
+    request_hash = evaluation_request_hash(
+        profile_summary=augmented_profile_summary,
+        job_summary_text=job_summary_text,
+        model=eval_model,
+        provider=provider.provider_name,
+        prompt_version=settings.llm_prompt_version,
+        job_id=int(row["job_id"]),
+        profile_id=profile_id,
+        learned_input=learned_input or None,
+    )
+    with engine.begin() as connection:
+        existing = connection.execute(
+            sa.text(
+                """
+                select id, response
+                from llm_evaluations
+                where request_hash = :request_hash
+                  and job_id = :job_id
+                  and profile_id = :profile_id
+                """
+            ),
+            {
+                "request_hash": request_hash,
+                "job_id": int(row["job_id"]),
+                "profile_id": profile_id,
+            },
+        ).mappings().one_or_none()
+
+    cached_payload = (
+        validated_evaluation_payload(existing["response"]) if existing is not None else None
+    )
+    if cached_payload is not None:
+        evaluation_id = int(existing["id"])
+        response_payload = cached_payload
+    else:
+        if not budget.claim():
+            return "deferred"
+        if stop.is_set():
+            return "skipped"
+        if profile_revision is not None:
+            with engine.begin() as connection:
+                current_revision = connection.execute(
+                    sa.text(
+                        "select profile->>'base_revision' from job_seeker_profiles where id = :profile_id"
+                    ),
+                    {"profile_id": profile_id},
+                ).scalar_one_or_none()
+            if current_revision is not None and str(current_revision) != profile_revision:
+                return "deferred"
+        started = time.monotonic()
+        try:
+            evaluation, metadata = evaluate_with_parse_retry(
+                provider,
+                profile_summary=augmented_profile_summary,
+                job_summary=job_summary_text,
+                model=eval_model,
+                prompt_version=settings.llm_prompt_version,
+                max_retries=settings.llm_eval_parse_retries,
+            )
+        except EvaluationProviderUnavailable as exc:
+            stop.set()
+            mark_provider_unavailable(settings, str(exc))
+            return "unavailable"
+        except Exception:
+            logger.exception("event=llm_evaluation_failed job_id=%s", row["job_id"])
+            return "failed"
+        latency_ms = int((time.monotonic() - started) * 1000)
+        response_payload = evaluation.model_dump()
+        accounting = metadata.get("usage_normalized") or {}
+        with engine.begin() as connection:
+            current_row = connection.execute(
+                sa.text(
+                    """
+                    select r.deterministic_result, j.title, j.employer, j.description, j.location
+                    from recommendations r
+                    join jobs j on j.id = r.job_id
+                    where r.id = :recommendation_id
+                      and r.job_id = :job_id
+                      and r.profile_id = :profile_id
+                    """
+                ),
+                {
+                    "recommendation_id": int(row["recommendation_id"]),
+                    "job_id": int(row["job_id"]),
+                    "profile_id": profile_id,
+                },
+            ).mappings().one_or_none()
+            current_hash = (
+                evaluation_request_hash(
+                    profile_summary=augmented_profile_summary,
+                    job_summary_text=job_summary(dict(current_row)),
+                    model=eval_model,
+                    provider=provider.provider_name,
+                    prompt_version=settings.llm_prompt_version,
+                    job_id=int(row["job_id"]),
+                    profile_id=profile_id,
+                    learned_input=learned_input or None,
+                )
+                if current_row is not None
+                else None
+            )
+            if current_hash != request_hash:
+                return "deferred"
+            evaluation_id = int(
+                connection.execute(
+                    sa.text(
+                        """
+                        insert into llm_evaluations (
+                            job_id, profile_id, provider, configured_model, returned_model,
+                            prompt_version, schema_version, request_hash, response,
+                            input_tokens, output_tokens, cached_tokens, latency_ms,
+                            attempts, outcome, provider_request_id, usage_present
+                        )
+                        values (
+                            :job_id, :profile_id, :provider, :configured_model, :returned_model,
+                            :prompt_version, 1, :request_hash, CAST(:response AS jsonb),
+                            :input_tokens, :output_tokens, :cached_tokens, :latency_ms,
+                            :attempts, 'succeeded', :provider_request_id, :usage_present
+                        )
+                        on conflict (request_hash)
+                        do update set
+                            job_id = excluded.job_id,
+                            profile_id = excluded.profile_id,
+                            provider = excluded.provider,
+                            configured_model = excluded.configured_model,
+                            returned_model = excluded.returned_model,
+                            prompt_version = excluded.prompt_version,
+                            schema_version = excluded.schema_version,
+                            response = excluded.response,
+                            input_tokens = excluded.input_tokens,
+                            output_tokens = excluded.output_tokens,
+                            cached_tokens = excluded.cached_tokens,
+                            latency_ms = excluded.latency_ms,
+                            attempts = excluded.attempts,
+                            outcome = excluded.outcome,
+                            provider_request_id = excluded.provider_request_id,
+                            usage_present = excluded.usage_present,
+                            created_at = now()
+                        returning id
+                        """
+                    ),
+                    {
+                        "job_id": int(row["job_id"]),
+                        "profile_id": profile_id,
+                        "provider": provider.provider_name,
+                        "configured_model": eval_model,
+                        "returned_model": metadata.get("returned_model") or eval_model,
+                        "prompt_version": settings.llm_prompt_version,
+                        "request_hash": request_hash,
+                        "response": json.dumps(response_payload, ensure_ascii=False),
+                        "input_tokens": accounting.get("input_tokens"),
+                        "output_tokens": accounting.get("output_tokens"),
+                        "cached_tokens": accounting.get("cached_tokens"),
+                        "latency_ms": latency_ms,
+                        "attempts": int(metadata.get("attempts") or 1),
+                        "provider_request_id": metadata.get("request_id"),
+                        "usage_present": bool(accounting.get("usage_present")),
+                    },
+                ).scalar_one()
+            )
+
+    with engine.begin() as connection:
+        connection.execute(
+            sa.text(
+                """
+                update recommendations
+                set llm_evaluation_id = :llm_evaluation_id,
+                    llm_score = :llm_score,
+                    fit_tier = :fit_tier,
+                    suggested_action = :suggested_action,
+                    rationale = :rationale,
+                    concerns = CAST(:concerns AS jsonb)
+                where id = :recommendation_id
+                  and job_id = :job_id
+                  and profile_id = :profile_id
+                """
+            ),
+            {
+                "recommendation_id": int(row["recommendation_id"]),
+                "job_id": int(row["job_id"]),
+                "profile_id": profile_id,
+                "llm_evaluation_id": evaluation_id,
+                "llm_score": int(response_payload["score"]),
+                "fit_tier": response_payload["fit_tier"],
+                "suggested_action": response_payload["suggested_action"],
+                "rationale": response_payload["rationale"],
+                "concerns": json.dumps(response_payload["concerns"], ensure_ascii=False),
+            },
+        )
+    return "evaluated"
+
+
+def run_llm_evaluations_concurrent(
+    engine: Any,
+    *,
+    provider: EvaluationProvider,
+    max_jobs: int,
+    concurrency: int,
+) -> dict[str, int]:
+    """Bounded parallel evaluation with one database connection per worker.
+
+    The configured concurrency is a hard cap on simultaneous provider calls, and
+    the shared paid budget is claimed before every call, so parallelism can
+    never exceed the aggregate attempt cap. A provider outage stops dispatch.
+    """
+    settings = get_settings()
+    workers = max(1, min(int(concurrency), max(1, max_jobs), 16))
+    with engine.connect() as connection:
+        profile_row = connection.execute(
+            sa.text("select id, profile from job_seeker_profiles order by id limit 1")
+        ).mappings().one_or_none()
+        if profile_row is None:
+            return {"llm_evaluated": 0, "llm_failed": 0, "llm_skipped": 0, "llm_deferred": 0}
+        profile_id = int(profile_row["id"])
+        profile = dict(profile_row["profile"])
+        augmented_profile_summary, learned_input = evaluation_request_context(profile)
+        eval_model = configured_eval_model(settings, provider.provider_name)
+        rows = select_llm_review_candidates(
+            connection,
+            profile_id=profile_id,
+            profile=profile,
+            settings=settings,
+            max_jobs=max_jobs,
+        )
+        profile_revision = str(profile.get("base_revision") or "") or None
+
+    budget = _PaidBudget(limit=max(0, max_jobs))
+    stop = threading.Event()
+    counts: Counter[str] = Counter()
+    counts_lock = threading.Lock()
+
+    def process(row: dict[str, Any]) -> str:
+        if stop.is_set():
+            outcome = "skipped"
+        else:
+            outcome = _process_llm_candidate(
+                engine,
+                row,
+                provider=provider,
+                settings=settings,
+                profile_id=profile_id,
+                augmented_profile_summary=augmented_profile_summary,
+                learned_input=learned_input,
+                eval_model=eval_model,
+                profile_revision=profile_revision,
+                budget=budget,
+                stop=stop,
+            )
+        with counts_lock:
+            counts[outcome] += 1
+        return outcome
+
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        list(pool.map(process, rows))
+
+    logger.info(
+        "event=llm_evaluation_completed mode=concurrent workers=%s evaluated=%s paid=%s failed=%s skipped=%s deferred=%s total=%s",
+        workers,
+        counts["evaluated"],
+        budget.used,
+        counts["failed"],
+        counts["skipped"],
+        counts["deferred"],
+        len(rows),
+    )
+    return {
+        "llm_evaluated": counts["evaluated"],
+        "llm_paid_calls": budget.used,
+        "llm_failed": counts["failed"],
+        "llm_skipped": counts["skipped"],
+        "llm_deferred": counts["deferred"],
+        "llm_concurrency": workers,
     }
 
 
@@ -2680,14 +3013,24 @@ def run_matching(max_jobs: int = 500) -> dict[str, int]:
                     extra_params=structure_params,
                 )
         return result
-    with engine.connect() as connection:
+    if settings.llm_eval_concurrency > 1:
         result.update(
-            run_llm_evaluations(
-                connection,
+            run_llm_evaluations_concurrent(
+                engine,
                 provider=provider,
                 max_jobs=settings.llm_eval_max_jobs,
+                concurrency=settings.llm_eval_concurrency,
             )
         )
+    else:
+        with engine.connect() as connection:
+            result.update(
+                run_llm_evaluations(
+                    connection,
+                    provider=provider,
+                    max_jobs=settings.llm_eval_max_jobs,
+                )
+            )
     if profile_id:
         with engine.begin() as connection:
             result["recommended"] = refresh_active_recommendation_ranks(

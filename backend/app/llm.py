@@ -144,19 +144,22 @@ def provider_in_cooldown(settings: Settings) -> bool:
 
 def mark_provider_unavailable(settings: Settings, reason: str) -> None:
     path = provider_cooldown_path(settings)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps(
-            {
-                "provider": settings.llm_provider,
-                "failed_at": datetime.now(timezone.utc).isoformat(),
-                "reason": reason,
-            },
-            ensure_ascii=False,
-            sort_keys=True,
-        ),
-        encoding="utf-8",
-    )
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps(
+                {
+                    "provider": settings.llm_provider,
+                    "failed_at": datetime.now(timezone.utc).isoformat(),
+                    "reason": reason,
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            ),
+            encoding="utf-8",
+        )
+    except OSError:
+        logger.warning("event=provider_cooldown_write_failed", exc_info=True)
 
 
 def minimized_profile_summary(profile: dict[str, Any]) -> str:

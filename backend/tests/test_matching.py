@@ -1247,3 +1247,28 @@ def test_profile_rules_change_evaluation_request_identity() -> None:
         prompt_version=get_settings().llm_prompt_version,
     )
     assert plain_hash != rules_hash
+
+
+def test_paid_budget_is_thread_safe_and_capped() -> None:
+    import threading
+
+    from app.matching import _PaidBudget
+
+    budget = _PaidBudget(limit=25)
+    granted: list[bool] = []
+    lock = threading.Lock()
+
+    def claim_many() -> None:
+        for _ in range(10):
+            ok = budget.claim()
+            with lock:
+                granted.append(ok)
+
+    threads = [threading.Thread(target=claim_many) for _ in range(5)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert sum(1 for ok in granted if ok) == 25
+    assert budget.used == 25

@@ -974,3 +974,108 @@ def test_retention_report_runs_against_postgres(pg_engine: Any) -> None:
     assert report["dry_run"] is True
     assert report["table_sizes"]["jobs"]["total_bytes"] >= 0
     assert "raw_listings_not_seen_since_cutoff" in report["candidates"]
+
+
+def test_concurrent_evaluation_respects_concurrency_and_paid_budget(pg_engine: Any) -> None:
+    import threading
+    import time
+
+    from app.llm import JobFitEvaluation
+    from app.matching import run_llm_evaluations_concurrent
+
+    with pg_engine.begin() as connection:
+        profile_id = seed_profile(connection)
+        source_id = seed_source(connection, name="enabled", enabled=True)
+        for _index in range(6):
+            job_id = seed_job(connection, source_id=source_id)
+            seed_recommendation(connection, job_id=job_id, profile_id=profile_id)
+
+    class Provider:
+        provider_name = "openai"
+
+        def __init__(self) -> None:
+            self.active = 0
+            self.max_active = 0
+            self.calls = 0
+            self.lock = threading.Lock()
+
+        def evaluate_job_fit(self, **_kwargs):
+            with self.lock:
+                self.active += 1
+                self.calls += 1
+                self.max_active = max(self.max_active, self.active)
+            time.sleep(0.05)
+            with self.lock:
+                self.active -= 1
+            return (
+                JobFitEvaluation(
+                    score=70,
+                    fit_tier="transferable_weaker",
+                    rationale="Sopii.",
+                    concerns=[],
+                    suggested_action="consider",
+                ),
+                {"returned_model": "test-model", "usage_normalized": {"usage_present": False}},
+            )
+
+    provider = Provider()
+    result = run_llm_evaluations_concurrent(
+        pg_engine,
+        provider=provider,  # type: ignore[arg-type]
+        max_jobs=4,
+        concurrency=3,
+    )
+
+    assert provider.max_active <= 3
+    assert provider.calls <= 4
+    assert result["llm_paid_calls"] <= 4
+    with pg_engine.connect() as connection:
+        evaluated = connection.execute(
+            sa.text("select count(*) from recommendations where llm_evaluation_id is not null")
+        ).scalar_one()
+    assert evaluated == provider.calls
+
+
+def test_concurrent_evaluation_stops_dispatch_on_provider_outage(pg_engine: Any) -> None:
+    import threading
+    import time
+
+    from app.llm import EvaluationProviderUnavailable
+    from app.matching import run_llm_evaluations_concurrent
+
+    with pg_engine.begin() as connection:
+        profile_id = seed_profile(connection)
+        source_id = seed_source(connection, name="enabled", enabled=True)
+        for _index in range(6):
+            job_id = seed_job(connection, source_id=source_id)
+            seed_recommendation(connection, job_id=job_id, profile_id=profile_id)
+
+    class OutageProvider:
+        provider_name = "openai"
+
+        def __init__(self) -> None:
+            self.calls = 0
+            self.lock = threading.Lock()
+
+        def evaluate_job_fit(self, **_kwargs):
+            with self.lock:
+                self.calls += 1
+            time.sleep(0.05)
+            raise EvaluationProviderUnavailable("quota")
+
+    provider = OutageProvider()
+    result = run_llm_evaluations_concurrent(
+        pg_engine,
+        provider=provider,  # type: ignore[arg-type]
+        max_jobs=6,
+        concurrency=2,
+    )
+
+    # Only the in-flight calls are attempted; no evaluation is published.
+    assert provider.calls <= 2
+    with pg_engine.connect() as connection:
+        evaluated = connection.execute(
+            sa.text("select count(*) from recommendations where llm_evaluation_id is not null")
+        ).scalar_one()
+    assert evaluated == 0
+    assert result["llm_evaluated"] == 0

@@ -438,11 +438,25 @@ source and fixed:
   (no provider/HTTP call inside an open transaction, durable per-batch
   progress, stale-publication rejection, rollback on candidate DB failure).
 
+### Thirteenth implementation batch (2026-09-16)
+
+- **P2-1 (mechanism):** `run_llm_evaluations_concurrent` evaluates candidates on a
+  bounded thread pool with one short-transaction database connection per worker.
+  `LLM_EVAL_CONCURRENCY` (default `1`) selects it; the sequential path is
+  unchanged. A shared `_PaidBudget` is claimed before every provider call, a
+  provider outage sets a stop event that halts dispatch, candidate selection is
+  shared with the sequential path, and publication stays request-hash keyed and
+  conditional. PostgreSQL tests assert simultaneous calls never exceed the
+  configured concurrency, the aggregate attempt cap holds, and an outage
+  publishes nothing. Measured throughput gain still requires authorized paired
+  paid runs. `mark_provider_unavailable` now tolerates an unwritable cooldown
+  path.
+
 ### Verification commands
 
 ```bash
 cd backend
-python -m pytest --timeout=10 -q                       # 431 passed, 41 skipped
+python -m pytest --timeout=10 -q                       # 432 passed, 43 skipped
 TEST_DATABASE_URL=postgresql+psycopg://... python -m pytest --timeout=30 -q  # 451 passed
 cd ../web && npm run typecheck && npm run build
 ```
