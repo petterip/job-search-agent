@@ -141,7 +141,8 @@ Partial and blocked work is listed explicitly rather than silently completed.
 | P1-11 engine/scoring context | implemented | One engine per database URL per process with `atexit` disposal (`app/db.py`), keyed by URL so config overrides never retain a wrong engine. Tests: `tests/test_db.py`. |
 | P2-16 pipeline status/catch-up | implemented | Source status exposes data-freshness `stale`/`last_success_at` (threshold is the expected collection cadence, `SOURCE_STALE_AFTER_MINUTES`, not the nominal poll interval) separately from liveness; a skipped pipeline is persisted and one bounded catch-up run is scheduled per UTC day. Tests: `tests/test_scheduler.py`, `tests/test_private_access.py`. |
 | P1-8a occurrence identity | implemented | Production census: 0 duplicate `(source_id, external_id)` groups and 0 blank external ids. Migration `20260916_0020` adds a partial unique index `CONCURRENTLY` (downgrade drops it), and the occurrence insert is now a race-safe `ON CONFLICT` upsert. Test: `tests/test_recommendation_publication_pg.py`. |
-| P1-7b, P1-7c, P1-8c, P1-9a, P1-10, P2-1, P2-6, P2-7, P2-22 remainder, P2-23 | not implemented | Remaining backlog; see the task sections for dependencies. |
+| P1-8c dedupe query | implemented | Production `EXPLAIN (ANALYZE, BUFFERS)` showed a parallel seq scan (~42 ms, 12.7k buffers) per cross-source dedupe lookup. Migration `20260916_0021` adds the matching immutable expression index; the date filter is now explicit UTC (`published_at AT TIME ZONE 'UTC'::date`). Plan re-measurement recorded in the journal. Tests: `tests/test_recommendation_publication_pg.py`. |
+| P1-7b, P1-7c, P1-9a, P1-10, P2-1, P2-6, P2-7, P2-22 remainder, P2-23 | not implemented | Remaining backlog; see the task sections for dependencies. |
 
 
 ### Stage A — protect data and publication

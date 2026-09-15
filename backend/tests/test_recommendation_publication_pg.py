@@ -911,3 +911,14 @@ def test_job_sources_occurrence_identity_is_unique(pg_engine: Any) -> None:
             {"source_id": source_id},
         ).scalar_one()
         assert count == 1
+
+
+def test_dedupe_expression_index_exists(pg_engine: Any) -> None:
+    with pg_engine.begin() as connection:
+        indexes = {
+            str(row[0])
+            for row in connection.execute(
+                sa.text("select indexname from pg_indexes where tablename = 'jobs'")
+            )
+        }
+    assert "ix_jobs_dedupe_normalized" in indexes

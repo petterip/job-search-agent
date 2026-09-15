@@ -372,7 +372,7 @@ def find_cross_source_job(connection: Connection, source_id: int, listing: Norma
               and trim(regexp_replace(lower(coalesce(j.title, '')), '[^0-9a-zåäö]+', ' ', 'g')) = :title
               and trim(regexp_replace(lower(coalesce(j.employer, '')), '[^0-9a-zåäö]+', ' ', 'g')) = :employer
               and trim(regexp_replace(lower(coalesce(j.location, '')), '[^0-9a-zåäö]+', ' ', 'g')) = :location
-              and j.published_at::date = :published_date
+              and (j.published_at AT TIME ZONE 'UTC')::date = :published_date
             order by j.id
             limit 1
             """

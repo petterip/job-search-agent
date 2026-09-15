@@ -283,12 +283,26 @@ action was run.
   `SOURCE_STALE_AFTER_MINUTES` (default 1560) rather than the nominal poll
   interval, so a daily collector is not permanently reported stale.
 
+### Fifth implementation batch (2026-09-16)
+
+- **P1-8c** dedupe query: a read-only production
+  `EXPLAIN (ANALYZE, BUFFERS)` of the cross-source canonical lookup showed a
+  parallel sequential scan over ~100k jobs at **~42 ms** with ~12.7k shared
+  buffers per listing. Migration `20260916_0021` adds
+  `ix_jobs_dedupe_normalized` — a partial expression index over the three
+  immutable normalized title/employer/location expressions — using
+  `CREATE INDEX CONCURRENTLY` (idempotent, reversible). The date predicate is
+  now explicit UTC (`published_at AT TIME ZONE 'UTC')::date`) so dedupe
+  grouping no longer depends on the session timezone. Up/down migration was
+  exercised on a disposable database; the post-deploy plan is recorded after
+  rollout.
+
 ### Verification commands
 
 ```bash
 cd backend
-python -m pytest --timeout=10 -q                       # 409 passed, 27 skipped
-TEST_DATABASE_URL=postgresql+psycopg://... python -m pytest --timeout=30 -q  # 436 passed
+python -m pytest --timeout=10 -q                       # 409 passed, 28 skipped
+TEST_DATABASE_URL=postgresql+psycopg://... python -m pytest --timeout=30 -q  # 437 passed
 cd ../web && npm run typecheck && npm run build
 ```
 
