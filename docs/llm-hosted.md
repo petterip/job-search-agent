@@ -99,6 +99,15 @@ Embed canonical job text and the minimized profile summary. Re-embed on content-
 
 ## Evaluation models
 
+> **Implementation status (2026-09-16).** Only the primary evaluator runs.
+> Escalation is **not implemented**: `OPENAI_EVAL_MODEL_ESCALATED` is read into
+> configuration but never used to select a model, and there is no automatic
+> second review. Evaluation runs sequentially (no bounded parallelism yet);
+> `LLM_EVAL_MAX_JOBS` is a per-invocation cap, not a daily spend limit. Token
+> usage, latency, attempts, outcome and returned model are now persisted on
+> `llm_evaluations`. Treat the escalation and concurrency sections below as
+> proposed design, not shipped behaviour.
+
 ### Recommendation
 
 | Tier | Model | Provider | Use |
@@ -198,7 +207,7 @@ Recommended constraints:
 
 Persist to `llm_evaluations`: listing ID, profile ID, provider, configured model, returned model/version, prompt version, schema version, request hash, response JSON, token usage, latency, timestamp, and error/retry metadata.
 
-### 4. Escalation evaluation
+### 4. Escalation evaluation (proposed — not shipped)
 
 **When:**
 
@@ -266,7 +275,7 @@ Keep the Pydantic model provider-neutral. Provider-specific adapters should tran
 | `OPENAI_EMBEDDING_MODEL` | `text-embedding-3-small` | Embedding model. |
 | `OPENAI_EMBEDDING_DIMENSION` | `1536` | Must match pgvector column. |
 | `OPENAI_EVAL_MODEL` | `gpt-5.4-nano` | Default evaluator. |
-| `OPENAI_EVAL_MODEL_ESCALATED` | `gpt-5.4-mini` | Escalation evaluator. |
+| `OPENAI_EVAL_MODEL_ESCALATED` | `gpt-5.4-mini` | Reserved for a future escalation evaluator; currently unused. |
 | `GEMINI_API_KEY` | `...` | Optional fallback provider. |
 | `GEMINI_EVAL_MODEL` | `gemini-3.1-flash-lite` | Gemini fallback evaluator. |
 | `LLM_EVAL_BATCH_SIZE` | `8` | Max parallel evaluation requests. |

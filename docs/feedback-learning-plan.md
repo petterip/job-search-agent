@@ -527,7 +527,8 @@ Rules:
 ### 7.5 Execution Model
 
 ```text
-POST /feedback -> 201 immediately (analysis_status = pending)
+POST /recommendations/{id}/feedback -> 200 immediately (analysis_status = pending)
+(proposed: a top-level `POST /feedback`; not shipped)
 
 analyze_feedback (worker, every FEEDBACK_ANALYSIS_POLL_MINUTES):
   -> select feedback where analysis_status = 'pending'
@@ -613,7 +614,9 @@ Also echo a `feedback` summary (rating, applied, analysis_status) inside `GET /j
 
 **Portal proxy:** update `web/app/suositukset/[id]/palaute/route.ts` — today it forwards form `action` as query params; it must send a JSON body with `rating`/`applied` (and check the response status instead of ignoring it).
 
-**Security:** feedback mutation remains acceptable without auth only on the loopback-default deployment ([`tech-stack-plan.md`](tech-stack-plan.md)); LAN exposure requires an operator token like `PUT /profile`.
+**Security:** feedback mutation remains acceptable without auth only on the loopback-default deployment ([`tech-stack-plan.md`](tech-stack-plan.md)); LAN exposure requires the shipped operator token (`OPERATOR_API_TOKEN`). A
+`PUT /profile` endpoint is proposed, not shipped; profile import is the
+`python -m app.profile` CLI.
 
 Deprecation: accept legacy `?action=...` for one release cycle, mapped per §3.3.
 
