@@ -334,6 +334,75 @@ def missing_qualification_reject_matches(job_text: str) -> list[str]:
     return sorted(set(matches))
 
 
+DEFAULT_CLUSTER_WEIGHTS: dict[str, float] = {
+    "direct_title": 15.0,
+    "keywords": 5.0,
+    "application_history_title": 18.0,
+    "application_history_keyword": 5.0,
+    "sector": 4.0,
+    "learned_title": 18.0,
+    "learned_keyword": 5.0,
+    "location": 15.0,
+}
+
+
+def profile_cluster_weights(profile: dict[str, Any]) -> dict[str, float]:
+    """Explicit, validated relative cluster weights from the profile.
+
+    Absent configuration keeps the legacy additive formula, so a weighting
+    change is opt-in and can be compared on labelled data before enabling.
+    """
+    preferences = profile.get("preferences")
+    if not isinstance(preferences, dict):
+        return {}
+    configured = preferences.get("scoring_weights")
+    if not isinstance(configured, dict) or not configured:
+        return {}
+    weights = dict(DEFAULT_CLUSTER_WEIGHTS)
+    for key, value in configured.items():
+        if key in weights and isinstance(value, (int, float)) and not isinstance(value, bool):
+            if 0 <= float(value) <= 100:
+                weights[key] = float(value)
+    return weights
+
+
+def weighted_cluster_contributions(
+    *,
+    weights: dict[str, float],
+    title_matches: list[str],
+    keyword_matches: list[str],
+    application_title_matches: list[str],
+    application_keyword_matches: list[str],
+    learned_title_matches: list[str],
+    learned_keyword_matches: list[str],
+    sector_matches: list[str],
+    location_matches: list[str],
+) -> dict[str, float]:
+    """Per-cluster contributions with cross-cluster term overlap removed.
+
+    Each matched term contributes once, in the highest-priority cluster, so the
+    same evidence cannot be multiplied by matching several clusters.
+    """
+    claimed: set[str] = set()
+    contributions: dict[str, float] = {}
+
+    def add(cluster: str, matches: list[str], cap: int) -> None:
+        unique = [term for term in matches if term not in claimed]
+        counted = unique[:cap]
+        claimed.update(counted)
+        contributions[cluster] = round(len(counted) * weights.get(cluster, 0.0), 2)
+
+    add("direct_title", title_matches, 5)
+    add("application_history_title", application_title_matches, 4)
+    add("learned_title", learned_title_matches, 4)
+    add("keywords", keyword_matches, 8)
+    add("application_history_keyword", application_keyword_matches, 6)
+    add("learned_keyword", learned_keyword_matches, 6)
+    add("sector", sector_matches, 3)
+    add("location", location_matches, 3)
+    return contributions
+
+
 def score_job(profile: dict[str, Any], job: JobForScoring) -> ScoreResult:
     title_terms = profile_terms(profile, "titles_fi")
     keyword_terms = profile_terms(profile, "keywords_fi")
@@ -400,18 +469,35 @@ def score_job(profile: dict[str, Any], job: JobForScoring) -> ScoreResult:
     if job.location and not location_matches:
         concerns.append("Sijainti ei osu hakijan ensisijaiseen alueeseen.")
 
+    cluster_weights = profile_cluster_weights(profile)
+    cluster_contributions: dict[str, float] = {}
     score = 0.0
-    score += min(len(title_matches), 5) * 15
-    score += min(len(keyword_matches), 8) * 5
-    score += min(len(application_title_matches), 4) * 18
-    score += min(len(application_keyword_matches), 6) * 5
-    score += min(len(sector_matches), 3) * 4
-    score += min(len(learned_title_matches), 4) * 18
-    score += min(len(learned_keyword_matches), 6) * 5
-    if location_matches:
-        score += 15
-    elif not job.location:
-        score += 3
+    if cluster_weights:
+        cluster_contributions = weighted_cluster_contributions(
+            weights=cluster_weights,
+            title_matches=title_matches,
+            keyword_matches=keyword_matches,
+            application_title_matches=application_title_matches,
+            application_keyword_matches=application_keyword_matches,
+            learned_title_matches=learned_title_matches,
+            learned_keyword_matches=learned_keyword_matches,
+            sector_matches=sector_matches,
+            location_matches=location_matches,
+        )
+        score += sum(cluster_contributions.values())
+    else:
+        score += min(len(title_matches), 5) * 15
+        score += min(len(keyword_matches), 8) * 5
+        score += min(len(application_title_matches), 4) * 18
+        score += min(len(application_keyword_matches), 6) * 5
+        score += min(len(sector_matches), 3) * 4
+        score += min(len(learned_title_matches), 4) * 18
+        score += min(len(learned_keyword_matches), 6) * 5
+    if not cluster_weights:
+        if location_matches:
+            score += 15
+        elif not job.location:
+            score += 3
     if application_location_matches:
         score += 7
     if learned_location_matches:
@@ -512,6 +598,8 @@ def score_job(profile: dict[str, Any], job: JobForScoring) -> ScoreResult:
             "missing_qualification_matches": missing_qualification_matches,
             "candidate_lanes": candidate_lanes,
             "hidden_opportunity": hidden_opportunity,
+            "cluster_weights": cluster_weights or None,
+            "cluster_contributions": cluster_contributions or None,
             "language_gate": language_gate.to_audit_dict(),
             "qualification_gate": qualification_gate.to_audit_dict(),
         },
@@ -1033,6 +1121,7 @@ def run_deterministic_recommendations(
     )
 
     evaluated = 0
+    learned_discovery_attributed = 0
     all_scored: list[tuple[JobForScoring, ScoreResult]] = []
     for row in job_rows:
         evaluated += 1
@@ -1060,6 +1149,7 @@ def run_deterministic_recommendations(
                     lanes.append("learned_discovery")
                 deterministic_result["candidate_lanes"] = lanes
                 result = replace(result, deterministic_result=deterministic_result)
+                learned_discovery_attributed += 1
         all_scored.append((job, result))
     all_scored = apply_hard_eligibility(all_scored, profile=profile, as_of=as_of)
 
@@ -1329,6 +1419,9 @@ def run_deterministic_recommendations(
         "local_pool": local_pool,
         "remote_pool": remote_pool,
         "discovery_pool": discovery_pool,
+        "discovery_terms": len(discovery_terms),
+        "learned_discovery_terms": len(learned_discovery_terms),
+        "learned_discovery_attributed": learned_discovery_attributed,
         "deterministic_passes": len(travel_scored),
         "commutable_candidates": len(commutable_rank_by_job_id),
         "commutable_or_full_remote_candidates": len(commutable_or_full_remote_rank_by_job_id),

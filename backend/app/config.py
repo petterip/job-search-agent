@@ -98,6 +98,7 @@ class Settings(BaseModel):
     oulu_varbi_rss_url: str = "https://oulunyliopisto.varbi.com/fi/what:rssfeed/"
     oulu_varbi_base_url: str = "https://oulunyliopisto.varbi.com"
     collector_stale_run_minutes: int = 30
+    pipeline_catchup_delay_minutes: int = 30
     kuntarekry_collection_mode: str = "regional"
     browserbase_api_key: str = ""
     google_maps_api_key: str = ""
@@ -279,6 +280,10 @@ def get_settings() -> Settings:
         collector_stale_run_minutes=_int_env(
             "COLLECTOR_STALE_RUN_MINUTES",
             defaults.collector_stale_run_minutes,
+        ),
+        pipeline_catchup_delay_minutes=_int_env(
+            "PIPELINE_CATCHUP_DELAY_MINUTES",
+            defaults.pipeline_catchup_delay_minutes,
         ),
         kuntarekry_collection_mode=getenv(
             "KUNTAREKRY_COLLECTION_MODE",

@@ -1,5 +1,6 @@
 import logging
 import uuid
+from datetime import datetime, timedelta, timezone
 
 from apscheduler.jobstores.sqlalchemy import SQLAlchemyJobStore
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -36,6 +37,9 @@ from app.feedback_learning import learn_from_feedback
 from app.matching import run_matching
 
 logger = logging.getLogger("worker.scheduler")
+
+_SCHEDULER: AsyncIOScheduler | None = None
+_LAST_CATCHUP_DATE: object | None = None
 
 _kuntarekry_adapter = KuntarekryAdapter()
 _kirkkorekry_adapter = KirkkorekryAdapter()
@@ -322,10 +326,58 @@ async def scheduled_analyze_feedback() -> None:
         ownership.release()
 
 
+def record_pipeline_skip(*, reason: str) -> None:
+    """Persist a pipeline skip so the run is visible in diagnostics."""
+    engine = get_engine()
+    with engine.begin() as connection:
+        connection.execute(
+            sa.text(
+                """
+                insert into pipeline_runs (status, finished_at, error_summary)
+                values ('skipped', now(), :reason)
+                """
+            ),
+            {"reason": reason},
+        )
+
+
+def maybe_schedule_pipeline_catchup(settings: object) -> bool:
+    """Schedule at most one bounded catch-up pipeline run per UTC day.
+
+    The daily pipeline skips while collection owns the catalogue; a single
+    delayed retry keeps the day from being silently skipped without allowing an
+    unbounded retry loop.
+    """
+    global _LAST_CATCHUP_DATE
+    if _SCHEDULER is None:
+        return False
+    today = datetime.now(timezone.utc).date()
+    if _LAST_CATCHUP_DATE == today:
+        return False
+    _LAST_CATCHUP_DATE = today
+    delay = int(getattr(settings, "pipeline_catchup_delay_minutes", 30) or 30)
+    _SCHEDULER.add_job(
+        scheduled_pipeline,
+        trigger="date",
+        run_date=datetime.now(timezone.utc) + timedelta(minutes=delay),
+        id="daily_pipeline_catchup",
+        replace_existing=True,
+        misfire_grace_time=3600,
+    )
+    logger.info("event=pipeline_catchup_scheduled delay_minutes=%s", delay)
+    return True
+
+
 async def scheduled_pipeline() -> None:
     settings = get_settings()
     if source_collection_running(settings.database_url):
         logger.info("event=daily_pipeline_skipped reason=source_collection_running")
+        try:
+            record_pipeline_skip(reason="source_collection_running")
+        except Exception:
+            logger.exception("event=pipeline_skip_record_failed")
+        if maybe_schedule_pipeline_catchup(settings):
+            logger.info("event=daily_pipeline_catchup_scheduled")
         return
     run_id = start_pipeline_run(settings.database_url)
     if run_id is None:
@@ -362,6 +414,7 @@ async def scheduled_pipeline() -> None:
 
 
 def build_scheduler() -> AsyncIOScheduler:
+    global _SCHEDULER
     settings = get_settings()
     scheduled_sources = configured_scheduled_sources()
     expected_job_ids = expected_scheduler_job_ids(scheduled_sources)
@@ -374,6 +427,7 @@ def build_scheduler() -> AsyncIOScheduler:
         jobstores={"default": SQLAlchemyJobStore(url=settings.database_url)},
         timezone="Europe/Helsinki",
     )
+    _SCHEDULER = scheduler
     for source_name, _interval_minutes in scheduled_sources:
         scheduler.add_job(
             scheduled_collect,

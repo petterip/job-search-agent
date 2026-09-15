@@ -1141,3 +1141,73 @@ def test_score_job_configurable_qualification_check_rejects() -> None:
 
     assert result.hard_eligible is False
     assert "sosiaalityontekija" in result.hard_reasons
+
+
+def test_weighted_clusters_do_not_multiply_overlapping_terms() -> None:
+    from support import with_privacy
+
+    profile = with_privacy(
+        {
+            "role_clusters": [{"titles_fi": ["kirjastonhoitaja"], "keywords_fi": ["kirjasto"]}],
+            "preferences": {
+                "scoring_weights": {
+                    "direct_title": 15,
+                    "keywords": 5,
+                    "application_history_title": 0,
+                    "application_history_keyword": 0,
+                    "learned_title": 0,
+                    "learned_keyword": 0,
+                    "sector": 0,
+                    "location": 0,
+                }
+            },
+        }
+    )
+    job = JobForScoring(
+        id=1,
+        title="Kirjastonhoitaja",
+        employer="Kaupunki",
+        description="Kirjasto ja kirjastopalvelut.",
+        location=None,
+    )
+
+    result = score_job(profile, job)
+    contributions = result.deterministic_result["cluster_contributions"]
+
+    # "kirjasto" appears in both title and description, but the title cluster
+    # claims it first so the keyword cluster cannot double count it.
+    assert contributions["direct_title"] == 15.0
+    assert contributions["keywords"] <= 5.0
+
+
+def test_legacy_scoring_is_unchanged_without_weights() -> None:
+    profile = {
+        "role_clusters": [{"titles_fi": ["kirjastonhoitaja"], "keywords_fi": ["kirjasto"]}],
+    }
+    job = JobForScoring(
+        id=1,
+        title="Kirjastonhoitaja",
+        employer="Kaupunki",
+        description="Kirjasto.",
+        location="Oulu",
+    )
+
+    result = score_job(profile, job)
+
+    assert result.deterministic_result["cluster_contributions"] is None
+    assert result.deterministic_result["cluster_weights"] is None
+
+
+def test_invalid_scoring_weights_fall_back_to_legacy() -> None:
+    profile = {
+        "role_clusters": [{"titles_fi": ["kirjastonhoitaja"]}],
+        "preferences": {"scoring_weights": {"direct_title": "lots", "unknown": 5}},
+    }
+    job = JobForScoring(
+        id=1, title="Kirjastonhoitaja", employer=None, description="", location=None
+    )
+
+    result = score_job(profile, job)
+
+    assert result.deterministic_result["cluster_contributions"] is not None
+    assert result.deterministic_result["cluster_weights"]["direct_title"] == 15.0

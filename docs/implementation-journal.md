@@ -250,12 +250,32 @@ action was run.
 - **P2-16** source data-freshness `stale`/`last_success_at` diagnostics,
   separate from container liveness.
 
+### Third implementation batch (2026-09-16)
+
+- **P1-5** opt-in `preferences.scoring_weights`: validated relative cluster
+  weights, per-cluster contribution evidence, cross-cluster term-overlap removal
+  and `requires_check` kept as a caution. The legacy formula stays the default
+  until a labelled comparison enables the weights. Positive `skills` and
+  `strength_signals` are now part of the profile embedding input.
+- **P1-6** discovery coverage counts (kept terms, learned terms, jobs attributed
+  to the `learned_discovery` lane).
+- **P1-8b measured, no index added:** a read-only production
+  `EXPLAIN (ANALYZE, BUFFERS)` of the base active-job retrieval shows a parallel
+  sequential scan + hash semi join with top-N sort at **~138 ms** and
+  ~16.6k shared buffers for `limit 1000`; PostgreSQL chooses the seq scan over
+  any candidate btree index at this scale. No index migration was added, and
+  `pg_trgm`/full-text remains unjustified for the current Finnish token/regex
+  behaviour.
+- **P1-11** one engine per database URL per process with `atexit` disposal.
+- **P2-16** data-freshness `stale`/`last_success_at` source diagnostics plus a
+  persisted pipeline skip and one bounded catch-up run per UTC day.
+
 ### Verification commands
 
 ```bash
 cd backend
-python -m pytest --timeout=10 -q                       # 404 passed, 26 skipped
-TEST_DATABASE_URL=postgresql+psycopg://... python -m pytest --timeout=30 -q  # 430 passed
+python -m pytest --timeout=10 -q                       # 409 passed, 26 skipped
+TEST_DATABASE_URL=postgresql+psycopg://... python -m pytest --timeout=30 -q  # 435 passed
 cd ../web && npm run typecheck && npm run build
 ```
 

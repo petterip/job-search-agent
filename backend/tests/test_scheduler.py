@@ -187,3 +187,38 @@ def test_source_collection_running_reconciles_stale_runs(monkeypatch: pytest.Mon
     assert "started_at < now()" in statements[0]
     assert params[0] == {"stale_minutes": get_settings().collector_stale_run_minutes}
     assert "select exists" in statements[1]
+
+
+def test_pipeline_catchup_is_bounded_to_one_per_day(monkeypatch) -> None:
+    from app import scheduler as scheduler_module
+    from app.config import Settings
+
+    class FakeScheduler:
+        def __init__(self) -> None:
+            self.jobs: list[dict] = []
+
+        def add_job(self, func, **kwargs):  # noqa: ANN001
+            self.jobs.append({"func": func, **kwargs})
+
+    fake = FakeScheduler()
+    monkeypatch.setattr(scheduler_module, "_SCHEDULER", fake)
+    monkeypatch.setattr(scheduler_module, "_LAST_CATCHUP_DATE", None)
+    settings = Settings(pipeline_catchup_delay_minutes=15)
+
+    assert scheduler_module.maybe_schedule_pipeline_catchup(settings) is True
+    assert len(fake.jobs) == 1
+    assert fake.jobs[0]["id"] == "daily_pipeline_catchup"
+    # A second attempt the same day is refused.
+    assert scheduler_module.maybe_schedule_pipeline_catchup(settings) is False
+    assert len(fake.jobs) == 1
+    monkeypatch.setattr(scheduler_module, "_LAST_CATCHUP_DATE", None)
+
+
+def test_catchup_is_not_scheduled_without_a_scheduler(monkeypatch) -> None:
+    from app import scheduler as scheduler_module
+    from app.config import Settings
+
+    monkeypatch.setattr(scheduler_module, "_SCHEDULER", None)
+    monkeypatch.setattr(scheduler_module, "_LAST_CATCHUP_DATE", None)
+
+    assert scheduler_module.maybe_schedule_pipeline_catchup(Settings()) is False

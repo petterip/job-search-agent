@@ -53,6 +53,10 @@ def profile_embedding_text(profile: dict[str, Any]) -> str:
         "languages": projected.get("languages"),
         "preferences": projected.get("preferences"),
         "positive_guidance": positive_guidance,
+        # Positive supported skills and strength signals are retrieval evidence;
+        # learned exclusions stay out of the embedding by design.
+        "skills": projected.get("skills"),
+        "strength_signals": projected.get("strength_signals"),
     }
     return json.dumps(sanitize_outbound(payload), ensure_ascii=False, sort_keys=True)
 
