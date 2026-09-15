@@ -12,7 +12,11 @@ from sqlalchemy.engine import Connection, Engine
 from app.adapters.base import NormalizedListing, SourceAdapter, ensure_aware_utc
 from app.collection.scan_state import (
     OUTCOME_INVALID,
+    SCAN_STATE_CLASSIFIED,
+    SCAN_STATE_CLOSED,
     SitemapEntry,
+    apply_scan_closure,
+    reopen_scan_members,
     claim_scan_batch,
     close_absent_members,
     frontier_drained,
@@ -1059,17 +1063,30 @@ async def run_source_collection(
                         source_id=source_id,
                         entries=scan_entries,
                     )
+                    closed_ids: list[str] = []
+                    reopened_ids: list[str] = []
                     for external_id, _url, _lastmod in pending_entries or []:
-                        mark_scan_outcome(
+                        external_id = str(external_id)
+                        state = mark_scan_outcome(
                             connection,
                             source_id=source_id,
-                            external_id=str(external_id),
+                            external_id=external_id,
                             outcome=fetch_result.scan_outcomes.get(
-                                str(external_id), OUTCOME_INVALID
+                                external_id, OUTCOME_INVALID
                             ),
                             retry_delay_minutes=settings_for_scan.jobly_scan_retry_minutes,
                             closure_attempts=settings_for_scan.jobly_scan_closure_attempts,
                         )
+                        if state == SCAN_STATE_CLOSED:
+                            closed_ids.append(external_id)
+                        elif state == SCAN_STATE_CLASSIFIED:
+                            reopened_ids.append(external_id)
+                    counts["scan_removed_jobs"] = apply_scan_closure(
+                        connection, source_id=source_id, closed_external_ids=closed_ids
+                    )
+                    counts["scan_reopened_jobs"] = reopen_scan_members(
+                        connection, source_id=source_id, reopened_external_ids=reopened_ids
+                    )
                     counts["scan_closed_absent"] = close_absent_members(
                         connection,
                         source_id=source_id,

@@ -361,6 +361,117 @@ def frontier_drained(connection: Connection, *, source_id: int) -> bool:
     return int(pending) == 0
 
 
+def apply_scan_closure(
+    connection: Connection,
+    *,
+    source_id: int,
+    closed_external_ids: Iterable[str],
+    now: datetime | None = None,
+) -> int:
+    """Hide a job only when every remaining enabled occurrence is closed.
+
+    A job is removed only if it currently has an occurrence for this source with
+    one of the confirmed-closed external ids and no other enabled, non-closed
+    occurrence. One live occurrence therefore preserves the canonical job, and a
+    partial/blocked source can never establish absence.
+    """
+    ids = [str(value) for value in closed_external_ids]
+    if not ids:
+        return 0
+    moment = now or datetime.now(timezone.utc)
+    # Persist occurrence-level closure evidence first; the canonical status is
+    # then derived from all enabled occurrences, closed ones included.
+    connection.execute(
+        sa.text(
+            """
+            update job_sources
+            set closed_at = :now
+            where source_id = :source_id
+              and external_id = any(:closed_ids)
+              and closed_at is null
+            """
+        ),
+        {"source_id": source_id, "closed_ids": ids, "now": moment},
+    )
+    return int(
+        connection.execute(
+            sa.text(
+                """
+                update jobs j
+                set status = 'removed',
+                    updated_at = :now
+                where j.status = 'active'
+                  and exists (
+                      select 1
+                      from job_sources js
+                      where js.job_id = j.id
+                        and js.source_id = :source_id
+                        and js.external_id = any(:closed_ids)
+                  )
+                  and not exists (
+                      select 1
+                      from job_sources live_js
+                      join sources live_s on live_s.id = live_js.source_id
+                      where live_js.job_id = j.id
+                        and live_s.enabled = true
+                        and live_js.closed_at is null
+                  )
+                """
+            ),
+            {"source_id": source_id, "closed_ids": ids, "now": moment},
+        ).rowcount
+        or 0
+    )
+
+
+def reopen_scan_members(
+    connection: Connection,
+    *,
+    source_id: int,
+    reopened_external_ids: Iterable[str],
+    now: datetime | None = None,
+) -> int:
+    """Restore a previously removed job when its occurrence reappears."""
+    ids = [str(value) for value in reopened_external_ids]
+    if not ids:
+        return 0
+    moment = now or datetime.now(timezone.utc)
+    connection.execute(
+        sa.text(
+            """
+            update job_sources
+            set closed_at = null
+            where source_id = :source_id
+              and external_id = any(:reopened_ids)
+              and closed_at is not null
+            """
+        ),
+        {"source_id": source_id, "reopened_ids": ids},
+    )
+    return int(
+        connection.execute(
+            sa.text(
+                """
+                update jobs j
+                set status = 'active',
+                    updated_at = :now
+                where j.status = 'removed'
+                  and exists (
+                      select 1
+                      from job_sources js
+                      where js.job_id = j.id
+                        and js.source_id = :source_id
+                        and js.external_id = any(:reopened_ids)
+                        and js.closed_at is null
+                  )
+                """
+            ),
+            {"source_id": source_id, "reopened_ids": ids, "now": moment},
+        ).rowcount
+        or 0
+    )
+
+
 def scan_backlog_report(
     connection: Connection,
     *,

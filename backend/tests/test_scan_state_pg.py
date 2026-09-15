@@ -274,3 +274,103 @@ def test_backlog_report_reports_age_and_counts_independent_of_cap(pg_engine: Any
     assert report["pending"] == 50
     assert report["oldest_open_age_hours"] is not None
     assert report["oldest_open_age_hours"] >= 0
+
+
+def _seed_job_with_occurrence(connection: Any, *, source_id: int, external_id: str) -> int:
+    job_id = int(
+        connection.execute(
+            sa.text(
+                """
+                insert into jobs (title, employer, description, status)
+                values ('Kirjastonhoitaja', 'Kaupunki', 'Kirjasto', 'active')
+                returning id
+                """
+            )
+        ).scalar_one()
+    )
+    listing_id = int(
+        connection.execute(
+            sa.text(
+                """
+                insert into raw_listings (source_id, external_id, canonical_source_url, content_hash, payload)
+                values (:source_id, :external_id, :url, 'h', '{}'::jsonb)
+                returning id
+                """
+            ),
+            {
+                "source_id": source_id,
+                "external_id": external_id,
+                "url": f"https://x.invalid/{external_id}",
+            },
+        ).scalar_one()
+    )
+    connection.execute(
+        sa.text(
+            """
+            insert into job_sources (job_id, source_id, raw_listing_id, external_id, last_content_hash)
+            values (:job_id, :source_id, :listing_id, :external_id, 'h')
+            """
+        ),
+        {"job_id": job_id, "source_id": source_id, "listing_id": listing_id, "external_id": external_id},
+    )
+    return job_id
+
+
+def test_closure_removes_only_when_no_live_occurrence_remains(pg_engine: Any) -> None:
+    from app.collection.scan_state import apply_scan_closure, reopen_scan_members
+
+    with pg_engine.begin() as connection:
+        source_a = _source(connection, name="jobly")
+        source_b = _source(connection, name="other")
+        job_id = _seed_job_with_occurrence(connection, source_id=source_a, external_id="101")
+        # A second, live occurrence from another enabled source.
+        listing_id = int(
+            connection.execute(
+                sa.text(
+                    """
+                    insert into raw_listings (source_id, external_id, canonical_source_url, content_hash, payload)
+                    values (:source_id, 'b-1', 'https://y.invalid/b-1', 'h', '{}'::jsonb)
+                    returning id
+                    """
+                ),
+                {"source_id": source_b},
+            ).scalar_one()
+        )
+        connection.execute(
+            sa.text(
+                """
+                insert into job_sources (job_id, source_id, raw_listing_id, external_id, last_content_hash)
+                values (:job_id, :source_id, :listing_id, 'b-1', 'h')
+                """
+            ),
+            {"job_id": job_id, "source_id": source_b, "listing_id": listing_id},
+        )
+
+        removed_with_live = apply_scan_closure(
+            connection, source_id=source_a, closed_external_ids=["101"]
+        )
+        status_with_live = connection.execute(
+            sa.text("select status from jobs where id = :id"), {"id": job_id}
+        ).scalar_one()
+
+        # Close the last live occurrence as well.
+        removed_all = apply_scan_closure(
+            connection, source_id=source_b, closed_external_ids=["b-1"]
+        )
+        status_all_closed = connection.execute(
+            sa.text("select status from jobs where id = :id"), {"id": job_id}
+        ).scalar_one()
+
+        reopened = reopen_scan_members(
+            connection, source_id=source_a, reopened_external_ids=["101"]
+        )
+        status_reopened = connection.execute(
+            sa.text("select status from jobs where id = :id"), {"id": job_id}
+        ).scalar_one()
+
+    assert removed_with_live == 0
+    assert status_with_live == "active"
+    assert removed_all == 1
+    assert status_all_closed == "removed"
+    assert reopened == 1
+    assert status_reopened == "active"

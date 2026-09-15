@@ -739,6 +739,7 @@ def build_jobs_where_clause(
             join sources visible_s on visible_s.id = visible_js.source_id
             where visible_js.job_id = j.id
               and visible_s.enabled = true
+              and visible_js.closed_at is null
         )
         """
     )
@@ -812,6 +813,7 @@ async def list_jobs(
                     join sources s on s.id = js.source_id
                     where js.job_id = j.id
                       and s.enabled = true
+                      and js.closed_at is null
                     having count(s.id) > 0
                 ) display_source on true
                 where {where_clause}
@@ -851,6 +853,7 @@ async def get_job(job_id: int) -> JobDetailResponse:
                       join sources s on s.id = js.source_id
                       where js.job_id = jobs.id
                         and s.enabled = true
+                        and js.closed_at is null
                   )
                 """
             ),
@@ -873,6 +876,7 @@ async def get_job(job_id: int) -> JobDetailResponse:
                 join raw_listings rl on rl.id = js.raw_listing_id
                 where js.job_id = :job_id
                   and s.enabled = true
+                  and js.closed_at is null
                 order by js.last_seen_at desc, s.name
                 """
             ),
@@ -948,6 +952,7 @@ async def get_job(job_id: int) -> JobDetailResponse:
                     join sources s on s.id = js.source_id
                     where js.job_id = j.id
                       and s.enabled = true
+                      and js.closed_at is null
                     having count(s.id) > 0
                 ) display_source on true
                 where r.job_id = :job_id
@@ -1164,6 +1169,7 @@ async def list_recommendations(
                     join sources s on s.id = js.source_id
                     where js.job_id = j.id
                       and s.enabled = true
+                      and js.closed_at is null
                     having count(s.id) > 0
                 ) display_source on true
                 where r.is_active = true

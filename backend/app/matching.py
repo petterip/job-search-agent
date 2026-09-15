@@ -2189,7 +2189,9 @@ def structural_eligibility_predicate(
             select 1
             from job_sources js
             join sources s on s.id = js.source_id
-            where js.job_id = r.job_id and s.enabled = true
+            where js.job_id = r.job_id
+              and s.enabled = true
+              and js.closed_at is null
         )
         """,
         """

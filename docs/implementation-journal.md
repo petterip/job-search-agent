@@ -332,12 +332,25 @@ action was run.
   deadline — the profile freshness policy consumes it. Tests:
   `tests/test_adapters.py`.
 
+### Eighth implementation batch (2026-09-16)
+
+- **P1-7c canonical closure/reopen.** Migration `20260916_0023` adds
+  `job_sources.closed_at` (partial index on open occurrences).
+  `apply_scan_closure` persists per-occurrence closure and hides the canonical
+  job only when no other enabled, unclosed occurrence remains, so one live
+  occurrence preserves the job and a partial source cannot establish absence;
+  `reopen_scan_members` clears closure and restores the job when the occurrence
+  is reclassified. Closed occurrences are excluded from the API list/detail
+  display source, the catalogue visibility clause, the job-detail enabled-source
+  gate and the recommendation structural predicate. Tested with real
+  PostgreSQL.
+
 ### Verification commands
 
 ```bash
 cd backend
-python -m pytest --timeout=10 -q                       # 413 passed, 36 skipped
-TEST_DATABASE_URL=postgresql+psycopg://... python -m pytest --timeout=30 -q  # 449 passed
+python -m pytest --timeout=10 -q                       # 413 passed, 37 skipped
+TEST_DATABASE_URL=postgresql+psycopg://... python -m pytest --timeout=30 -q  # 450 passed
 cd ../web && npm run typecheck && npm run build
 ```
 
