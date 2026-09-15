@@ -4,6 +4,36 @@ Concise record of what is actually implemented. Keep this file current when code
 
 ## 2026-09-16
 
+### Production deployment (Pi, inkeri.etto.fi)
+
+- **Deployed commit:** `518e045` (initial `451c32c`, plus the audit-serialization
+  fix and the `app.match --inventory` flag).
+- **Backups taken before deploy:** `jobsearchagent-20260915T223008Z.dump`
+  (+ `.sha256`) and `.env.bak.20260915T222900Z` on the host.
+- **`.env` changes (names only):** added `OPERATOR_API_TOKEN` (generated),
+  `PUBLIC_ORIGIN=https://inkeri.etto.fi` and an explicit
+  `RECOMMENDATION_COMMUTE_LIMIT_MINUTES=120` matching the code default.
+- **Migrations:** `alembic current` = `20260916_0018 (head)` (0016 index,
+  0017 run ownership, 0018 usage accounting).
+- **Build/health:** backend and web images rebuilt; api/db healthy, web and
+  worker up; `/health` ok with `transit_distance_enabled: true`.
+- **Access boundary verified:** unauthenticated `GET /recommendations` and
+  `GET /jobs/{id}` return 401, authenticated reads return 200, `/health` and the
+  web pages stay public. The web container receives only the operator token and
+  public origin; the feedback route returns 403 for cross-origin and
+  origin-less POSTs and redirects non-numeric ids.
+- **`make audit-db`:** now runs; the pre-existing `RowMapping is not JSON
+  serializable` failure was fixed. It reports the usual data-quality counters
+  (for example `broken_duunitori_urls`), which are pre-existing and not caused
+  by this deploy.
+- **Not verified:** the Cloudflare tunnel ingress/Access policy itself is
+  remote-managed (`cloudflared tunnel run --token-file`) and was not
+  inspectable locally; the application-level token and origin checks are the
+  enforced boundary. No paid backfill, profile import or destructive action was
+  run.
+
+
+
 ### Recommendation pipeline remediation — Stage A/B/C implementation
 
 Implemented from `docs/recommendation-pipeline-remediation-plan.md`. Verified
