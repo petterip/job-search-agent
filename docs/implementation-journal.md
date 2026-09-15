@@ -456,7 +456,7 @@ source and fixed:
 
 ```bash
 cd backend
-python -m pytest --timeout=10 -q                       # 432 passed, 43 skipped
+python -m pytest --timeout=10 -q                       # 433 passed, 43 skipped
 TEST_DATABASE_URL=postgresql+psycopg://... python -m pytest --timeout=30 -q  # 451 passed
 cd ../web && npm run typecheck && npm run build
 ```

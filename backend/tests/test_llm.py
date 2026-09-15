@@ -589,3 +589,13 @@ def test_job_summary_uses_requirement_aware_excerpt_only_when_enabled(monkeypatc
     assert "Edellytämme kelpoisuutta" in aware["description_excerpt"]
     assert len(aware["description_excerpt"]) <= 4000
     get_settings.cache_clear()
+
+
+def test_settings_expose_evaluation_concurrency_and_parse_retries() -> None:
+    from app.config import Settings
+
+    settings = Settings()
+
+    assert settings.llm_eval_concurrency >= 1
+    assert settings.llm_eval_parse_retries >= 0
+    assert settings.llm_requirement_aware_excerpt is False
