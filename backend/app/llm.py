@@ -10,7 +10,7 @@ from typing import Annotated, Any, Literal, Protocol
 import httpx
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.config import Settings
+from app.config import Settings, get_settings
 from app.privacy import outbound_profile_summary, sanitize_job_travel, sanitize_outbound
 
 logger = logging.getLogger("matcher.llm")
@@ -164,9 +164,68 @@ def minimized_profile_summary(profile: dict[str, Any]) -> str:
     return outbound_profile_summary(profile)
 
 
+# Sentences that carry decisive requirements or deadlines are worth keeping
+# even when they fall beyond a long description's excerpt window.
+REQUIREMENT_KEYWORDS = (
+    "edellyt",
+    "vaadit",
+    "vaatimus",
+    "kelpoisuus",
+    "tutkinto",
+    "lisenssi",
+    "sertifikaatti",
+    "kielitaito",
+    "kielen taito",
+    "ajokortti",
+    "hakuaika",
+    "viimeinen hakupäivä",
+    "haku päättyy",
+    "deadline",
+    "required",
+    "requirement",
+    "qualification",
+    "licence",
+    "license",
+)
+
+
+def requirement_aware_excerpt(description: str, *, limit: int = 4000) -> str:
+    """Keep the head of a long description plus its decisive requirement lines.
+
+    The returned text never exceeds ``limit``. Requirement/deadline sentences
+    that would otherwise fall outside the window are appended at the end, where
+    a long listing's decisive facts usually live.
+    """
+    if len(description) <= limit:
+        return description
+    head = description[: limit // 2]
+    tail_budget = limit - len(head)
+    sentences = re.split(r"(?<=[.!?])\s+", description)
+    decisive = [
+        sentence.strip()
+        for sentence in sentences
+        if any(keyword in sentence.casefold() for keyword in REQUIREMENT_KEYWORDS)
+    ]
+    selected: list[str] = []
+    used = 0
+    for sentence in reversed(decisive):
+        if used + len(sentence) + 1 > tail_budget:
+            continue
+        selected.append(sentence)
+        used += len(sentence) + 1
+    selected.reverse()
+    tail = " ".join(selected)
+    if not tail:
+        return (head + description[len(head) : len(head) + tail_budget])[:limit]
+    return (head + tail)[:limit]
+
+
 def job_summary(job: dict[str, Any]) -> str:
     description = str(job.get("description") or "")
-    excerpt = description[:4000]
+    if get_settings().llm_requirement_aware_excerpt:
+        excerpt = requirement_aware_excerpt(description, limit=4000)
+    else:
+        excerpt = description[:4000]
     deterministic_result = job.get("deterministic_result") or {}
     if isinstance(deterministic_result, str):
         deterministic_result = json.loads(deterministic_result)

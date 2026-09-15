@@ -1211,3 +1211,39 @@ def test_invalid_scoring_weights_fall_back_to_legacy() -> None:
 
     assert result.deterministic_result["cluster_contributions"] is not None
     assert result.deterministic_result["cluster_weights"]["direct_title"] == 15.0
+
+
+def test_profile_rules_change_evaluation_request_identity() -> None:
+    from support import with_privacy
+    from app.matching import evaluation_request_context
+    from app.llm import evaluation_request_hash
+    from app.config import get_settings
+
+    base = with_privacy({"role_clusters": [{"titles_fi": ["kirjastonhoitaja"]}]})
+    with_rules = with_privacy(
+        {
+            "role_clusters": [{"titles_fi": ["kirjastonhoitaja"]}],
+            "llm_guidance": {
+                "profile_rules": ["Kirjastoalan 60 op kelpoisuus on olemassa."]
+            },
+        }
+    )
+
+    plain_summary, _plain_learned = evaluation_request_context(base)
+    rules_summary, _rules_learned = evaluation_request_context(with_rules)
+
+    assert "Profiilikohtaiset arviointisäännöt" not in plain_summary
+    assert "Kirjastoalan 60 op kelpoisuus" in rules_summary
+    plain_hash = evaluation_request_hash(
+        profile_summary=plain_summary,
+        job_summary_text="{}",
+        model="m",
+        prompt_version=get_settings().llm_prompt_version,
+    )
+    rules_hash = evaluation_request_hash(
+        profile_summary=rules_summary,
+        job_summary_text="{}",
+        model="m",
+        prompt_version=get_settings().llm_prompt_version,
+    )
+    assert plain_hash != rules_hash

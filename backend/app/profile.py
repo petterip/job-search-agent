@@ -148,6 +148,18 @@ def validate_profile_document(profile: dict[str, Any]) -> list[str]:
         for index, language in enumerate(languages):
             if "code" in language and not isinstance(language["code"], str):
                 raise ProfileValidationError(f"profile.languages[{index}].code must be a string")
+    guidance = profile.get("llm_guidance") or {}
+    if isinstance(guidance, dict):
+        rules = guidance.get("profile_rules")
+        if rules is not None:
+            if not isinstance(rules, list) or not all(isinstance(item, str) for item in rules):
+                raise ProfileValidationError(
+                    "profile.llm_guidance.profile_rules must be a list of strings"
+                )
+            if any(not item.strip() or len(item) > 400 for item in rules):
+                raise ProfileValidationError(
+                    "profile.llm_guidance.profile_rules entries must be 1-400 characters"
+                )
 
     warnings: list[str] = []
     unknown = sorted(set(profile) - CONSUMED_TOP_LEVEL_KEYS)

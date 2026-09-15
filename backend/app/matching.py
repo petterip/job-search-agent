@@ -1472,6 +1472,19 @@ def evaluation_request_context(profile: dict[str, Any]) -> tuple[str, dict[str, 
         for hint in (learned.get("eval_hints") or [])
     ]
     summary = minimized_profile_summary(profile)
+    guidance = profile.get("llm_guidance")
+    if isinstance(guidance, dict):
+        profile_rules = [
+            str(rule).strip()
+            for rule in (guidance.get("profile_rules") or [])
+            if str(rule).strip()
+        ]
+        if profile_rules:
+            # Profile-specific calibration lives in the validated private
+            # profile; generic fact-grounded instructions stay in code.
+            summary += "\n\nProfiilikohtaiset arviointisäännöt:\n" + "\n".join(
+                f"- {rule}" for rule in profile_rules
+            )
     if few_shot_examples:
         summary += "\n\nPalauteeseen perustuvat esimerkit:\n" + json.dumps(
             few_shot_examples, ensure_ascii=False

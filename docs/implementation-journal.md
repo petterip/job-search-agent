@@ -373,11 +373,23 @@ action was run.
   `tests/test_transit_distance.py`). The full read-snapshot/short-write
   restructure remains for a later batch.
 
+### Eleventh implementation batch (2026-09-16)
+
+- **P2-6 mechanism:** `llm_guidance.profile_rules` (validated list of 1–400
+  character strings) is appended to the evaluation prompt as profile-specific
+  calibration, so profile-specific guidance can leave code without inventing
+  facts about other profiles. It is not enabled and changes nothing until the
+  private profile defines it, which awaits the P2-23 labelled comparison.
+- **P2-7 mechanism:** `requirement_aware_excerpt` keeps the head of a long
+  description plus decisive requirement/deadline sentences within the 4000-char
+  budget; `LLM_REQUIREMENT_AWARE_EXCERPT` (default `false`) selects it, so
+  current evaluation identities are preserved until the change is measured.
+
 ### Verification commands
 
 ```bash
 cd backend
-python -m pytest --timeout=10 -q                       # 417 passed, 38 skipped
+python -m pytest --timeout=10 -q                       # 421 passed, 38 skipped
 TEST_DATABASE_URL=postgresql+psycopg://... python -m pytest --timeout=30 -q  # 451 passed
 cd ../web && npm run typecheck && npm run build
 ```

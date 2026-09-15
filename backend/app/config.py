@@ -20,6 +20,7 @@ class Settings(BaseModel):
     gemini_eval_model: str = "gemini-3.5-flash"
     llm_eval_batch_size: int = 8
     llm_eval_parse_retries: int = 1
+    llm_requirement_aware_excerpt: bool = False
     llm_eval_max_jobs: int = 800
     llm_provider_failure_cooldown_min: int = 360
     storage_dir: str = "/storage"
@@ -221,6 +222,9 @@ def get_settings() -> Settings:
         llm_eval_batch_size=_int_env("LLM_EVAL_BATCH_SIZE", defaults.llm_eval_batch_size),
         llm_eval_parse_retries=_int_env(
             "LLM_EVAL_PARSE_RETRIES", defaults.llm_eval_parse_retries
+        ),
+        llm_requirement_aware_excerpt=_bool_env(
+            "LLM_REQUIREMENT_AWARE_EXCERPT", defaults.llm_requirement_aware_excerpt
         ),
         llm_eval_max_jobs=_int_env("LLM_EVAL_MAX_JOBS", defaults.llm_eval_max_jobs),
         llm_provider_failure_cooldown_min=_int_env(

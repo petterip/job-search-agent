@@ -2,7 +2,7 @@ import json
 
 import httpx
 
-from app.config import Settings
+from app.config import Settings, get_settings
 from support import with_privacy
 from app.llm import (
     EVALUATION_INSTRUCTIONS,
@@ -553,3 +553,39 @@ def test_evaluate_with_parse_retry_does_not_retry_quota() -> None:
             prompt_version=8,
         )
     assert provider.calls == 1
+
+
+def test_requirement_aware_excerpt_keeps_short_text_unchanged() -> None:
+    from app.llm import requirement_aware_excerpt
+
+    assert requirement_aware_excerpt("Lyhyt kuvaus.", limit=4000) == "Lyhyt kuvaus."
+
+
+def test_requirement_aware_excerpt_keeps_late_requirements_and_respects_limit() -> None:
+    from app.llm import requirement_aware_excerpt
+
+    filler = "Yleistä kuvausta tehtävästä. " * 300
+    decisive = "Edellytämme suomen kielen taitoa ja kelpoisuutta."
+    description = filler + decisive + " Lisää yleistä tekstiä."
+
+    excerpt = requirement_aware_excerpt(description, limit=1000)
+
+    assert len(excerpt) <= 1000
+    assert "Edellytämme suomen kielen taitoa" in excerpt
+
+
+def test_job_summary_uses_requirement_aware_excerpt_only_when_enabled(monkeypatch) -> None:
+    filler = "Yleistä kuvausta. " * 400
+    description = filler + "Edellytämme kelpoisuutta."
+
+    monkeypatch.delenv("LLM_REQUIREMENT_AWARE_EXCERPT", raising=False)
+    get_settings.cache_clear()
+    legacy = json.loads(job_summary({"title": "T", "description": description}))
+    assert "Edellytämme kelpoisuutta" not in legacy["description_excerpt"]
+
+    monkeypatch.setenv("LLM_REQUIREMENT_AWARE_EXCERPT", "true")
+    get_settings.cache_clear()
+    aware = json.loads(job_summary({"title": "T", "description": description}))
+    assert "Edellytämme kelpoisuutta" in aware["description_excerpt"]
+    assert len(aware["description_excerpt"]) <= 4000
+    get_settings.cache_clear()
