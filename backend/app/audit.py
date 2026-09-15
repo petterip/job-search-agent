@@ -12,6 +12,22 @@ def scalar_int(connection: Connection, sql: str) -> int:
     return int(connection.execute(sa.text(sql)).scalar_one())
 
 
+def json_safe_latest_run(row: Any) -> dict[str, Any] | None:
+    """Convert the latest learning run row into JSON-serializable values."""
+    if row is None:
+        return None
+    learned_version = row["learned_version"]
+    started_at = row["started_at"]
+    finished_at = row["finished_at"]
+    return {
+        "id": int(row["id"]),
+        "status": str(row["status"]),
+        "learned_version": int(learned_version) if learned_version is not None else None,
+        "started_at": started_at.isoformat() if started_at is not None else None,
+        "finished_at": finished_at.isoformat() if finished_at is not None else None,
+    }
+
+
 def run_database_audit(connection: Connection) -> dict[str, Any]:
     job_status_rows = connection.execute(
         sa.text(
@@ -169,16 +185,18 @@ def run_database_audit(connection: Connection) -> dict[str, Any]:
             connection,
             "select count(*) from feedback_llm_analyses",
         ),
-        "latest_learning_run": connection.execute(
-            sa.text(
-                """
-                select id, status, learned_version, started_at, finished_at
-                from learning_runs
-                order by id desc
-                limit 1
-                """
-            )
-        ).mappings().one_or_none(),
+        "latest_learning_run": json_safe_latest_run(
+            connection.execute(
+                sa.text(
+                    """
+                    select id, status, learned_version, started_at, finished_at
+                    from learning_runs
+                    order by id desc
+                    limit 1
+                    """
+                )
+            ).mappings().one_or_none()
+        ),
         "learned_profile": latest_learned_profile_summary(connection),
         "feedback_benchmark": run_feedback_benchmark(connection),
         "broken_duunitori_urls": scalar_int(
