@@ -294,8 +294,10 @@ action was run.
   `CREATE INDEX CONCURRENTLY` (idempotent, reversible). The date predicate is
   now explicit UTC (`published_at AT TIME ZONE 'UTC')::date`) so dedupe
   grouping no longer depends on the session timezone. Up/down migration was
-  exercised on a disposable database; the post-deploy plan is recorded after
-  rollout.
+  exercised on a disposable database. Post-deploy re-measurement on the same
+  production lookup: **0.43 ms and 11 shared buffers**, using
+  `Index Scan using ix_jobs_dedupe_normalized` (down from ~42 ms / ~12.7k
+  buffers) — roughly a 100x reduction on the per-listing hot path.
 
 ### Verification commands
 
