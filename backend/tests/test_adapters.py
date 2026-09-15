@@ -315,7 +315,9 @@ def test_jobly_location_ignores_bare_country_codes() -> None:
 def test_location_helpers_fallback_to_known_scope_without_blank_location() -> None:
     assert laura_location({"title": {"rendered": "Kokki Joensuu"}, "job_listing_region": []}) == "Joensuu"
     assert eures_location({"locationMap": {"FI": [None]}}) == "Suomi"
-    assert detect_work_mode("mahdollisuus etätyöhön") == "Etä"
+    # Flexibility language is not proof of full remote work (P1-2).
+    assert detect_work_mode("mahdollisuus etätyöhön") is None
+    assert detect_work_mode("kokonaan etätyönä") == "Etä"
     assert detect_work_mode("Etätyö: Ei mahdollisuutta työskennellä etänä") is None
 
 

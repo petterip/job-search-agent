@@ -8,6 +8,8 @@ class Settings(BaseModel):
     app_name: str = "job-search-agent"
     database_url: str = "postgresql+psycopg://jobsearchagent:change-me@db:5432/jobsearchagent"
     llm_provider: str = ""
+    operator_api_token: str = ""
+    public_origin: str = ""
     openai_api_key: str = ""
     openai_embedding_model: str = "text-embedding-3-small"
     openai_embedding_dimension: int = 1536
@@ -99,6 +101,8 @@ class Settings(BaseModel):
     transit_origin_address: str = "Jalkatie 2, Oulu, Finland"
     recommendation_commute_limit_minutes: int = 120
     recommendation_transit_lookup_budget: int = 100
+    transit_cache_ttl_days: int = 7
+    transit_provider_backoff_min: int = 15
     enrichment_enabled: bool = False
     enrichment_provider: str = "browserbase"
     enrichment_max_jobs_per_run: int = 50
@@ -185,6 +189,8 @@ def get_settings() -> Settings:
     return Settings(
         database_url=getenv("DATABASE_URL", defaults.database_url),
         llm_provider=getenv("LLM_PROVIDER", ""),
+        operator_api_token=getenv("OPERATOR_API_TOKEN", ""),
+        public_origin=getenv("PUBLIC_ORIGIN", ""),
         openai_api_key=getenv("OPENAI_API_KEY", ""),
         openai_embedding_model=getenv("OPENAI_EMBEDDING_MODEL", defaults.openai_embedding_model),
         openai_embedding_dimension=_int_env(
@@ -274,6 +280,10 @@ def get_settings() -> Settings:
         recommendation_transit_lookup_budget=_int_env(
             "RECOMMENDATION_TRANSIT_LOOKUP_BUDGET",
             defaults.recommendation_transit_lookup_budget,
+        ),
+        transit_cache_ttl_days=_int_env("TRANSIT_CACHE_TTL_DAYS", defaults.transit_cache_ttl_days),
+        transit_provider_backoff_min=_int_env(
+            "TRANSIT_PROVIDER_BACKOFF_MIN", defaults.transit_provider_backoff_min
         ),
         enrichment_enabled=_bool_env("ENRICHMENT_ENABLED", defaults.enrichment_enabled),
         enrichment_provider=getenv("ENRICHMENT_PROVIDER", defaults.enrichment_provider),

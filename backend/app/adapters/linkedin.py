@@ -11,7 +11,14 @@ from urllib.parse import urljoin
 import httpx
 from dateutil.parser import isoparse
 
-from app.adapters.base import CollectionFetchResult, NormalizedListing, USER_AGENT, payload_content_hash
+from app.adapters.base import (
+    CollectionFetchResult,
+    NormalizedListing,
+    USER_AGENT,
+    payload_content_hash,
+    safe_source_url,
+    source_url_rejection_reason,
+)
 from app.config import get_settings
 
 logger = logging.getLogger("collector.linkedin")
@@ -34,6 +41,9 @@ def parse_linkedin_guest_jobs(markup: str) -> list[dict]:
             continue
         url = href_match.group(1).split("?")[0]
         job_id_match = re.search(r"-(\d+)(?:/)?$", url)
+        absolute_url = urljoin("https://www.linkedin.com", url)
+        if source_url_rejection_reason("linkedin", absolute_url) is not None:
+            continue
         title_match = re.search(
             r'class=["\'][^"\']*base-search-card__title[^"\']*["\'][^>]*>(.*?)</',
             card,
@@ -56,7 +66,7 @@ def parse_linkedin_guest_jobs(markup: str) -> list[dict]:
         jobs.append(
             {
                 "id": job_id_match.group(1) if job_id_match else url,
-                "url": urljoin("https://www.linkedin.com", url),
+                "url": absolute_url,
                 "title": title,
                 "company": _clean_html_text(company_match.group(1)) if company_match else None,
                 "location": _clean_html_text(location_match.group(1)) if location_match else None,
@@ -152,9 +162,10 @@ class LinkedinAdapter:
     def normalize(self, payload: dict) -> NormalizedListing:
         published_at = isoparse(payload["date"]) if payload.get("date") else None
         stored_payload = {"source": self.source_name, **payload}
+        safe_url = safe_source_url(self.source_name, payload.get("url")) or ""
         return NormalizedListing(
             external_id=str(payload["id"]),
-            canonical_source_url=str(payload["url"]),
+            canonical_source_url=safe_url,
             title=str(payload["title"]).strip(),
             employer=payload.get("company"),
             description=None,
@@ -162,5 +173,5 @@ class LinkedinAdapter:
             published_at=published_at,
             content_hash=payload_content_hash(stored_payload),
             payload=stored_payload,
-            application_url=str(payload["url"]),
+            application_url=safe_url or None,
         )

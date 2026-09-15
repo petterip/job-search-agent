@@ -1,6 +1,12 @@
 import Link from "next/link";
 
-import { RecommendationActionBadge, RecommendationEvidence, ScoreBadge } from "./ui";
+import {
+  formatCommuteLimitMinutes,
+  RecommendationActionBadge,
+  RecommendationEvidence,
+  ScoreBadge,
+} from "./ui";
+import { formatFinnishDate, formatFinnishDateTime } from "./datetime";
 
 type LocationEvidence = {
   text: string;
@@ -70,6 +76,7 @@ type RecommendationListItem = {
   employer: string | null;
   location: string | null;
   location_evidence: LocationEvidence | null;
+  travel_commute_limit_minutes: number | null;
   published_at: string | null;
   application_url: string | null;
   source_names: string[];
@@ -113,14 +120,26 @@ function firstParam(value: string | string[] | undefined): string {
   return value ?? "";
 }
 
-const RECOMMENDATION_SCOPES: { value: RecommendationScope; label: string }[] = [
-  { value: "commutable", label: "Enintään 2 h" },
-  { value: "commutable_or_full_remote", label: "2 h + etä" },
-  { value: "nationwide", label: "Koko maa" },
+const RECOMMENDATION_SCOPES: RecommendationScope[] = [
+  "commutable",
+  "commutable_or_full_remote",
+  "nationwide",
 ];
 
-function recommendationScopeLabel(scope: RecommendationScope): string {
-  return RECOMMENDATION_SCOPES.find((item) => item.value === scope)?.label ?? "Enintään 2 h";
+type RecommendationScopeLabels = Record<RecommendationScope, string>;
+
+function recommendationScopeLabels(
+  recommendations: RecommendationListItem[],
+): RecommendationScopeLabels {
+  const configuredLimit =
+    recommendations.find((item) => item.travel_commute_limit_minutes != null)
+      ?.travel_commute_limit_minutes ?? null;
+  const limit = formatCommuteLimitMinutes(configuredLimit);
+  return {
+    commutable: limit ? `Enintään ${limit}` : "Työmatka",
+    commutable_or_full_remote: limit ? `${limit} + etä` : "Työmatka + etä",
+    nationwide: "Koko maa",
+  };
 }
 
 function recommendationScopeCount(
@@ -141,11 +160,20 @@ function recommendationScopeDelta(
   return null;
 }
 
+function recommendationRangeText(start: number, end: number, total: number): string {
+  const formattedTotal = total.toLocaleString("fi-FI");
+  if (end === 0) {
+    return `Näytetään 0 / ${formattedTotal} osumaa`;
+  }
+  return `Näytetään ${start.toLocaleString("fi-FI")}–${end.toLocaleString("fi-FI")} / ${formattedTotal} osumaa`;
+}
+
 function recommendationScopeSummary(
   counts: RecommendationListResponse["scope_counts"] | undefined,
   scope: RecommendationScope,
+  labels: RecommendationScopeLabels,
 ): string {
-  if (!counts) return recommendationScopeLabel(scope);
+  if (!counts) return labels[scope];
   if (scope === "commutable_or_full_remote" && counts.remote_only === 0) {
     return "Etälaajennus ei lisää hyväksyttyjä etä-only suosituksia tällä hetkellä.";
   }
@@ -153,9 +181,9 @@ function recommendationScopeSummary(
     return `${counts.remote_only.toLocaleString("fi-FI")} hyväksyttyä etä-only lisäystä.`;
   }
   if (scope === "nationwide") {
-    return `${counts.nationwide_extra.toLocaleString("fi-FI")} lisäystä 2 h + etä -näkymään verrattuna.`;
+    return `${counts.nationwide_extra.toLocaleString("fi-FI")} lisäystä ${labels.commutable_or_full_remote} -näkymään verrattuna.`;
   }
-  return recommendationScopeLabel(scope);
+  return labels[scope];
 }
 
 function buildHomePath(filters: {
@@ -164,6 +192,7 @@ function buildHomePath(filters: {
   employer: string;
   location: string;
   offset: number;
+  recommendationOffset: number;
   scope: RecommendationScope;
 }): string {
   const params = new URLSearchParams();
@@ -172,6 +201,9 @@ function buildHomePath(filters: {
   if (filters.employer) params.set("employer", filters.employer);
   if (filters.location) params.set("location", filters.location);
   if (filters.offset > 0) params.set("offset", String(filters.offset));
+  if (filters.recommendationOffset > 0) {
+    params.set("recommendation_offset", String(filters.recommendationOffset));
+  }
   if (filters.scope !== "commutable") params.set("scope", filters.scope);
   const query = params.toString();
   return query ? `/?${query}` : "/";
@@ -196,9 +228,13 @@ function buildJobsPath(filters: {
 
 async function getJson<T>(path: string): Promise<T | null> {
   const baseUrl = process.env.INTERNAL_API_BASE_URL ?? "http://localhost:8008";
+  // Private reads require the operator token when the API enforces it. This
+  // runs server-side only, so the token is never sent to the browser.
+  const token = process.env.OPERATOR_API_TOKEN?.trim();
+  const headers: Record<string, string> = token ? { Authorization: `Bearer ${token}` } : {};
 
   try {
-    const response = await fetch(`${baseUrl}${path}`, { cache: "no-store" });
+    const response = await fetch(`${baseUrl}${path}`, { cache: "no-store", headers });
     if (!response.ok) {
       return null;
     }
@@ -206,45 +242,6 @@ async function getJson<T>(path: string): Promise<T | null> {
   } catch {
     return null;
   }
-}
-
-function formatDate(value: string | null): string {
-  if (!value) {
-    return "Julkaisuaika ei tiedossa";
-  }
-  return new Intl.DateTimeFormat("fi-FI", {
-    day: "numeric",
-    month: "numeric",
-    year: "numeric",
-  }).format(new Date(value));
-}
-
-function formatDateTime(value: string | null): string {
-  if (!value) {
-    return "Ei ajoa";
-  }
-  return new Intl.DateTimeFormat("fi-FI", {
-    day: "numeric",
-    month: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-  }).format(new Date(value));
-}
-
-function pageHref(
-  filters: { q: string; source: string; employer: string; location: string },
-  offset: number,
-  scope: RecommendationScope,
-): string {
-  const params = new URLSearchParams();
-  if (filters.q) params.set("q", filters.q);
-  if (filters.source) params.set("source", filters.source);
-  if (filters.employer) params.set("employer", filters.employer);
-  if (filters.location) params.set("location", filters.location);
-  if (scope !== "commutable") params.set("scope", scope);
-  if (offset > 0) params.set("offset", String(offset));
-  const query = params.toString();
-  return query ? `/?${query}` : "/";
 }
 
 function groupRecommendations(items: RecommendationListItem[]): [string, RecommendationListItem[]][] {
@@ -280,7 +277,11 @@ export default async function Home({ searchParams }: PageProps) {
     employer: firstParam(resolvedSearchParams.employer).trim(),
     location: firstParam(resolvedSearchParams.location).trim(),
   };
-  const offset = Number(firstParam(resolvedSearchParams.offset)) || 0;
+  const offset = Math.max(0, Number(firstParam(resolvedSearchParams.offset)) || 0);
+  const recommendationOffset = Math.max(
+    0,
+    Number(firstParam(resolvedSearchParams.recommendation_offset)) || 0,
+  );
   const scopeParam = firstParam(resolvedSearchParams.scope).trim();
   const scope: RecommendationScope =
     scopeParam === "commutable_or_full_remote" || scopeParam === "nationwide"
@@ -292,7 +293,7 @@ export default async function Home({ searchParams }: PageProps) {
     getJson<SourceListResponse>("/sources"),
     getJson<SourceStatusResponse>("/sources/status"),
     getJson<RecommendationListResponse>(
-      `/recommendations?scope=${scope}&limit=${RECOMMENDATION_LIMIT}`,
+      `/recommendations?scope=${scope}&limit=${RECOMMENDATION_LIMIT}&offset=${recommendationOffset}`,
     ),
   ]);
 
@@ -301,7 +302,13 @@ export default async function Home({ searchParams }: PageProps) {
   const nextOffset = offset + PAGE_LIMIT;
   const previousOffset = Math.max(0, offset - PAGE_LIMIT);
   const activeSources = (sourceStatus?.sources ?? []).filter((source) => source.enabled);
-  const recommendationGroups = recommendations ? groupRecommendations(recommendations.items) : [];
+  const recommendationItems = recommendations?.items ?? [];
+  const recommendationTotal = recommendations?.total ?? 0;
+  const recommendationGroups = groupRecommendations(recommendationItems);
+  const scopeLabels = recommendationScopeLabels(recommendationItems);
+  const recommendationNextOffset = recommendationOffset + RECOMMENDATION_LIMIT;
+  const recommendationPreviousOffset = Math.max(0, recommendationOffset - RECOMMENDATION_LIMIT);
+  const recommendationRangeEnd = recommendationOffset + recommendationItems.length;
 
   return (
     <main className="app-shell">
@@ -321,11 +328,11 @@ export default async function Home({ searchParams }: PageProps) {
           </label>
           <label>
             <span>Työnantaja</span>
-            <input name="employer" defaultValue={filters.employer} placeholder="esim. Oulun yliopisto" />
+            <input name="employer" defaultValue={filters.employer} placeholder="esim. Yliopisto" />
           </label>
           <label>
             <span>Sijainti</span>
-            <input name="location" defaultValue={filters.location} placeholder="esim. Oulu" />
+            <input name="location" defaultValue={filters.location} placeholder="esim. Helsinki" />
           </label>
           <label>
             <span>Lähde</span>
@@ -348,37 +355,45 @@ export default async function Home({ searchParams }: PageProps) {
                 <h2 id="recommendations-title">Suositukset</h2>
                 <p>
                   {recommendations
-                    ? `${recommendations.total.toLocaleString("fi-FI")} osumaa · ${recommendationScopeSummary(
+                    ? `${recommendationRangeText(
+                        recommendationOffset + 1,
+                        recommendationRangeEnd,
+                        recommendationTotal,
+                      )} · ${recommendationScopeSummary(
                         recommendations.scope_counts,
                         scope,
+                        scopeLabels,
                       )}`
                     : "Suosituksia ei voitu ladata"}
                 </p>
               </div>
             </div>
             <div className="scope-toggle scope-toggle-bar" role="group" aria-label="Suositusten laajuus">
-              {RECOMMENDATION_SCOPES.map((item) => (
-                (() => {
-                  const count = recommendationScopeCount(recommendations?.scope_counts, item.value);
-                  const delta = recommendationScopeDelta(recommendations?.scope_counts, item.value);
-                  return (
-                    <Link
-                      key={item.value}
-                      className={scope === item.value ? "scope-toggle-option is-active" : "scope-toggle-option"}
-                      href={buildHomePath({ ...filters, offset, scope: item.value })}
-                      aria-current={scope === item.value ? "page" : undefined}
-                    >
-                      <span>{item.label}</span>
-                      {count !== null ? (
-                        <small>
-                          {count.toLocaleString("fi-FI")}
-                          {delta !== null ? ` (+${delta.toLocaleString("fi-FI")})` : ""}
-                        </small>
-                      ) : null}
-                    </Link>
-                  );
-                })()
-              ))}
+              {RECOMMENDATION_SCOPES.map((item) => {
+                const count = recommendationScopeCount(recommendations?.scope_counts, item);
+                const delta = recommendationScopeDelta(recommendations?.scope_counts, item);
+                return (
+                  <Link
+                    key={item}
+                    className={scope === item ? "scope-toggle-option is-active" : "scope-toggle-option"}
+                    href={buildHomePath({
+                      ...filters,
+                      offset,
+                      recommendationOffset: 0,
+                      scope: item,
+                    })}
+                    aria-current={scope === item ? "page" : undefined}
+                  >
+                    <span>{scopeLabels[item]}</span>
+                    {count !== null ? (
+                      <small>
+                        {count.toLocaleString("fi-FI")}
+                        {delta !== null ? ` (+${delta.toLocaleString("fi-FI")})` : ""}
+                      </small>
+                    ) : null}
+                  </Link>
+                );
+              })}
             </div>
           </div>
           {recommendationGroups.length > 0 ? (
@@ -409,6 +424,7 @@ export default async function Home({ searchParams }: PageProps) {
                           locationEvidence={item.location_evidence}
                           rationale={item.rationale}
                           score={item.llm_score ?? item.machine_score}
+                          travelCommuteLimitMinutes={item.travel_commute_limit_minutes}
                         />
                       </Link>
                     ))}
@@ -428,23 +444,70 @@ export default async function Home({ searchParams }: PageProps) {
               </p>
               {scope === "commutable" ? (
                 <p>
-                  <Link href={buildHomePath({ ...filters, offset, scope: "commutable_or_full_remote" })}>
-                    Näytä 2 h + etä
+                  <Link
+                    href={buildHomePath({
+                      ...filters,
+                      offset,
+                      recommendationOffset: 0,
+                      scope: "commutable_or_full_remote",
+                    })}
+                  >
+                    Näytä {scopeLabels.commutable_or_full_remote}
                   </Link>
                   {" · "}
-                  <Link href={buildHomePath({ ...filters, offset, scope: "nationwide" })}>
+                  <Link
+                    href={buildHomePath({
+                      ...filters,
+                      offset,
+                      recommendationOffset: 0,
+                      scope: "nationwide",
+                    })}
+                  >
                     Näytä koko maa
                   </Link>
                 </p>
               ) : scope !== "nationwide" ? (
                 <p>
-                  <Link href={buildHomePath({ ...filters, offset, scope: "nationwide" })}>
+                  <Link
+                    href={buildHomePath({
+                      ...filters,
+                      offset,
+                      recommendationOffset: 0,
+                      scope: "nationwide",
+                    })}
+                  >
                     Näytä koko maa
                   </Link>
                 </p>
               ) : null}
             </div>
           )}
+          {recommendations && recommendationTotal > RECOMMENDATION_LIMIT ? (
+            <nav className="pager" aria-label="Suositusten sivutus">
+              <a
+                aria-disabled={recommendationOffset === 0}
+                href={buildHomePath({
+                  ...filters,
+                  offset,
+                  recommendationOffset: recommendationPreviousOffset,
+                  scope,
+                })}
+              >
+                Edelliset suositukset
+              </a>
+              <a
+                aria-disabled={recommendationNextOffset >= recommendationTotal}
+                href={buildHomePath({
+                  ...filters,
+                  offset,
+                  recommendationOffset: recommendationNextOffset,
+                  scope,
+                })}
+              >
+                Seuraavat suositukset
+              </a>
+            </nav>
+          ) : null}
         </section>
 
         <section className="feed-heading" aria-live="polite">
@@ -457,10 +520,16 @@ export default async function Home({ searchParams }: PageProps) {
             </p>
           </div>
           <div className="pager">
-            <a aria-disabled={offset === 0} href={pageHref(filters, previousOffset, scope)}>
+            <a
+              aria-disabled={offset === 0}
+              href={buildHomePath({ ...filters, offset: previousOffset, recommendationOffset, scope })}
+            >
               Edelliset
             </a>
-            <a aria-disabled={nextOffset >= total} href={pageHref(filters, nextOffset, scope)}>
+            <a
+              aria-disabled={nextOffset >= total}
+              href={buildHomePath({ ...filters, offset: nextOffset, recommendationOffset, scope })}
+            >
               Seuraavat
             </a>
           </div>
@@ -476,7 +545,9 @@ export default async function Home({ searchParams }: PageProps) {
             items.map((job) => (
               <article className="job-row" key={job.id}>
                 <Link className="job-row-link" href={`/tyopaikat/${job.id}`}>
-                  <p className="job-meta">{formatDate(job.published_at)}</p>
+                  <p className="job-meta">
+                    {formatFinnishDate(job.published_at, "Julkaisuaika ei tiedossa")}
+                  </p>
                   <h2>{job.title}</h2>
                   <p className="job-employer">{job.employer ?? "Työnantaja ei tiedossa"}</p>
                   <p className="job-location">{job.location ?? "Sijainti ei tiedossa"}</p>
@@ -521,7 +592,13 @@ export default async function Home({ searchParams }: PageProps) {
                         {source.last_run_status ?? "ei ajoa"}
                       </span>
                     </div>
-                    <p className="job-meta">Viimeksi {formatDateTime(source.last_run_finished_at ?? source.last_run_started_at)}</p>
+                    <p className="job-meta">
+                      Viimeksi{" "}
+                      {formatFinnishDateTime(
+                        source.last_run_finished_at ?? source.last_run_started_at,
+                        "Ei ajoa",
+                      )}
+                    </p>
                     <p className="job-meta">
                       {source.active_jobs.toLocaleString("fi-FI")} aktiivista ·{" "}
                       {source.stored_listings.toLocaleString("fi-FI")} tallennettua

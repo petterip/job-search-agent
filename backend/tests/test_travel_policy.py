@@ -174,3 +174,78 @@ def test_travel_assessment_audit_dict_includes_scope_flags() -> None:
     audit = assessment.to_audit_dict()
     assert audit["commutable_or_full_remote"] is True
     assert audit["full_remote"] is False
+
+
+def test_home_city_shortcut_requires_origin_to_agree() -> None:
+    # Origin moved to Helsinki while the profile still says Oulu: the Oulu
+    # listing must be routed, not silently certified as local.
+    assessment = assess_travel(
+        profile=_profile(),
+        location="Oulu",
+        transit_by_destination={},
+        origin_address="Mannerheimintie 1, Helsinki, Finland",
+        commute_limit_minutes=120,
+        maps_available=False,
+    )
+
+    assert assessment.commutable is False
+    assert assessment.status == "unknown"
+
+
+def test_home_city_shortcut_holds_when_origin_agrees() -> None:
+    assessment = assess_travel(
+        profile=_profile(),
+        location="Oulu",
+        transit_by_destination={},
+        origin_address="Jalkatie 2, Oulu, Finland",
+        commute_limit_minutes=120,
+    )
+
+    assert assessment.commutable is True
+    assert assessment.reason_code == "exact_home_city"
+    assert assessment.origin_city == "Oulu"
+
+
+def test_policy_fingerprint_changes_with_origin_limit_or_home_city() -> None:
+    from app.travel_policy import travel_policy_fingerprint
+
+    base = dict(
+        home_city="Oulu",
+        origin_address="Jalkatie 2, Oulu, Finland",
+        commute_limit_minutes=120,
+    )
+    fingerprint = travel_policy_fingerprint(**base)
+
+    assert fingerprint == travel_policy_fingerprint(**base)
+    assert fingerprint != travel_policy_fingerprint(**{**base, "commute_limit_minutes": 90})
+    assert fingerprint != travel_policy_fingerprint(
+        **{**base, "origin_address": "Mannerheimintie 1, Helsinki, Finland"}
+    )
+    assert fingerprint != travel_policy_fingerprint(**{**base, "home_city": "Kokkola"})
+    # The street address is never embedded in the fingerprint.
+    assert "Jalkatie" not in fingerprint
+
+
+def test_origin_city_extraction_skips_the_street_line() -> None:
+    from app.travel_policy import origin_city_from_address
+
+    assert origin_city_from_address("Jalkatie 2, Oulu, Finland") == "Oulu"
+    assert origin_city_from_address("Oulu, Finland") == "Oulu"
+    assert origin_city_from_address("") is None
+
+
+def test_work_mode_classification_separates_evidence_from_display() -> None:
+    from app.location import classify_work_mode, detect_work_mode
+
+    assert classify_work_mode("kokonaan etätyönä").mode == "full_remote"
+    assert classify_work_mode("Työ on täysin etänä.").mode == "full_remote"
+    assert classify_work_mode("Hybridityö, kaksi päivää toimistolla").mode == "hybrid"
+    assert classify_work_mode("Etätyö: Ei mahdollisuutta työskennellä etänä").mode == "none"
+    # Possibility language is not full remote and must not synthesize "/ Etä".
+    possibility = classify_work_mode("Tehtävässä on mahdollisuus etätyöhön")
+    assert possibility.mode == "unknown"
+    assert possibility.confidence == "low"
+    assert possibility.display_suffix() is None
+    assert detect_work_mode("Tehtävässä on mahdollisuus etätyöhön") is None
+    # Conflicting full-remote and hybrid signals stay unverified.
+    assert classify_work_mode("Täysin etänä, mutta hybridityö myös mahdollista").mode == "unknown"

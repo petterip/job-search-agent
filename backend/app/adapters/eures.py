@@ -9,6 +9,7 @@ from app.adapters.base import (
     USER_AGENT,
     ensure_aware_utc,
     payload_content_hash,
+    validated_external_id,
 )
 from app.config import get_settings
 from app.location import eures_location
@@ -109,12 +110,13 @@ class EuresAdapter:
 
     def normalize(self, payload: dict) -> NormalizedListing:
         external_id = str(payload["id"])
+        safe_id = validated_external_id(external_id)
         employer = None
         employer_obj = payload.get("employer")
         if isinstance(employer_obj, dict):
             employer = employer_obj.get("name")
         published_at = epoch_ms_to_datetime(payload.get("creationDate"))
-        canonical_source_url = eures_portal_url(external_id)
+        canonical_source_url = eures_portal_url(safe_id) if safe_id else ""
 
         return NormalizedListing(
             external_id=external_id,

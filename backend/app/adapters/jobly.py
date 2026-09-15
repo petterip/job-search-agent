@@ -10,8 +10,13 @@ from app.adapters.base import (
     CollectionFetchResult,
     NormalizedListing,
     USER_AGENT,
+    async_source_redirect_guard,
     ensure_aware_utc,
+    log_url_rejection,
     payload_content_hash,
+    safe_source_url,
+    source_url_rejection_reason,
+    validated_external_id,
 )
 from app.config import get_settings
 from app.location import jobly_location
@@ -29,7 +34,7 @@ def parse_sitemap_urls(xml: str, *, watermark: datetime | None) -> list[tuple[st
             continue
         url = loc_match.group(1).strip()
         mod_match = re.search(r"<lastmod>([^<]+)</lastmod>", block)
-        lastmod = isoparse(mod_match.group(1)) if mod_match else None
+        lastmod = ensure_aware_utc(isoparse(mod_match.group(1))) if mod_match else None
         if watermark is not None and lastmod is not None and lastmod <= watermark:
             continue
         rows.append((url, lastmod))
@@ -155,8 +160,21 @@ class JoblyAdapter:
         effective_max_urls = max_urls or self.max_urls
         candidate_urls: list[tuple[str, datetime | None]] = []
 
-        async with httpx.AsyncClient(timeout=60, headers={"User-Agent": USER_AGENT}) as client:
+        async with httpx.AsyncClient(
+            timeout=60,
+            headers={"User-Agent": USER_AGENT},
+            event_hooks={"response": [async_source_redirect_guard(self.source_name)]},
+        ) as client:
             for sitemap_url in self.sitemap_urls:
+                sitemap_reason = source_url_rejection_reason(self.source_name, sitemap_url)
+                if sitemap_reason is not None:
+                    log_url_rejection(
+                        logger,
+                        source_name=self.source_name,
+                        reason=sitemap_reason,
+                        value=sitemap_url,
+                    )
+                    continue
                 response = await client.get(sitemap_url)
                 response.raise_for_status()
                 candidate_urls.extend(parse_sitemap_urls(response.text, watermark=watermark))
@@ -166,6 +184,15 @@ class JoblyAdapter:
             fetched = 0
 
             for url, lastmod in candidate_urls[:effective_max_urls]:
+                url_reason = source_url_rejection_reason(self.source_name, url)
+                if url_reason is not None:
+                    log_url_rejection(
+                        logger,
+                        source_name=self.source_name,
+                        reason=url_reason,
+                        value=url,
+                    )
+                    continue
                 page_response = await client.get(url)
                 if page_response.status_code == 404:
                     logger.warning("event=jobly_listing_missing url=%s", url)
@@ -194,7 +221,8 @@ class JoblyAdapter:
         )
 
     def normalize(self, payload: dict, *, source_url: str) -> NormalizedListing:
-        external_id = jobly_external_id(source_url)
+        safe_url = safe_source_url(self.source_name, source_url) or ""
+        external_id = validated_external_id(jobly_external_id(safe_url)) if safe_url else ""
         title = str(payload.get("title") or "").strip()
         employer = None
         hiring = payload.get("hiringOrganization")
@@ -208,12 +236,12 @@ class JoblyAdapter:
             description = None
 
         published_raw = payload.get("datePosted")
-        published_at = isoparse(published_raw) if published_raw else None
-        stored_payload = {"source_url": source_url, **payload}
+        published_at = ensure_aware_utc(isoparse(published_raw)) if published_raw else None
+        stored_payload = {"source_url": safe_url, **payload}
 
         return NormalizedListing(
             external_id=external_id,
-            canonical_source_url=source_url,
+            canonical_source_url=safe_url,
             title=title,
             employer=employer,
             description=description,
@@ -221,5 +249,5 @@ class JoblyAdapter:
             published_at=published_at,
             content_hash=payload_content_hash(stored_payload),
             payload=stored_payload,
-            application_url=source_url,
+            application_url=safe_url or None,
         )

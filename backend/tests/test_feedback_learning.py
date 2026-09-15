@@ -1,5 +1,6 @@
 from datetime import datetime, timezone
 
+from support import with_privacy
 from app.feedback_learning import (
     decay_multiplier,
     effective_discovery_queries,
@@ -22,7 +23,7 @@ def test_decay_multiplier_is_slower_for_applied_rows() -> None:
 
 
 def test_recompute_learned_state_promotes_boost_and_exclusion_terms() -> None:
-    profile = {"preferences": {}, "role_clusters": [], "learned": {"version": 0}}
+    profile = with_privacy({"preferences": {}, "role_clusters": [], "learned": {"version": 0}})
     rows = [
         {
             "id": 1,
@@ -137,7 +138,7 @@ def test_recompute_learned_state_promotes_boost_and_exclusion_terms() -> None:
 def test_recompute_learned_state_preserves_term_first_seen() -> None:
     from app.config import get_settings
 
-    profile = {
+    profile = with_privacy({
         "preferences": {},
         "role_clusters": [],
         "learned": {
@@ -150,7 +151,7 @@ def test_recompute_learned_state_preserves_term_first_seen() -> None:
                 }
             },
         },
-    }
+    })
     rows = [
         {
             "id": 1,
@@ -289,7 +290,7 @@ def test_build_few_shot_examples_limits_positive_and_negative_counts() -> None:
     assert len(employers) == len(set(employers))
 
 
-def test_evaluation_request_hash_changes_when_learned_version_changes() -> None:
+def test_evaluation_request_hash_uses_learned_content_not_version_counter() -> None:
     from app.llm import evaluation_request_hash
 
     base = {
@@ -298,9 +299,12 @@ def test_evaluation_request_hash_changes_when_learned_version_changes() -> None:
         "model": "test",
         "prompt_version": 7,
     }
-    first = evaluation_request_hash(learned_version=1, **base)
-    second = evaluation_request_hash(learned_version=2, **base)
-    assert first != second
+    with_content = evaluation_request_hash(learned_input={"eval_hints": ["a"]}, **base)
+    without_content = evaluation_request_hash(learned_input=None, **base)
+    same_content = evaluation_request_hash(learned_input={"eval_hints": ["a"]}, **base)
+
+    assert with_content != without_content
+    assert with_content == same_content
 
 
 def test_effective_discovery_queries_merges_learned_terms_without_dropping_baseline() -> None:
@@ -314,3 +318,71 @@ def test_effective_discovery_queries_merges_learned_terms_without_dropping_basel
 
     assert "kirjastonhoitaja" in queries
     assert "palveluassistentti" in queries
+
+
+def _learner_rows() -> list[dict]:
+    base = datetime(2026, 3, 4, tzinfo=timezone.utc)
+    rows = []
+    for index, rating in enumerate([5, 5, 5, 1, 1, 1]):
+        rows.append(
+            {
+                "id": index + 1,
+                "job_id": 10 + index,
+                "rating": rating,
+                "applied": False,
+                "comment": None,
+                "analysis_status": "skipped",
+                "created_at": base,
+                "analysis": None,
+                "scoring_snapshot": {
+                    "job_id": 10 + index,
+                    "title": "Kirjastopedagogi" if rating >= 4 else "Myyntiedustaja",
+                    "employer": f"Employer {index}",
+                    "location": "Oulu",
+                    "keyword_matches": ["kirjastopedagogi"] if rating >= 4 else ["myynti"],
+                    "title_matches": ["kirjastopedagogi"] if rating >= 4 else ["myynti"],
+                },
+            }
+        )
+    return rows
+
+
+def test_learner_version_is_stable_without_effective_change() -> None:
+    from app.config import get_settings
+
+    settings = get_settings()
+    rows = _learner_rows()
+    profile = with_privacy({"preferences": {}, "role_clusters": [], "learned": {}})
+
+    first_profile, first_changes = recompute_learned_state(
+        rows=rows, profile=profile, settings=settings
+    )
+    second_profile, second_changes = recompute_learned_state(
+        rows=rows, profile=first_profile, settings=settings
+    )
+
+    assert first_changes["learned_version"] == 1
+    assert second_changes["learned_version"] == 1
+    assert second_changes["learned_state_changed"] is False
+    assert second_profile["learned"]["updated_at"] == first_profile["learned"]["updated_at"]
+
+
+def test_learner_version_bumps_when_effective_state_changes() -> None:
+    from app.config import get_settings
+
+    settings = get_settings()
+    rows = _learner_rows()
+    profile = with_privacy({"preferences": {}, "role_clusters": [], "learned": {}})
+    first_profile, _changes = recompute_learned_state(rows=rows, profile=profile, settings=settings)
+
+    changed = {
+        **first_profile,
+        "learned": {**first_profile["learned"], "eval_hints": ["uusi vihje"]},
+    }
+    second_profile, second_changes = recompute_learned_state(
+        rows=rows, profile=changed, settings=settings
+    )
+
+    assert second_changes["learned_state_changed"] is True
+    assert second_changes["learned_version"] == 2
+    assert second_profile["learned"]["version"] == 2

@@ -64,7 +64,20 @@ class ProvenanceConnection:
                 }
             )
         if "from job_sources" in sql and "join jobs" in sql:
-            return ScalarResult({"job_id": 42, "raw_listing_id": 99, "status": "active"})
+            return ScalarResult(
+                {
+                    "job_id": 42,
+                    "raw_listing_id": 99,
+                    "status": "active",
+                    "last_content_hash": "abc123",
+                    "application_url": "https://example.test/apply",
+                    "canonical_source_url": "https://example.test/job/1",
+                    "title": "Kirjastonhoitaja",
+                    "employer": "Example Oy",
+                    "published_at": datetime(2026, 6, 20, 10, 0, tzinfo=timezone.utc),
+                    "enabled": True,
+                }
+            )
         if "select description from jobs" in sql:
             return ScalarResult(self.description)
         if "insert into job_enrichments" in sql:
@@ -134,6 +147,17 @@ def test_preserve_enriched_records_source_provenance_when_source_provides_body()
     assert any("insert into job_description_state" in sql for sql in connection.statements)
 
 
+def _occurrence_input_hash(enricher: str) -> str:
+    return compute_enrichment_input_hash(
+        last_content_hash="abc123",
+        application_url="https://example.test/apply",
+        canonical_source_url="https://example.test/job/1",
+        title="Kirjastonhoitaja",
+        employer="Example Oy",
+        published_at=datetime(2026, 6, 20, 10, 0, tzinfo=timezone.utc),
+        enricher=enricher,
+    )
+
 def test_apply_enrichment_result_does_not_replace_adequate_source_description() -> None:
     connection = ProvenanceConnection(
         description="x" * 200,
@@ -144,7 +168,7 @@ def test_apply_enrichment_result_does_not_replace_adequate_source_description() 
         job_source_id=10,
         raw_listing_id=99,
         enricher="detail_http",
-        input_hash="hash-1",
+        input_hash=_occurrence_input_hash("detail_http"),
         description="Much longer enriched body that should not replace an adequate source description.",
         method=EnrichmentMethod.HTTP_STATIC,
         confidence=0.9,
@@ -202,3 +226,26 @@ def test_jobly_browser_dry_run_uses_browser_cap_and_jobly_source(
 
     assert result["status"] == "dry_run"
     assert calls == [{"enricher": "jobly_browser", "source": "jobly", "max_jobs": 7}]
+
+
+def test_apply_enrichment_result_ignores_a_stale_response() -> None:
+    connection = ProvenanceConnection(description="short", provenance="source")
+    result = EnrichmentResult(
+        job_id=42,
+        job_source_id=10,
+        raw_listing_id=99,
+        enricher="detail_http",
+        input_hash="stale-input-hash",
+        description="Enriched body from an older input.",
+        method=EnrichmentMethod.HTTP_STATIC,
+        confidence=0.9,
+    )
+
+    applied = apply_enrichment_result(
+        connection,  # type: ignore[arg-type]
+        result,
+        short_description_threshold=200,
+    )
+
+    assert applied is False
+    assert not any("update jobs" in sql and "set description" in sql for sql in connection.statements)

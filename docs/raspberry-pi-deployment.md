@@ -263,6 +263,7 @@ git status --short
 git fetch --prune
 git log --oneline --decorate -5 --all
 git pull --ff-only
+diff <(grep -o '^[A-Z0-9_]*=' .env | sort) <(grep -o '^[A-Z0-9_]*=' .env.example | sort)
 make docker-config
 docker compose build
 docker compose up -d
@@ -270,6 +271,15 @@ docker compose ps
 curl -fsS http://127.0.0.1:8008/health
 make audit-db
 ```
+
+The `.env` key diff is a required deploy step, not a nicety. The host `.env`
+is not in Git, so it silently keeps whatever configuration it was first
+created with. A host `.env` that predates a feature disables that feature even
+though the code and migrations are deployed: `GOOGLE_MAPS_API_KEY` missing kept
+transit distance off, and `LLM_PROMPT_VERSION` / `LLM_EVAL_MAX_JOBS` stayed at
+their first-deploy values. Resolve every missing key before restarting the
+stack, then confirm the effect on `/health` (for example
+`"transit_distance_enabled": true`).
 
 For source changes, run `make test-regression` before editing source behavior
 and again before deploy if source adapters or source docs changed.

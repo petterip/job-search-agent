@@ -1,5 +1,6 @@
 import html
 import re
+from dataclasses import dataclass
 from typing import Any
 
 CITY_NAMES = (
@@ -105,26 +106,96 @@ def normalize_whitespace(value: str | None) -> str:
     return re.sub(r"\s+", " ", value or "").strip()
 
 
-def detect_work_mode(*values: object) -> str | None:
-    text = strip_markup(" ".join(str(value) for value in values if value is not None)).casefold()
-    if re.search(r"etätyö\s*:\s*(ei|no)\b", text) or "ei mahdollisuutta työskennellä etänä" in text:
+FULL_REMOTE_MARKERS = (
+    "kokonaan etätyönä",
+    "kokopäiväinen etätyö",
+    "täysin etänä",
+    "etätyö koko työaika",
+    "100 % remote",
+    "100% remote",
+    "fully remote",
+    "remote work",
+)
+HYBRID_MARKERS = (
+    "hybridityö",
+    "hybridityössä",
+    "hybrid work",
+    "hybridimalli",
+    "hybrid model",
+    "osittainen etätyö",
+    "etä-/lähityö",
+    "hybridi",
+    "hybrid",
+)
+# Flexibility language that is not proof of full remote work.
+REMOTE_POSSIBILITY_MARKERS = (
+    "etätyömahdollisuus",
+    "mahdollisuus etätyöhön",
+    "mahdollisuus etä",
+    "voidaan tehdä etänä",
+    "remotely",
+    "etätyötä voi tehdä",
+)
+REMOTE_NEGATION_MARKERS = (
+    "etätyö: ei",
+    "etätyö ei ole mahdollista",
+    "ei mahdollisuutta työskennellä etänä",
+    "ei etätyömahdollisuutta",
+    "ei voi tehdä etänä",
+)
+
+
+@dataclass(frozen=True)
+class WorkModeEvidence:
+    """Extracted work-mode evidence, separate from its display suffix.
+
+    A synthesized ``/ Etä`` suffix is presentation only and can never certify
+    full remote work on its own.
+    """
+
+    mode: str  # full_remote | hybrid | none | unknown
+    confidence: str  # high | medium | low
+    evidence: str | None = None
+
+    def display_suffix(self) -> str | None:
+        if self.mode == "full_remote" and self.confidence == "high":
+            return "Etä"
+        if self.mode == "hybrid" and self.confidence in {"high", "medium"}:
+            return "Hybridi"
         return None
-    if any(token in text for token in ("hybridityö", "hybridityössä", "hybrid work", "hybridimalli", "hybrid model", "osittainen etätyö", "etä-/lähityö")):
-        return "Hybridi"
-    if any(
-        token in text
-        for token in (
-            "kokonaan etätyönä",
-            "etätyömahdollisuus",
-            "mahdollisuus etätyöhön",
-            "voidaan tehdä etänä",
-            "remote work",
-            "fully remote",
-            "remotely",
-        )
-    ):
-        return "Etä"
-    return None
+
+    def to_audit_dict(self) -> dict[str, Any]:
+        return {
+            "mode": self.mode,
+            "confidence": self.confidence,
+            "evidence": self.evidence,
+        }
+
+
+def classify_work_mode(*values: object) -> WorkModeEvidence:
+    text = strip_markup(" ".join(str(value) for value in values if value is not None)).casefold()
+    if not text:
+        return WorkModeEvidence(mode="unknown", confidence="low")
+    for marker in REMOTE_NEGATION_MARKERS:
+        if marker in text:
+            return WorkModeEvidence(mode="none", confidence="high", evidence=marker)
+    full_remote = next((marker for marker in FULL_REMOTE_MARKERS if marker in text), None)
+    hybrid = next((marker for marker in HYBRID_MARKERS if marker in text), None)
+    if full_remote and hybrid:
+        # Conflicting signals stay unverified rather than optimistically remote.
+        return WorkModeEvidence(mode="unknown", confidence="low", evidence=full_remote)
+    if full_remote:
+        return WorkModeEvidence(mode="full_remote", confidence="high", evidence=full_remote)
+    if hybrid:
+        return WorkModeEvidence(mode="hybrid", confidence="high", evidence=hybrid)
+    possibility = next((marker for marker in REMOTE_POSSIBILITY_MARKERS if marker in text), None)
+    if possibility:
+        return WorkModeEvidence(mode="unknown", confidence="low", evidence=possibility)
+    return WorkModeEvidence(mode="unknown", confidence="low")
+
+
+def detect_work_mode(*values: object) -> str | None:
+    return classify_work_mode(*values).display_suffix()
 
 
 def append_work_mode(location: str | None, work_mode: str | None) -> str | None:

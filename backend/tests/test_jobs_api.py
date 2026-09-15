@@ -463,7 +463,7 @@ def test_recommendation_feedback_rating_one_hides_recommendation(monkeypatch: An
     assert any("set is_active = false" in statement for statement in engine.connection.statements)
 
 
-def test_recommendation_feedback_rating_two_hides_recommendation(monkeypatch: Any) -> None:
+def test_recommendation_feedback_rating_two_stays_visible_soft_negative(monkeypatch: Any) -> None:
     engine = FeedbackEngine()
     monkeypatch.setattr(main_module, "get_engine", lambda: engine)
 
@@ -473,8 +473,9 @@ def test_recommendation_feedback_rating_two_hides_recommendation(monkeypatch: An
     )
 
     assert response.status_code == 200
-    assert response.json()["recommendation_hidden"] is True
-    assert any("set is_active = false" in statement for statement in engine.connection.statements)
+    assert response.json()["recommendation_hidden"] is False
+    # Rating 2 takes the eligibility-checked restore path, not the direct hide path.
+    assert any("row_number() over" in statement for statement in engine.connection.statements)
 
 
 def test_recommendation_feedback_rerate_unhides_recommendation(monkeypatch: Any) -> None:
@@ -591,11 +592,12 @@ def test_recommendation_scope_sql_maps_filters_and_order() -> None:
     nationwide_filter, nationwide_order = recommendation_scope_sql("nationwide")
 
     assert "r.commutable = true" in commutable_filter
-    assert "r.travel_reason_code = 'exact_home_city'" in commutable_filter
+    assert "r.travel_reason_code in ('exact_home_city','contains_home_city')" in commutable_filter
+    assert "policy_fingerprint" in commutable_filter
     assert "r.travel_origin_address = :travel_origin_address" in commutable_filter
     assert "r.commutable_rank" in commutable_order
     assert "r.commutable_or_full_remote = true" in remote_filter
-    assert "r.travel_reason_code in ('exact_home_city', 'full_remote')" in remote_filter
+    assert "r.travel_reason_code = 'full_remote'" in remote_filter
     assert "r.travel_commute_limit_minutes = :travel_commute_limit_minutes" in remote_filter
     assert "r.commutable = false and r.full_remote = true" in remote_order
     assert "r.commutable_or_full_remote_rank" in remote_order
@@ -624,10 +626,16 @@ def test_recommendations_scope_filters_use_current_travel_policy(monkeypatch: An
         "nationwide_extra": 3,
     }
     assert any("travel_origin_address" in statement for statement in engine.connection.statements)
-    count_params = engine.connection.params[0]
-    assert count_params is not None
-    assert count_params["travel_origin_address"] == "Testikatu 1, Oulu, Finland"
-    assert count_params["travel_commute_limit_minutes"] == 90
+    scope_params = [
+        params
+        for params in engine.connection.params
+        if params and "travel_origin_address" in params
+    ]
+    assert scope_params, "scope queries must bind the current travel policy"
+    assert all(
+        params["travel_origin_address"] == "Testikatu 1, Oulu, Finland" for params in scope_params
+    )
+    assert all(params["travel_commute_limit_minutes"] == 90 for params in scope_params)
     main_module.get_settings.cache_clear()
 
 def test_build_scoring_snapshot_includes_rank_and_rationale(monkeypatch: Any) -> None:

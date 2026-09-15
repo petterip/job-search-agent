@@ -22,7 +22,7 @@ def main() -> None:
     parser.add_argument(
         "--force",
         action="store_true",
-        help="Run even if another collection is marked running.",
+        help="Deprecated: database ownership is always required, so this cannot bypass a live run.",
     )
     args = parser.parse_args()
 

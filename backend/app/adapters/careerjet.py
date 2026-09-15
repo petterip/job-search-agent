@@ -6,7 +6,13 @@ import logging
 
 import httpx
 
-from app.adapters.base import CollectionFetchResult, NormalizedListing, USER_AGENT, payload_content_hash
+from app.adapters.base import (
+    CollectionFetchResult,
+    NormalizedListing,
+    USER_AGENT,
+    payload_content_hash,
+    safe_external_url,
+)
 from app.config import get_settings
 
 logger = logging.getLogger("collector.careerjet")
@@ -101,7 +107,7 @@ class CareerjetAdapter:
         )
 
     def normalize(self, payload: dict) -> NormalizedListing:
-        url = str(payload.get("url") or "")
+        url = safe_external_url(payload.get("url")) or ""
         external_id = url or f"{payload.get('site', '')}:{payload.get('title', '')}:{payload.get('date', '')}"
         stored_payload = {"source": self.source_name, **payload}
         return NormalizedListing(
@@ -114,5 +120,5 @@ class CareerjetAdapter:
             published_at=parse_careerjet_date(payload.get("date")),
             content_hash=payload_content_hash(stored_payload),
             payload=stored_payload,
-            application_url=url,
+            application_url=url or None,
         )

@@ -1,3 +1,4 @@
+import logging
 import re
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
@@ -8,11 +9,17 @@ from dateutil.parser import isoparse
 from app.adapters.base import (
     CollectionFetchResult,
     NormalizedListing,
+    URL_REASON_INVALID_EXTERNAL_ID,
     USER_AGENT,
     is_newer_than_watermark,
+    log_url_rejection,
     payload_content_hash,
+    safe_source_url,
+    validated_external_id,
 )
 from app.config import get_settings
+
+logger = logging.getLogger("collector.varbi")
 
 
 def varbi_job_id_from_link(link: str) -> str | None:
@@ -21,7 +28,10 @@ def varbi_job_id_from_link(link: str) -> str | None:
 
 
 def varbi_fi_job_url(base_url: str, job_id: str) -> str:
-    return f"{base_url.rstrip('/')}/fi/what:job/jobID:{job_id}/"
+    safe_id = validated_external_id(job_id)
+    if safe_id is None:
+        return ""
+    return f"{base_url.rstrip('/')}/fi/what:job/jobID:{safe_id}/"
 
 
 def parse_varbi_rss_items(xml: str) -> list[dict]:
@@ -101,6 +111,14 @@ class OuluVarbiAdapter:
 
                 job_id = str(item["job_id"])
                 detail_url = varbi_fi_job_url(self.base_url, job_id)
+                if not detail_url:
+                    log_url_rejection(
+                        logger,
+                        source_name=self.source_name,
+                        reason=URL_REASON_INVALID_EXTERNAL_ID,
+                        value=job_id,
+                    )
+                    continue
                 detail_response = await client.get(detail_url)
                 detail_response.raise_for_status()
                 description = extract_varbi_description(detail_response.text)
@@ -125,7 +143,7 @@ class OuluVarbiAdapter:
 
     def normalize(self, payload: dict) -> NormalizedListing:
         job_id = str(payload["job_id"])
-        detail_url = str(payload["detail_url"])
+        detail_url = safe_source_url(self.source_name, payload.get("detail_url")) or ""
         title = str(payload.get("title") or "").strip()
         published_at = payload.get("published_at")
         if isinstance(published_at, str):

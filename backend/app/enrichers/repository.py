@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 from datetime import datetime
 from typing import Any
 
@@ -9,6 +10,8 @@ import sqlalchemy as sa
 from sqlalchemy.engine import Connection
 
 from app.enrichers.base import EnrichmentInput, EnrichmentResult
+
+logger = logging.getLogger("matcher.enrichment")
 
 ENRICHMENT_VERSION = "1"
 
@@ -147,15 +150,44 @@ def apply_enrichment_result(
     occurrence = connection.execute(
         sa.text(
             """
-            select js.job_id, js.raw_listing_id, j.status
+            select
+                js.job_id,
+                js.raw_listing_id,
+                js.last_content_hash,
+                js.application_url,
+                rl.canonical_source_url,
+                j.status,
+                j.title,
+                j.employer,
+                j.published_at,
+                s.enabled
             from job_sources js
             join jobs j on j.id = js.job_id
+            join raw_listings rl on rl.id = js.raw_listing_id
+            join sources s on s.id = js.source_id
             where js.id = :job_source_id
             """
         ),
         {"job_source_id": result.job_source_id},
     ).mappings().one_or_none()
-    if occurrence is None or occurrence["status"] != "active":
+    if occurrence is None or occurrence["status"] != "active" or not occurrence["enabled"]:
+        return False
+    # Publish only when the occurrence still carries the input that was enriched.
+    current_input_hash = compute_enrichment_input_hash(
+        last_content_hash=str(occurrence["last_content_hash"]),
+        application_url=occurrence["application_url"],
+        canonical_source_url=occurrence["canonical_source_url"],
+        title=str(occurrence["title"]),
+        employer=occurrence["employer"],
+        published_at=occurrence["published_at"],
+        enricher=result.enricher,
+    )
+    if current_input_hash != result.input_hash:
+        logger.info(
+            "event=enrichment_result_stale job_source_id=%s enricher=%s",
+            result.job_source_id,
+            result.enricher,
+        )
         return False
     job_id = int(occurrence["job_id"])
     raw_listing_id = int(occurrence["raw_listing_id"])
@@ -296,117 +328,125 @@ def list_enrichment_candidates(
 ) -> list[EnrichmentInput]:
     source_filter = ""
     source_priority_order = "s.name,"
-    params: dict[str, Any] = {
-        "threshold": short_description_threshold,
-    }
+    base_params: dict[str, Any] = {"threshold": short_description_threshold}
     if source_names:
         source_filter = "and s.name = any(:source_names)"
         source_priority_order = "array_position(:source_names, s.name),"
-        params["source_names"] = list(source_names)
+        base_params["source_names"] = list(source_names)
 
-    limit_sql = ""
-    if limit is not None:
-        limit_sql = "limit :limit"
-        params["limit"] = limit
-
-    rows = connection.execute(
-        sa.text(
-            f"""
-            select distinct on (j.id)
-                j.id as job_id,
-                js.id as job_source_id,
-                rl.id as raw_listing_id,
-                s.id as source_id,
-                s.name as source_name,
-                js.last_content_hash,
-                js.application_url,
-                rl.canonical_source_url,
-                j.title,
-                j.employer,
-                j.published_at,
-                j.description as current_description
-            from jobs j
-            join job_sources js on js.job_id = j.id
-            join sources s on s.id = js.source_id
-            join raw_listings rl on rl.id = js.raw_listing_id
-            where j.status = 'active'
-              and s.enabled = true
-              {source_filter}
-              and (
-                j.description is null
-                or length(trim(j.description)) < :threshold
-              )
-            order by j.id, {source_priority_order} js.last_seen_at desc nulls last, js.id desc
-            {limit_sql}
-            """
-        ),
-        params,
-    ).mappings()
-
+    # Keyset-page the scan by job id and filter handled identities in Python
+    # before the caller's limit is applied, so already-enriched short
+    # descriptions can never permanently conceal later eligible work.
+    scan_batch = max((limit or 200) * 5, 200)
     candidates: list[EnrichmentInput] = []
-    for row in rows:
-        input_hash = compute_enrichment_input_hash(
-            last_content_hash=str(row["last_content_hash"]),
-            application_url=row["application_url"],
-            canonical_source_url=row["canonical_source_url"],
-            title=str(row["title"]),
-            employer=row["employer"],
-            published_at=row["published_at"],
-            enricher=enricher,
+    last_job_id = 0
+    while True:
+        rows = list(
+            connection.execute(
+                sa.text(
+                    f"""
+                    select distinct on (j.id)
+                        j.id as job_id,
+                        js.id as job_source_id,
+                        rl.id as raw_listing_id,
+                        s.id as source_id,
+                        s.name as source_name,
+                        js.last_content_hash,
+                        js.application_url,
+                        rl.canonical_source_url,
+                        j.title,
+                        j.employer,
+                        j.published_at,
+                        j.description as current_description
+                    from jobs j
+                    join job_sources js on js.job_id = j.id
+                    join sources s on s.id = js.source_id
+                    join raw_listings rl on rl.id = js.raw_listing_id
+                    where j.status = 'active'
+                      and s.enabled = true
+                      and j.id > :last_job_id
+                      {source_filter}
+                      and (
+                        j.description is null
+                        or length(trim(j.description)) < :threshold
+                      )
+                    order by j.id, {source_priority_order} js.last_seen_at desc nulls last, js.id desc
+                    limit :scan_batch
+                    """
+                ),
+                {**base_params, "last_job_id": last_job_id, "scan_batch": scan_batch},
+            ).mappings()
         )
-        if connection.execute(
-            sa.text(
-                """
-                select 1
-                from job_enrichments
-                where job_source_id = :job_source_id
-                  and enricher = :enricher
-                  and input_hash = :input_hash
-                """
-            ),
-            {
-                "job_source_id": row["job_source_id"],
-                "enricher": enricher,
-                "input_hash": input_hash,
-            },
-        ).scalar_one_or_none():
-            continue
-        if connection.execute(
-            sa.text(
-                """
-                select 1
-                from enrichment_queue
-                where job_source_id = :job_source_id
-                  and enricher = :enricher
-                  and input_hash = :input_hash
-                  and status in ('queued', 'running', 'retry')
-                """
-            ),
-            {
-                "job_source_id": row["job_source_id"],
-                "enricher": enricher,
-                "input_hash": input_hash,
-            },
-        ).scalar_one_or_none():
-            continue
-        candidates.append(
-            EnrichmentInput(
-                job_id=int(row["job_id"]),
-                job_source_id=int(row["job_source_id"]),
-                raw_listing_id=int(row["raw_listing_id"]),
-                source_id=int(row["source_id"]),
-                source_name=str(row["source_name"]),
+        if not rows:
+            break
+        for row in rows:
+            last_job_id = int(row["job_id"])
+            input_hash = compute_enrichment_input_hash(
                 last_content_hash=str(row["last_content_hash"]),
                 application_url=row["application_url"],
                 canonical_source_url=row["canonical_source_url"],
                 title=str(row["title"]),
                 employer=row["employer"],
                 published_at=row["published_at"],
-                current_description=row["current_description"],
                 enricher=enricher,
-                enricher_version=ENRICHMENT_VERSION,
             )
-        )
+            if connection.execute(
+                sa.text(
+                    """
+                    select 1
+                    from job_enrichments
+                    where job_source_id = :job_source_id
+                      and enricher = :enricher
+                      and input_hash = :input_hash
+                    """
+                ),
+                {
+                    "job_source_id": row["job_source_id"],
+                    "enricher": enricher,
+                    "input_hash": input_hash,
+                },
+            ).scalar_one_or_none():
+                continue
+            if connection.execute(
+                sa.text(
+                    """
+                    select 1
+                    from enrichment_queue
+                    where job_source_id = :job_source_id
+                      and enricher = :enricher
+                      and input_hash = :input_hash
+                      and status in ('queued', 'running', 'retry')
+                    """
+                ),
+                {
+                    "job_source_id": row["job_source_id"],
+                    "enricher": enricher,
+                    "input_hash": input_hash,
+                },
+            ).scalar_one_or_none():
+                continue
+            candidates.append(
+                EnrichmentInput(
+                    job_id=int(row["job_id"]),
+                    job_source_id=int(row["job_source_id"]),
+                    raw_listing_id=int(row["raw_listing_id"]),
+                    source_id=int(row["source_id"]),
+                    source_name=str(row["source_name"]),
+                    last_content_hash=str(row["last_content_hash"]),
+                    application_url=row["application_url"],
+                    canonical_source_url=row["canonical_source_url"],
+                    title=str(row["title"]),
+                    employer=row["employer"],
+                    published_at=row["published_at"],
+                    current_description=row["current_description"],
+                    enricher=enricher,
+                    enricher_version=ENRICHMENT_VERSION,
+                )
+            )
+            if limit is not None and len(candidates) >= limit:
+                return candidates
+        if len(rows) < scan_batch:
+            break
     return candidates
 
 

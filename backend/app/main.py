@@ -1,28 +1,65 @@
 from datetime import datetime, timezone
+import hmac
 import json
 from typing import Any, Literal
 
 import sqlalchemy as sa
 from fastapi import Body, FastAPI, HTTPException, Query
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from app.config import get_settings
 from app.db import get_engine
 from app.enrichers.repository import enrichment_queue_health, latest_enrichment_run_summary
-from app.feedback_analysis import feedback_content_hash
+from app.freshness import capture_as_of
 from app.llm import configured_eval_model
+from app.matching import load_active_profile, structural_eligibility_predicate
 from app.location_evidence_service import (
     LocationEvidenceView,
     location_evidence_from_deterministic_result,
     resolve_location_evidence_for_job,
 )
 from app.logging import configure_logging
-from app.source_links import source_external_apply_url
-from app.travel_policy import ROUTING_PROFILE
+from app.source_links import normalize_link, source_external_apply_url
+from app.travel_policy import ROUTING_PROFILE, home_city_from_profile, travel_policy_fingerprint
 
 configure_logging()
 
 app = FastAPI(title="Job Search Agent API", version="0.1.0")
+
+
+def _private_request_needs_auth(method: str, path: str) -> bool:
+    """Private reads and every mutation are a boundary.
+
+    `/jobs` (the catalogue list) is public, but `/jobs/{id}` embeds the private
+    recommendation explanation, feedback comment and analysis hypothesis, so it
+    is protected like `/recommendations`.
+    """
+    if method not in {"GET", "HEAD", "OPTIONS"}:
+        return True
+    return path.startswith("/recommendations") or path.startswith("/jobs/")
+
+
+@app.middleware("http")
+async def enforce_operator_access(request: Any, call_next: Any) -> Any:
+    """Require the operator token for private reads and all mutations.
+
+    Active only when OPERATOR_API_TOKEN is configured, so local development and
+    tests are unchanged. Loopback binding alone does not protect an externally
+    exposed reverse proxy, so the same check must also be enforced at the API.
+    """
+    settings = get_settings()
+    token = settings.operator_api_token.strip()
+    if token and _private_request_needs_auth(request.method, request.url.path):
+        provided = ""
+        authorization = request.headers.get("authorization", "")
+        if authorization.lower().startswith("bearer "):
+            provided = authorization[7:].strip()
+        if not provided:
+            provided = request.headers.get("x-operator-token", "").strip()
+        if not provided or not hmac.compare_digest(provided, token):
+            return JSONResponse({"detail": "unauthorized"}, status_code=401)
+    return await call_next(request)
 
 
 class HealthResponse(BaseModel):
@@ -133,17 +170,36 @@ RECOMMENDATION_SCOPES: frozenset[str] = frozenset(
 )
 
 
+LOCAL_SHORTCUT_REASONS = "'exact_home_city','contains_home_city'"
+
+
+def _shortcut_fingerprint_matches() -> str:
+    """A stored local shortcut is valid only under the current policy identity."""
+    return (
+        "r.deterministic_result->'travel_assessment'->>'policy_fingerprint'"
+        " = :travel_policy_fingerprint"
+    )
+
+
+def _origin_params_match() -> str:
+    # Only routed assessments may rely on matching origin parameters; a shortcut
+    # row must prove the current policy fingerprint instead.
+    return (
+        f"coalesce(r.travel_reason_code, '') not in ({LOCAL_SHORTCUT_REASONS})"
+        " and r.travel_origin_address = :travel_origin_address"
+        " and r.travel_commute_limit_minutes = :travel_commute_limit_minutes"
+        " and r.travel_routing_profile = :travel_routing_profile"
+    )
+
+
 def recommendation_scope_sql(scope: RecommendationScope) -> tuple[str, str]:
     if scope == "commutable":
         return (
             "r.commutable = true"
             " and ("
-            "   r.travel_reason_code = 'exact_home_city'"
-            "   or ("
-            "     r.travel_origin_address = :travel_origin_address"
-            "     and r.travel_commute_limit_minutes = :travel_commute_limit_minutes"
-            "     and r.travel_routing_profile = :travel_routing_profile"
-            "   )"
+            f"   (r.travel_reason_code in ({LOCAL_SHORTCUT_REASONS})"
+            f"    and {_shortcut_fingerprint_matches()})"
+            f"   or ({_origin_params_match()})"
             " )",
             "r.commutable_rank asc nulls last, r.machine_score desc, r.id desc",
         )
@@ -151,12 +207,10 @@ def recommendation_scope_sql(scope: RecommendationScope) -> tuple[str, str]:
         return (
             "r.commutable_or_full_remote = true"
             " and ("
-            "   r.travel_reason_code in ('exact_home_city', 'full_remote')"
-            "   or ("
-            "     r.travel_origin_address = :travel_origin_address"
-            "     and r.travel_commute_limit_minutes = :travel_commute_limit_minutes"
-            "     and r.travel_routing_profile = :travel_routing_profile"
-            "   )"
+            "   r.travel_reason_code = 'full_remote'"
+            f"   or (r.travel_reason_code in ({LOCAL_SHORTCUT_REASONS})"
+            f"       and {_shortcut_fingerprint_matches()})"
+            f"   or ({_origin_params_match()})"
             " )",
             "case when r.commutable = false and r.full_remote = true then 0 else 1 end, "
             "r.commutable_or_full_remote_rank asc nulls last, r.machine_score desc, r.id desc",
@@ -168,19 +222,48 @@ def recommendation_scope_sql(scope: RecommendationScope) -> tuple[str, str]:
     )
 
 
-def current_travel_policy_params() -> dict[str, Any]:
+def current_travel_policy_params(profile: dict[str, Any] | None = None) -> dict[str, Any]:
     settings = get_settings()
     return {
         "travel_origin_address": settings.transit_origin_address,
         "travel_commute_limit_minutes": settings.recommendation_commute_limit_minutes,
         "travel_routing_profile": ROUTING_PROFILE,
+        "travel_policy_fingerprint": travel_policy_fingerprint(
+            home_city=home_city_from_profile(profile) if profile else None,
+            origin_address=settings.transit_origin_address,
+            commute_limit_minutes=settings.recommendation_commute_limit_minutes,
+        ),
     }
 
 
-def recommendation_scope_counts(connection: Any) -> "RecommendationScopeCounts":
+def current_publication_predicate(connection: Any) -> tuple[str, dict[str, Any]]:
+    """Current eligibility predicate for published recommendations.
+
+    Jobs age out between nightly runs, so reads must apply the same hard rules
+    the writer does. Merges with the current travel policy parameters because
+    both contribute named bind parameters.
+    """
+    profile = load_active_profile(connection)
+    policy_params = current_travel_policy_params(profile)
+    if profile is None:
+        return "true", policy_params
+    predicate, params = structural_eligibility_predicate(
+        profile=profile, as_of=capture_as_of()
+    )
+    merged = dict(policy_params)
+    merged.update(params)
+    return predicate, merged
+
+
+def recommendation_scope_counts(
+    connection: Any,
+    *,
+    predicate: str = "true",
+    predicate_params: dict[str, Any] | None = None,
+) -> "RecommendationScopeCounts":
     commutable_filter, _commutable_order = recommendation_scope_sql("commutable")
     remote_filter, _remote_order = recommendation_scope_sql("commutable_or_full_remote")
-    scope_params = current_travel_policy_params()
+    scope_params = dict(predicate_params or current_travel_policy_params())
     row = connection.execute(
         sa.text(
             f"""
@@ -191,14 +274,7 @@ def recommendation_scope_counts(connection: Any) -> "RecommendationScopeCounts":
             from recommendations r
             join jobs j on j.id = r.job_id
             where r.is_active = true
-              and j.status = 'active'
-              and exists (
-                  select 1
-                  from job_sources js
-                  join sources s on s.id = js.source_id
-                  where js.job_id = j.id
-                    and s.enabled = true
-              )
+              and ({predicate})
             """
         ),
         scope_params,
@@ -238,7 +314,6 @@ class RecommendationListItem(BaseModel):
     travel_reason_code: str | None = None
     travel_duration_seconds: int | None = None
     travel_distance_km: int | None = None
-    travel_origin_address: str | None = None
     travel_commute_limit_minutes: int | None = None
     published_at: datetime | None
     application_url: str | None
@@ -337,7 +412,6 @@ def build_scoring_snapshot(
         "travel_reason_code": recommendation.get("travel_reason_code"),
         "travel_duration_seconds": recommendation.get("travel_duration_seconds"),
         "travel_distance_km": recommendation.get("travel_distance_km"),
-        "travel_origin_address": recommendation.get("travel_origin_address"),
         "travel_commute_limit_minutes": recommendation.get("travel_commute_limit_minutes"),
         "travel_routing_profile": recommendation.get("travel_routing_profile"),
         "travel_assessment": deterministic_result.get("travel_assessment"),
@@ -391,7 +465,12 @@ def apply_recommendation_visibility_from_feedback(
     recommendation_id: int,
     rating: int,
 ) -> None:
-    if rating <= 2:
+    """Hide rating 1 / not_relevant; restore rating >= 2 subject to eligibility.
+
+    Rating 2 is a soft negative: it stays visible and in the negative learning
+    signals, but it never overrides expiry, a source disable or an LLM rejection.
+    """
+    if rating <= 1:
         connection.execute(
             sa.text(
                 """
@@ -407,31 +486,45 @@ def apply_recommendation_visibility_from_feedback(
             {"recommendation_id": recommendation_id},
         )
         return
-    if rating >= 3:
-        connection.execute(
-            sa.text(
-                """
-                update recommendations
-                set is_active = true
-                where id = :recommendation_id
-                """
-            ),
-            {"recommendation_id": recommendation_id},
-        )
-        profile_id = connection.execute(
-            sa.text(
-                """
-                select profile_id
-                from recommendations
-                where id = :recommendation_id
-                """
-            ),
-            {"recommendation_id": recommendation_id},
-        ).scalar_one_or_none()
-        if profile_id is not None:
-            from app.matching import refresh_active_recommendation_ranks
+    profile_id = connection.execute(
+        sa.text(
+            """
+            select profile_id
+            from recommendations
+            where id = :recommendation_id
+            """
+        ),
+        {"recommendation_id": recommendation_id},
+    ).scalar_one_or_none()
+    if profile_id is None:
+        return
+    from app.matching import (
+        hosted_calls_allowed_for_profile,
+        refresh_active_recommendation_ranks,
+    )
 
-            refresh_active_recommendation_ranks(connection, profile_id=int(profile_id))
+    settings = get_settings()
+    predicate = "true"
+    predicate_params: dict[str, Any] = {}
+    profile = load_active_profile(connection)
+    if profile is not None:
+        predicate, predicate_params = structural_eligibility_predicate(
+            profile=profile, as_of=capture_as_of()
+        )
+    # Mirror matching's mode decision, including profile consent: with hosting
+    # forbidden, deterministic-only rows must not be deactivated for lacking an
+    # LLM evaluation.
+    hosted_allowed = hosted_calls_allowed_for_profile(profile)
+    deterministic_only = (not hosted_allowed) or not str(settings.llm_provider or "").strip()
+    refresh_active_recommendation_ranks(
+        connection,
+        profile_id=int(profile_id),
+        require_llm_review=not deterministic_only,
+        deterministic_only=deterministic_only,
+        prompt_version=settings.llm_prompt_version,
+        extra_predicate=predicate,
+        extra_params=predicate_params,
+    )
 
 
 class JobDetailResponse(BaseModel):
@@ -548,7 +641,7 @@ def recommendation_item_from_row(row: dict) -> RecommendationListItem:
         deterministic_result=deterministic_result,
     )
     stored_evidence = location_evidence_from_deterministic_result(deterministic_result)
-    return RecommendationListItem(
+    item = RecommendationListItem(
         **row_data,
         is_active=is_active,
         feedback=feedback,
@@ -556,6 +649,11 @@ def recommendation_item_from_row(row: dict) -> RecommendationListItem:
         hidden_opportunity=hidden_opportunity,
         location_evidence=stored_evidence,
     )
+    safe_url = normalize_link(item.application_url)
+    if safe_url != item.application_url:
+        # Re-validate persisted URLs so a stale unsafe value is never rendered.
+        item = item.model_copy(update={"application_url": safe_url})
+    return item
 
 
 def build_jobs_where_clause(
@@ -689,6 +787,7 @@ async def list_jobs(
                     join sources s on s.id = js.source_id
                     where js.job_id = j.id
                       and s.enabled = true
+                    having count(s.id) > 0
                 ) display_source on true
                 where {where_clause}
                 order by j.published_at desc nulls last, j.id desc
@@ -697,7 +796,15 @@ async def list_jobs(
             ),
             {**params, "limit": limit, "offset": offset},
         ).mappings()
-        items = [JobListItem(**row) for row in rows]
+        items = [
+            JobListItem(
+                **{
+                    **dict(row),
+                    "application_url": normalize_link(row["application_url"]),
+                }
+            )
+            for row in rows
+        ]
 
     return JobListResponse(items=items, limit=limit, offset=offset, total=total)
 
@@ -713,6 +820,13 @@ async def get_job(job_id: int) -> JobDetailResponse:
                 from jobs
                 where id = :job_id
                   and status = 'active'
+                  and exists (
+                      select 1
+                      from job_sources js
+                      join sources s on s.id = js.source_id
+                      where js.job_id = jobs.id
+                        and s.enabled = true
+                  )
                 """
             ),
             {"job_id": job_id},
@@ -747,7 +861,7 @@ async def get_job(job_id: int) -> JobDetailResponse:
             sources.append(
                 JobSourceItem(
                     source_name=source_row["source_name"],
-                    application_url=source_row["application_url"],
+                    application_url=normalize_link(source_row["application_url"]),
                     external_apply_url=source_external_apply_url(
                         source_row["source_name"],
                         payload if isinstance(payload, dict) else None,
@@ -758,9 +872,10 @@ async def get_job(job_id: int) -> JobDetailResponse:
                 )
             )
 
+        publication_predicate, publication_params = current_publication_predicate(connection)
         recommendation_row = connection.execute(
             sa.text(
-                """
+                f"""
                 select
                     r.id,
                     r.rank,
@@ -771,8 +886,16 @@ async def get_job(job_id: int) -> JobDetailResponse:
                     r.deterministic_result,
                     r.rationale,
                     r.concerns,
-                    r.is_active,
+                    (r.is_active and ({publication_predicate})) as is_active,
                     r.vector_score,
+                    r.commutable,
+                    r.full_remote,
+                    r.commutable_or_full_remote,
+                    r.travel_status,
+                    r.travel_reason_code,
+                    r.travel_duration_seconds,
+                    r.travel_distance_km,
+                    r.travel_commute_limit_minutes,
                     j.id as job_id,
                     j.title,
                     j.employer,
@@ -800,13 +923,14 @@ async def get_job(job_id: int) -> JobDetailResponse:
                     join sources s on s.id = js.source_id
                     where js.job_id = j.id
                       and s.enabled = true
+                    having count(s.id) > 0
                 ) display_source on true
                 where r.job_id = :job_id
                 order by r.id desc
                 limit 1
                 """
             ),
-            {"job_id": job_id},
+            {"job_id": job_id, **publication_params},
         ).mappings().one_or_none()
         recommendation = (
             recommendation_item_from_row(recommendation_row)
@@ -931,10 +1055,14 @@ async def list_recommendations(
     if scope not in RECOMMENDATION_SCOPES:
         raise HTTPException(status_code=422, detail="unknown recommendation scope")
     scope_filter, scope_order = recommendation_scope_sql(scope)
-    scope_params = current_travel_policy_params()
     engine = get_engine()
     with engine.connect() as connection:
-        scope_counts = recommendation_scope_counts(connection)
+        publication_predicate, scope_params = current_publication_predicate(connection)
+        scope_counts = recommendation_scope_counts(
+            connection,
+            predicate=publication_predicate,
+            predicate_params=scope_params,
+        )
         total = int(
             connection.execute(
                 sa.text(
@@ -943,15 +1071,8 @@ async def list_recommendations(
                     from recommendations r
                     join jobs j on j.id = r.job_id
                     where r.is_active = true
-                      and j.status = 'active'
                       and {scope_filter}
-                      and exists (
-                          select 1
-                          from job_sources js
-                          join sources s on s.id = js.source_id
-                          where js.job_id = j.id
-                            and s.enabled = true
-                        )
+                      and ({publication_predicate})
                     """
                 ),
                 scope_params,
@@ -977,7 +1098,6 @@ async def list_recommendations(
                     r.travel_reason_code,
                     r.travel_duration_seconds,
                     r.travel_distance_km,
-                    r.travel_origin_address,
                     r.travel_commute_limit_minutes,
                     j.id as job_id,
                     j.title,
@@ -996,9 +1116,10 @@ async def list_recommendations(
                     join sources s on s.id = js.source_id
                     where js.job_id = j.id
                       and s.enabled = true
+                    having count(s.id) > 0
                 ) display_source on true
                 where r.is_active = true
-                  and j.status = 'active'
+                  and ({publication_predicate})
                   and {scope_filter}
                 order by {scope_order}
                 limit :limit offset :offset
@@ -1046,7 +1167,7 @@ async def get_recommendation_feedback(recommendation_id: int) -> RecommendationF
         rating=int(row["rating"]),
         applied=bool(row["applied"]),
         analysis_status=str(row["analysis_status"]),
-        recommendation_hidden=int(row["rating"]) <= 2,
+        recommendation_hidden=int(row["rating"]) <= 1,
         action=row["action"],
     )
 
@@ -1084,7 +1205,6 @@ async def create_recommendation_feedback(
                     r.travel_reason_code,
                     r.travel_duration_seconds,
                     r.travel_distance_km,
-                    r.travel_origin_address,
                     r.travel_commute_limit_minutes,
                     r.travel_routing_profile,
                     r.machine_score,
@@ -1126,10 +1246,6 @@ async def create_recommendation_feedback(
         from app.feedback_analysis import sanitize_feedback_comment
 
         resolved_comment = sanitize_feedback_comment(resolved_comment, profile=profile)
-        scoring_snapshot = build_scoring_snapshot(
-            recommendation=dict(recommendation),
-            settings=settings,
-        )
         existing = connection.execute(
             sa.text(
                 """
@@ -1140,48 +1256,68 @@ async def create_recommendation_feedback(
             ),
             {"recommendation_id": recommendation_id},
         ).mappings().one_or_none()
-        new_content_hash = feedback_content_hash(
-            rating=rating,
-            applied=applied,
-            comment=resolved_comment,
-            scoring_snapshot=scoring_snapshot,
+        # Idempotency is decided from the user's input only. A rank or score
+        # change between submissions must not create a new paid analysis.
+        same_user_input = (
+            existing is not None
+            and int(existing["rating"]) == rating
+            and bool(existing["applied"]) == applied
+            and (existing["comment"] or None) == (resolved_comment or None)
+        )
+        if same_user_input:
+            stored_snapshot = existing["scoring_snapshot"]
+            connection.execute(
+                sa.text(
+                    """
+                    update recommendation_feedback
+                    set scoring_snapshot = CAST(:scoring_snapshot AS jsonb),
+                        updated_at = now()
+                    where id = :feedback_id
+                    """
+                ),
+                {
+                    "feedback_id": int(existing["id"]),
+                    "scoring_snapshot": json.dumps(
+                        stored_snapshot
+                        if isinstance(stored_snapshot, dict)
+                        else json.loads(stored_snapshot or "{}"),
+                        ensure_ascii=False,
+                    ),
+                },
+            )
+            analysis_status = str(existing["analysis_status"])
+            if analysis_status in {"failed", "skipped"}:
+                connection.execute(
+                    sa.text(
+                        """
+                        update recommendation_feedback
+                        set analysis_status = 'pending',
+                            updated_at = now()
+                        where id = :feedback_id
+                        """
+                    ),
+                    {"feedback_id": int(existing["id"])},
+                )
+                analysis_status = "pending"
+            apply_recommendation_visibility_from_feedback(
+                connection,
+                recommendation_id=recommendation_id,
+                rating=rating,
+            )
+            return RecommendationFeedbackResponse(
+                id=int(existing["id"]),
+                recommendation_id=recommendation_id,
+                rating=rating,
+                applied=applied,
+                analysis_status=analysis_status,
+                recommendation_hidden=rating <= 1,
+                action=legacy_action,
+            )
+        scoring_snapshot = build_scoring_snapshot(
+            recommendation=dict(recommendation),
+            settings=settings,
         )
         if existing is not None:
-            existing_hash = feedback_content_hash(
-                rating=int(existing["rating"]),
-                applied=bool(existing["applied"]),
-                comment=existing["comment"],
-                scoring_snapshot=existing["scoring_snapshot"],
-            )
-            if existing_hash == new_content_hash:
-                apply_recommendation_visibility_from_feedback(
-                    connection,
-                    recommendation_id=recommendation_id,
-                    rating=rating,
-                )
-                analysis_status = str(existing["analysis_status"])
-                if analysis_status in {"failed", "skipped"}:
-                    connection.execute(
-                        sa.text(
-                            """
-                            update recommendation_feedback
-                            set analysis_status = 'pending',
-                                updated_at = now()
-                            where id = :feedback_id
-                            """
-                        ),
-                        {"feedback_id": int(existing["id"])},
-                    )
-                    analysis_status = "pending"
-                return RecommendationFeedbackResponse(
-                    id=int(existing["id"]),
-                    recommendation_id=recommendation_id,
-                    rating=rating,
-                    applied=applied,
-                    analysis_status=analysis_status,
-                    recommendation_hidden=rating <= 2,
-                    action=legacy_action,
-                )
             connection.execute(
                 sa.text(
                     """
@@ -1253,7 +1389,7 @@ async def create_recommendation_feedback(
         rating=rating,
         applied=applied,
         analysis_status=analysis_status,
-        recommendation_hidden=rating <= 2,
+        recommendation_hidden=rating <= 1,
         action=legacy_action,
     )
 

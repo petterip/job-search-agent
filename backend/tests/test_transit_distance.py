@@ -59,7 +59,7 @@ def test_build_location_evidence_marks_local_transit_as_good():
     )
     evidence = build_location_evidence("Oulu", transit)
     assert evidence is not None
-    assert "Oulun seutu" in evidence.text
+    assert "lähialue" in evidence.text
     assert evidence.tone == "good"
 
 
@@ -139,3 +139,178 @@ def test_compute_transit_distance_surfaces_routes_enablement(monkeypatch):
     monkeypatch.setattr(httpx.Client, "post", fake_post)
     with pytest.raises(TransitDistanceError, match="Enable Routes API"):
         compute_transit_distance("Helsinki")
+
+
+def test_compute_transit_distance_classifies_transport_failure(monkeypatch):
+    from app.transit_distance import TransitTransientError
+
+    monkeypatch.setenv("GOOGLE_MAPS_API_KEY", "test-key")
+    get_settings.cache_clear()
+
+    def fake_post(self, url, headers, json):  # noqa: ANN001, ARG001
+        raise httpx.ConnectTimeout("timed out")
+
+    monkeypatch.setattr(httpx.Client, "post", fake_post)
+    with pytest.raises(TransitTransientError):
+        compute_transit_distance("Helsinki")
+
+
+def test_compute_transit_distance_classifies_empty_routes_as_no_route(monkeypatch):
+    from app.transit_distance import TransitNoRouteError
+
+    monkeypatch.setenv("GOOGLE_MAPS_API_KEY", "test-key")
+    get_settings.cache_clear()
+
+    def fake_post(self, url, headers, json):  # noqa: ANN001, ARG001
+        return httpx.Response(200, request=httpx.Request("POST", url), json={"routes": []})
+
+    monkeypatch.setattr(httpx.Client, "post", fake_post)
+    with pytest.raises(TransitNoRouteError):
+        compute_transit_distance("Helsinki")
+
+
+def _transit_settings(tmp_path, **overrides):
+    from app.config import Settings
+
+    values = {
+        "google_maps_api_key": "test-key",
+        "transit_origin_address": "Testikatu 1, Oulu, Finland",
+        "transit_cache_ttl_days": 7,
+        "transit_provider_backoff_min": 15,
+        "storage_dir": str(tmp_path),
+    }
+    values.update(overrides)
+    return Settings(**values)
+
+
+def test_failed_attempts_consume_the_lookup_budget(monkeypatch, tmp_path):
+    from app import transit_distance as transit_module
+    from app.transit_distance import TransitInvalidDestinationError
+
+    settings = _transit_settings(tmp_path)
+    monkeypatch.setattr(transit_module, "get_settings", lambda: settings)
+    monkeypatch.setattr(transit_module, "fetch_cached_transit_distances", lambda *a, **k: {})
+    monkeypatch.setattr(transit_module, "fetch_recent_transit_failures", lambda *a, **k: set())
+    monkeypatch.setattr(transit_module, "store_transit_failure", lambda *a, **k: None)
+    calls: list[str] = []
+
+    def fake_compute(destination, *, origin=None):  # noqa: ANN001, ARG001
+        calls.append(destination)
+        raise TransitInvalidDestinationError("bad destination")
+
+    monkeypatch.setattr(transit_module, "compute_transit_distance", fake_compute)
+
+    result = transit_module.resolve_transit_for_queries(
+        object(),
+        ["A, Finland", "B, Finland", "C, Finland", "D, Finland"],
+        max_lookups=2,
+    )
+
+    assert len(calls) == 2
+    assert result.attempted == 2
+    assert result.failed_queries == {"A, Finland", "B, Finland"}
+    assert result.not_attempted_queries == {"C, Finland", "D, Finland"}
+    assert result.no_route_queries == frozenset()
+
+
+def test_confirmed_no_route_is_the_only_unrouteable_signal(monkeypatch, tmp_path):
+    from app import transit_distance as transit_module
+    from app.transit_distance import TransitNoRouteError
+
+    settings = _transit_settings(tmp_path)
+    monkeypatch.setattr(transit_module, "get_settings", lambda: settings)
+    monkeypatch.setattr(transit_module, "fetch_cached_transit_distances", lambda *a, **k: {})
+    monkeypatch.setattr(transit_module, "fetch_recent_transit_failures", lambda *a, **k: set())
+    stored: list[str] = []
+    monkeypatch.setattr(
+        transit_module, "store_transit_failure", lambda *a, reason=None, **k: stored.append(reason)
+    )
+
+    def fake_compute(destination, *, origin=None):  # noqa: ANN001, ARG001
+        raise TransitNoRouteError("no route")
+
+    monkeypatch.setattr(transit_module, "compute_transit_distance", fake_compute)
+
+    result = transit_module.resolve_transit_for_queries(object(), ["A, Finland"], max_lookups=5)
+
+    assert result.no_route_queries == {"A, Finland"}
+    assert result["A, Finland"] is None
+    assert stored == ["no_route"]
+
+
+def test_transient_failure_sets_provider_backoff_without_per_destination_poison(
+    monkeypatch, tmp_path
+):
+    from app import transit_distance as transit_module
+    from app.transit_distance import TransitTransientError
+
+    settings = _transit_settings(tmp_path)
+    monkeypatch.setattr(transit_module, "get_settings", lambda: settings)
+    monkeypatch.setattr(transit_module, "fetch_cached_transit_distances", lambda *a, **k: {})
+    monkeypatch.setattr(transit_module, "fetch_recent_transit_failures", lambda *a, **k: set())
+    failure_writes: list[str] = []
+    monkeypatch.setattr(
+        transit_module,
+        "store_transit_failure",
+        lambda *a, reason=None, **k: failure_writes.append(reason),
+    )
+
+    def fake_compute(destination, *, origin=None):  # noqa: ANN001, ARG001
+        raise TransitTransientError("503")
+
+    monkeypatch.setattr(transit_module, "compute_transit_distance", fake_compute)
+
+    result = transit_module.resolve_transit_for_queries(
+        object(), ["A, Finland", "B, Finland"], max_lookups=5
+    )
+
+    assert result.provider_backoff is False
+    assert failure_writes == []
+    assert transit_module.transit_provider_in_backoff(settings) is True
+
+    # A later run short-circuits without any HTTP attempt.
+    monkeypatch.setattr(
+        transit_module,
+        "compute_transit_distance",
+        lambda *a, **k: pytest.fail("should not call provider during backoff"),
+    )
+    second = transit_module.resolve_transit_for_queries(object(), ["C, Finland"], max_lookups=5)
+    assert second.provider_backoff is True
+    assert second.not_attempted_queries == {"C, Finland"}
+
+
+def test_provider_backoff_still_serves_cached_routes(monkeypatch, tmp_path):
+    from app import transit_distance as transit_module
+
+    settings = _transit_settings(tmp_path)
+    monkeypatch.setattr(transit_module, "get_settings", lambda: settings)
+    cached_result = TransitDistanceResult(
+        origin="Testikatu 1, Oulu, Finland",
+        destination="A",
+        destination_query="A, Finland",
+        distance_meters=10_000,
+        distance_km=10,
+        duration_seconds=1200,
+        duration_text="20 min",
+        summary_text="10 km · 20 min (julkiset)",
+    )
+    monkeypatch.setattr(
+        transit_module,
+        "fetch_cached_transit_distances",
+        lambda *a, **k: {"A, Finland": cached_result},
+    )
+    monkeypatch.setattr(transit_module, "fetch_recent_transit_failures", lambda *a, **k: set())
+    transit_module.mark_transit_provider_backoff(settings, "429")
+    monkeypatch.setattr(
+        transit_module,
+        "compute_transit_distance",
+        lambda *a, **k: pytest.fail("must not call provider during backoff"),
+    )
+
+    result = transit_module.resolve_transit_for_queries(
+        object(), ["A, Finland", "B, Finland"], max_lookups=5
+    )
+
+    assert result["A, Finland"] is cached_result
+    assert result.provider_backoff is True
+    assert result.not_attempted_queries == {"B, Finland"}

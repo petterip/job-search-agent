@@ -42,6 +42,18 @@ export function ScoreBadge({ rank, score }: { rank: number | null; score: number
   );
 }
 
+export function formatCommuteLimitMinutes(minutes: number | null | undefined): string | null {
+  if (minutes === null || minutes === undefined || !Number.isFinite(minutes) || minutes <= 0) {
+    return null;
+  }
+  const total = Math.round(minutes);
+  const hours = Math.floor(total / 60);
+  const rest = total % 60;
+  if (hours === 0) return `${rest} min`;
+  if (rest === 0) return `${hours} h`;
+  return `${hours} h ${rest} min`;
+}
+
 function workMode(location: string | null): "remote" | "hybrid" | null {
   const normalized = (location ?? "").toLocaleLowerCase("fi-FI");
   if (normalized.includes("/ etä") || normalized.endsWith(" etä")) return "remote";
@@ -56,7 +68,10 @@ function sentenceParts(value: string | null): string[] {
     .filter(Boolean);
 }
 
-function fallbackLocationEvidence(location: string | null): LocationEvidence | null {
+function fallbackLocationEvidence(
+  location: string | null,
+  commuteLimitMinutes: number | null | undefined,
+): LocationEvidence | null {
   const mode = workMode(location);
   if (mode === "remote") {
     return { text: "Etätyö · sijainti joustava", tone: "good" };
@@ -64,8 +79,11 @@ function fallbackLocationEvidence(location: string | null): LocationEvidence | n
   if (!location) {
     return null;
   }
+  const limit = formatCommuteLimitMinutes(commuteLimitMinutes);
   return {
-    text: `${location} · julkisen liikenteen matka Oulusta ei tiedossa`,
+    text: limit
+      ? `${location} · työmatka enintään ${limit}, matka-aika ei tiedossa`
+      : `${location} · työmatka, matka-aika ei tiedossa`,
     tone: "warning",
   };
 }
@@ -73,8 +91,9 @@ function fallbackLocationEvidence(location: string | null): LocationEvidence | n
 function resolveLocationEvidence(
   location: string | null,
   locationEvidence: LocationEvidence | null | undefined,
+  commuteLimitMinutes: number | null | undefined,
 ): LocationEvidence | null {
-  return locationEvidence ?? fallbackLocationEvidence(location);
+  return locationEvidence ?? fallbackLocationEvidence(location, commuteLimitMinutes);
 }
 
 function concernTone(text: string, locationFit: LocationEvidence | null): EvidenceTone {
@@ -84,7 +103,7 @@ function concernTone(text: string, locationFit: LocationEvidence | null): Eviden
   if (/kelpoisuus|puuttuu|edellyttää/i.test(text)) {
     return "bad";
   }
-  if (/km ·|julkiset|matka oulusta ei tiedossa/i.test(text)) {
+  if (/km ·|julkiset|työmatka/i.test(text)) {
     return locationFit?.tone ?? "warning";
   }
   if (/sijainti/i.test(text)) {
@@ -159,6 +178,7 @@ export function RecommendationEvidence({
   concerns,
   location,
   locationEvidence,
+  travelCommuteLimitMinutes,
   score,
 }: {
   idPrefix: string;
@@ -166,9 +186,14 @@ export function RecommendationEvidence({
   concerns: string[];
   location: string | null;
   locationEvidence?: LocationEvidence | null;
+  travelCommuteLimitMinutes?: number | null;
   score: number;
 }) {
-  const resolvedLocationEvidence = resolveLocationEvidence(location, locationEvidence);
+  const resolvedLocationEvidence = resolveLocationEvidence(
+    location,
+    locationEvidence,
+    travelCommuteLimitMinutes,
+  );
   const { pros, cons } = evidenceItems({
     rationale,
     concerns,

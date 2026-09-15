@@ -7,6 +7,8 @@ import sqlalchemy as sa
 from sqlalchemy.engine import Connection
 
 from app.config import Settings
+from app.privacy import project_profile_for_llm, sanitize_outbound
+
 logger = logging.getLogger("matcher.embeddings")
 
 EMBEDDING_BATCH_SIZE = 64
@@ -29,10 +31,14 @@ def job_embedding_text(job: dict[str, Any]) -> str:
 
 
 def profile_embedding_text(profile: dict[str, Any]) -> str:
-    """Positive retrieval text only: objective, location, role_clusters, languages,
-    preferences (incl. application_history_signals and learned_boosts), and llm_guidance
-    reward fields. Learned exclusions live under profile.learned and are excluded here."""
-    guidance = profile.get("llm_guidance", {})
+    """Positive retrieval text only, drawn from the privacy-approved projection.
+
+    Objective, location, role_clusters, languages, preferences and positive
+    llm_guidance fields are included; learned exclusions and any forbidden
+    nested field (for example a postal code) are excluded by the projection.
+    """
+    projected = project_profile_for_llm(profile)
+    guidance = projected.get("llm_guidance", {})
     positive_guidance = {}
     if isinstance(guidance, dict):
         positive_guidance = {
@@ -41,14 +47,14 @@ def profile_embedding_text(profile: dict[str, Any]) -> str:
             if key in guidance
         }
     payload = {
-        "objective": profile.get("objective"),
-        "location": profile.get("location"),
-        "role_clusters": profile.get("role_clusters"),
-        "languages": profile.get("languages"),
-        "preferences": profile.get("preferences"),
+        "objective": projected.get("objective"),
+        "location": projected.get("location"),
+        "role_clusters": projected.get("role_clusters"),
+        "languages": projected.get("languages"),
+        "preferences": projected.get("preferences"),
         "positive_guidance": positive_guidance,
     }
-    return json.dumps(payload, ensure_ascii=False, sort_keys=True)
+    return json.dumps(sanitize_outbound(payload), ensure_ascii=False, sort_keys=True)
 
 
 def vector_literal(values: list[float]) -> str:

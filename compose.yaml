@@ -15,6 +15,11 @@ services:
     environment:
       INTERNAL_API_BASE_URL: ${INTERNAL_API_BASE_URL:-http://api:8000}
       NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-http://localhost:8008}
+      # Server-side only: the web app forwards this on private API reads and
+      # mutations. Deliberately not env_file, so unrelated secrets stay out of
+      # the web container.
+      OPERATOR_API_TOKEN: ${OPERATOR_API_TOKEN:-}
+      PUBLIC_ORIGIN: ${PUBLIC_ORIGIN:-}
     depends_on:
       api:
         condition: service_healthy

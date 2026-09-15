@@ -1,7 +1,14 @@
 from dataclasses import dataclass
 import logging
 
-from app.adapters.base import CollectionFetchResult, ensure_aware_utc, is_newer_than_watermark
+from app.adapters.base import (
+    CollectionFetchResult,
+    URL_REASON_REJECTED,
+    async_source_redirect_guard,
+    ensure_aware_utc,
+    is_newer_than_watermark,
+    log_url_rejection,
+)
 from app.adapters.talentech import (
     TALENTECH_USER_AGENT,
     extract_talentech_description,
@@ -62,6 +69,7 @@ class TalentechRegionalAdapter:
             timeout=60,
             headers={"User-Agent": TALENTECH_USER_AGENT},
             follow_redirects=True,
+            event_hooks={"response": [async_source_redirect_guard(self.source_name)]},
         ) as client:
             for regional_path in self.config.regional_paths:
                 shard_url = f"{self.config.base_url}/fi/tyopaikat/{regional_path}?format=json"
@@ -103,7 +111,18 @@ class TalentechRegionalAdapter:
                 if not is_newer_than_watermark(published_at, watermark):
                     continue
 
-                detail_url = talentech_canonical_url(self.config.base_url, str(summary["url"]))
+                detail_url = talentech_canonical_url(
+                    self.config.base_url,
+                    str(summary["url"]),
+                )
+                if detail_url is None:
+                    log_url_rejection(
+                        logger,
+                        source_name=self.source_name,
+                        reason=URL_REASON_REJECTED,
+                        value=summary.get("url"),
+                    )
+                    continue
                 detail_response = None
                 for attempt in range(4):
                     detail_response = await client.get(detail_url)

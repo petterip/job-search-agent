@@ -2,6 +2,260 @@
 
 Concise record of what is actually implemented. Keep this file current when code, runnable services, or verified behavior changes.
 
+## 2026-09-16
+
+### Recommendation pipeline remediation — Stage A/B/C implementation
+
+Implemented from `docs/recommendation-pipeline-remediation-plan.md`. Verified
+with backend unit tests plus a disposable PostgreSQL 18 + pgvector database
+(`alembic upgrade head`, `TEST_DATABASE_URL=...`); the web app passed
+`npm run typecheck` and `npm run build`. See the plan's "Implementation status"
+table for per-task evidence; the summary below distinguishes implemented,
+verified and blocked work.
+
+**Implemented and covered by tests**
+
+- **P0-1 outbound privacy.** New `app/privacy.py`: supported `llm_allowed_fields`
+  directives map to explicit structured projections, `llm_forbidden_fields` win
+  at every depth, unknown directives fail closed, `llm_allowed=false` disables
+  hosted profile/embedding calls. Job travel evidence, feedback snapshots,
+  learned examples/hints and embedding input are sanitized; the API response
+  model no longer exposes `travel_origin_address`. Synthetic sentinels only in
+  committed tests.
+- **P0-2 exact evaluation identity.** `evaluation_request_hash` now covers the
+  actual prompt instructions/task, canonical response schema, provider, model,
+  job and profile ownership, and the sanitized learned input; `returned_model`
+  is response provenance only. Invalid cached output is a recoverable miss, and
+  lookup/link updates are ownership-scoped.
+- **P0-4 stable learned state.** The learner bumps its version only when the
+  effective learned content changes; `updated_at`, counters and diagnostic
+  provenance do not change evaluation identity.
+- **P0-5 publication coherence.** Hard eligibility is immutable through
+  semantic promotion and travel; `reconcile_recommendation_publication`
+  re-checks existing recommendations against current hard rules outside the
+  retrieval window; deterministic upsert no longer overwrites a linked LLM
+  rationale; cooldown/misconfiguration never publishes unreviewed rows;
+  prompt-version mismatch marks `awaiting_refresh` instead of silently
+  reactivating.
+- **P0-6 freshness.** New `app/freshness.py` pure policy: one captured UTC
+  `as_of`, date-only deadlines interpreted through the Helsinki end of day,
+  first-seen fallback tagged, future/malformed dates flagged, `drop_past_deadline`
+  honored. The gate runs before embeddings and again on API reads; catalogue
+  `jobs.status` is never expired for a profile age preference.
+- **P0-7 feedback visibility.** Rating 1 hides; rating 2 stays a soft negative
+  and only restores subject to eligibility; `applied` with a low rating remains
+  rejected; learning keeps the `rating <= 2` negative signal.
+- **P0-8 API visibility.** One structural eligibility predicate for items,
+  counts, scope counts, detail and the LLM selector; the display-source lateral
+  requires at least one enabled occurrence, so a disabled-only job yields no
+  item and no count instead of a `source_names=NULL` failure; persisted links
+  are re-validated on read.
+- **P2-17 run ownership.** PostgreSQL advisory locks on a dedicated connection
+  for source runs, the pipeline and the active profile's publication; owner
+  tokens gate completion updates; abandoned `running` rows are reconciled only
+  when the lock proves the owner is gone; profile import and `app.enrich` take
+  the shared publication/pipeline locks. Tested with real concurrent sessions
+  and a terminated backend.
+- **P2-3 usage accounting.** Migration `20260916_0018` adds normalized
+  input/output/cached tokens, latency, attempts, outcome, provider request id
+  and a `usage_present` flag to `llm_evaluations` and `feedback_llm_analyses`.
+- **P1-1 geographic policy.** A versioned effective-policy fingerprint (safe
+  origin city, configured origin hash, commute limit, routing profile) is stored
+  with travel evidence; local shortcuts are only valid while it matches, and the
+  home-city shortcut requires the configured origin to agree with the home city.
+- **P1-4 exclusions.** Hard negative titles are whole phrases matched with word
+  boundaries against the title; explicit negative keywords remain substrings;
+  compound qualification rejects are phrase-bounded.
+- **P1-14 enrichment.** Candidate selection excludes already-handled
+  occurrences before the caller's limit, and results publish only when the
+  occurrence is still enabled and its input hash matches.
+- **P1-15 URL boundary.** Shared scheme/host/path validation with private-host
+  rejection, external-ID validation before URL interpolation, redirect guards
+  for collection/enrichment navigation, display-only employer links, and
+  hashed rejection diagnostics.
+- **P1-12 profile import.** `validate_profile_document` rejects unsupported
+  schema versions, privacy directives and malformed freshness before any write;
+  ordinary import preserves DB-owned learned state and boosts; `base_revision`
+  plus an optimistic learner write prevents import/learner overwrites.
+- **P2-10 benchmark.** Metrics are named by their true denominators, read the
+  real tuning constants, and only count active recommendations.
+- **P2-12/P2-14/P2-15 UI.** Europe/Helsinki date formatters, independent
+  recommendation pagination, and commute labels derived from
+  `travel_commute_limit_minutes` with no hardcoded origin city.
+- **P2-18 backups.** `make backup-db` reads `POSTGRES_USER`/`POSTGRES_DB` from
+  the database container, writes a temporary file and atomically renames it
+  after a checksum; `make backup-private` archives ignored profile originals
+  and `.env` to `BACKUP_DIR` outside the checkout.
+- **P2-19 timestamps (partial).** Adapter publication timestamps are normalized
+  to aware UTC before watermark comparison.
+
+**Implemented, not fully verified**
+
+- **P0-9 private access.** `OPERATOR_API_TOKEN` now guards `/recommendations*`
+  reads and every non-GET request at the API. The actual tunnel/reverse-proxy
+  policy was not inspected, and the web route still needs to forward the token
+  and validate the form origin, so external exploitability remains unverified.
+- **P0-3 review backlog.** `run_review_backfill` produces a dry-run inventory
+  with a frozen cohort hash and refuses paid execution without an explicit
+  authorization flag and budget. No paid call was made; the resumable backfill
+  executor is not implemented.
+- **P1-6 discovery.** Phrase-based terms, dedupe and a bounded budget with a
+  coverage warning; learned discovery queries now enter the pool and carry a
+  `learned_discovery` lane. No before/after labelled comparison was produced.
+- **P1-2 work-mode provenance.** Classification now separates extracted
+  evidence from the display suffix and no longer treats flexibility language as
+  full remote. Historical location suffixes were not reprocessed.
+
+**Not implemented.** P1-3, P1-5, P1-7a–c, P1-8a–c, P1-9a, P1-10, P1-11,
+P1-13, P2-1, P2-2, P2-4, P2-6, P2-7, the full P2-8 retry/race work, P2-11,
+P2-16, P2-22 and P2-23 remain open. No production backfill, deployment,
+profile import or destructive cleanup was performed for this work.
+
+### Independent coWork review (Astra Low, Codex peer)
+
+An independent read-only review of the working tree was run through the Codex
+peer with `gpt-6-astra` at low reasoning effort (coWork skill model resolution:
+Astra → Codex). Verdict: `CHANGES_REQUESTED`. All findings were verified against
+source and fixed in the same working tree:
+
+- feedback analysis now honours `llm_allowed=false` (no provider is built) and
+  no longer holds a transaction across provider calls: it claims work, calls the
+  provider outside the transaction, and publishes only if the feedback input hash
+  still matches (a concurrent edit is discarded as `stale`);
+- forbidden literal values (for example an address quoted in an allowed prose
+  field) are collected and redacted from every outbound payload, including
+  learned hints and embeddings;
+- `/jobs/{id}` now requires the operator token and applies current eligibility to
+  the recommendation it returns;
+- rank refresh and the API predicate require persisted `hard_eligible`, so a
+  hard-rejected approval can no longer be resurrected by ranking or a feedback
+  rerating;
+- the LLM selector uses the shared structural predicate (including freshness and
+  hard eligibility), rating 2 is no longer excluded from review, and embeddings
+  are built only for hard-eligible jobs;
+- review selection over-scans and skips current cache hits before consuming paid
+  slots, and fresh calls are deferred when the profile base revision changed;
+- the web home and detail pages forward the operator token on private reads, and
+  the feedback route rejects cross-origin posts;
+- feedback restore mirrors matching's publication mode, including profile
+  consent;
+- collectors take the pipeline coordination lock in shared mode so collection and
+  the daily pipeline cannot overlap; `ensure_source` is an atomic upsert;
+- transit resolves valid cache entries before provider backoff, so a transient
+  failure does not discard known routes;
+- usage accounting records normalized feedback-provider usage and attempts;
+- the review-backlog inventory no longer requires `is_active` and fingerprints
+  expected request identities;
+- enrichment candidate selection keyset-pages instead of relying on a larger scan
+  cap.
+
+The direct tests for these failures were added (consent with a provider spy,
+linked-approval resurrection, inactive unreviewed inventory, cached transit during
+backoff, feedback-provider usage metadata, forbidden value in prose).
+
+### Second coWork review round (Astra Low)
+
+A second independent Astra-Low review verified the fixes and found seven
+remaining gaps plus new regression risks. All were addressed:
+
+- feedback comments are redacted against profile-forbidden values, and numeric
+  forbidden scalars (for example an integer postal code) are collected too;
+- feedback publication locks the feedback row and re-checks the input hash, and
+  every terminal status update is conditional on the row's `updated_at`, so a
+  concurrent edit is never overwritten;
+- reconciliation now re-checks every recommendation, including inactive legacy
+  rows, and distinguishes hard-rule failure from the relevance threshold;
+- `score_job` records `hard_eligible`/`hard_reasons` from the exclusion rules, so
+  hard-rejected jobs are excluded from embeddings and the LLM selector;
+- selection, evaluation, reconciliation and inventory share one sanitized request
+  assembly (`evaluation_request_context`), so identities agree;
+- a prompt/schema-only identity change is marked compatible and may stay visible
+  awaiting refresh, while provider/model/profile/learned/job content changes are
+  marked incompatible and are not published until re-reviewed;
+- fresh publications re-read the job row after the provider call and defer if its
+  content changed, and paid budget is consumed before the call;
+- the review scan cap is wide enough to avoid cache-hit starvation;
+- the inventory fingerprints the expected identity of unreviewed rows too;
+- the remaining rating-2 "hidden" thresholds in the API and detail page were
+  corrected to rating 1.
+
+### Verification commands
+
+```bash
+cd backend
+python -m pytest --timeout=10 -q                       # 369 passed, 25 skipped
+TEST_DATABASE_URL=postgresql+psycopg://... python -m pytest --timeout=30 -q  # 394 passed
+cd ../web && npm run typecheck && npm run build
+```
+
+## 2026-09-15
+
+### Production configuration drift (inkeri.etto.fi)
+
+The Pi host `.env` was still the 2026-06-21 first-deploy file, so several
+features added later ran with their first-deploy values while the code and
+migrations were current. The host `.env` was synced with the repo config:
+
+- `LLM_PROMPT_VERSION` 7 → 8 and `LLM_EVAL_MAX_JOBS` 50 → 800 (first-deploy
+  values; recommendation re-evaluation was throttled and cached prompt-version-7
+  evaluations were reused).
+- `DISCOVERY_SEARCH_QUERIES` expanded to the repo list (19 terms instead of 9).
+- `GOOGLE_MAPS_API_KEY` and `TRANSIT_ORIGIN_ADDRESS` added: transit distance had
+  been off in production, leaving 207 active recommendations in
+  `transit_unavailable` and the default "Enintään 2 h" scope degraded.
+
+`LLM_PROMPT_VERSION` must be bumped whenever `EVALUATION_INSTRUCTIONS` changes in
+`backend/app/llm.py`. The instruction change in `e6c1ea7` did not bump it, so
+`llm_evaluations` rows hashed with the old prompt text were reused.
+
+### Implemented
+
+- Migration `20260915_0016` adds `ix_job_sources_job_id`. The recommendations
+  and job-detail APIs resolve each job's display source with a lateral subquery
+  on `job_sources.job_id`; without the index that was a sequential scan per
+  returned row (measured 13 s and ~116k buffers for the home-page
+  recommendation query, ~3 ms after the index).
+
+### Profile intake from the September 2026 applications
+
+Three applications found in the Windows Downloads folder were copied into
+`profile/inkeri/` (`raw/` originals, `extracted/` `pdftotext -layout` text):
+Tietoasiantuntija / Oulun yliopiston kirjasto (2026-09-01) and Kirjastonhoitaja +
+Kirjastovirkailija (musiikkiosasto) / Kokkolan kaupunginkirjasto (2026-09-10).
+`preferences.application_history_signals` gained `kirjastovirkailija` and
+`tietoasiantuntija` title boosts and the music-library/collection keyword boosts
+`musiikkikirjasto`, `musiikkiosasto`, `kokoelmatyö`, `aineistohankinta`,
+`kuvailu`, `luettelointi`, `satutuokio`. The updated `profile.yaml` was loaded
+into the production database.
+
+Measured effect (read-only deterministic probe over the production 5 184-candidate
+window, old vs new profile): 3 additional jobs in the `application_history` lane,
+14 jobs lifted by 5–18 points, identical pass set and top-40 order. The two new
+titles did **not** become discovery search terms: `discovery_pool_terms` returned
+80 terms both times because it silently truncates at `terms[:80]`
+(`matching.py:652`).
+
+### Audit
+
+`docs/recommendation-pipeline-audit-2026-09-15.md` (findings with evidence) and
+`docs/recommendation-pipeline-remediation-plan.md` (prioritised work items).
+Headline results: the profile `privacy`/`freshness`/`languages`/location-radius/
+cluster-weight contract is not enforced by the code; the catalogue has no
+removal or expiry path (0 removed, 0 expired); the daily LLM review cap (800) is
+below the deterministic pass set (2 134), so the prompt-version refresh left the
+default scope empty (578 → 71 active recommendations, 0 commutable).
+
+### Verified
+
+- `make test-regression` passes.
+- Production health: OpenAI key works (live call), 9/9 sources succeeded, daily
+  pipeline completed every day since 2026-07-09, 100 668 active jobs with 1 281
+  added in the preceding 24 h. The feed was updating; tokens were not exhausted.
+- Prompt-version refresh verified live: 800 candidates re-evaluated at
+  `prompt_version = 8` (710 skip / 68 consider / 8 apply) and 100 transit
+  lookups cached; `ix_job_sources_job_id` reduced the recommendation query to
+  ~3 ms.
+
 ## 2026-07-05
 
 ### Implemented

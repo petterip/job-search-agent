@@ -7,6 +7,7 @@ import pytest
 
 from app.config import Settings, get_settings
 from app import feedback_analysis as feedback_analysis_module
+from support import with_privacy
 from app.feedback_analysis import (
     FeedbackAnalysis,
     SuggestedActions,
@@ -155,9 +156,40 @@ def test_reuse_cached_analysis_marks_completed(monkeypatch: pytest.MonkeyPatch) 
         lambda *_args, **_kwargs: None,
     )
 
-    connection.execute = lambda *_args, **_kwargs: ScalarResult(9)  # type: ignore[method-assign]
+    connection.execute = lambda *_args, **_kwargs: MappingRowsResult(  # type: ignore[method-assign]
+        [
+            {
+                "analysis": {
+                    "user_rating": 4,
+                    "applied": False,
+                    "system_alignment": "aligned",
+                    "hypothesis_fi": "sopii",
+                    "likely_positive_signals": [],
+                    "likely_negative_signals": [],
+                    "mismatch_drivers": [],
+                    "suggested_actions": {},
+                    "confidence": "high",
+                }
+            }
+        ]
+    )
 
     assert reuse_cached_analysis(connection, feedback_id=3, request_hash="abc") is True  # type: ignore[arg-type]
+    assert reuse_cached_analysis(connection, feedback_id=3, request_hash="abc") is True  # type: ignore[arg-type]
+
+
+def test_reuse_cached_analysis_rejects_unusable_cache(monkeypatch: pytest.MonkeyPatch) -> None:
+    connection = RecordingConnection()
+    monkeypatch.setattr(
+        feedback_analysis_module,
+        "mark_feedback_analysis_status",
+        lambda *_args, **_kwargs: None,
+    )
+    connection.execute = lambda *_args, **_kwargs: MappingRowsResult(  # type: ignore[method-assign]
+        [{"analysis": {"not": "a valid analysis"}}]
+    )
+
+    assert reuse_cached_analysis(connection, feedback_id=3, request_hash="abc") is False  # type: ignore[arg-type]
 
 
 def test_feedback_analysis_cooldown_is_isolated_from_job_fit_cooldown(
@@ -202,6 +234,9 @@ class AnalyzeEngine:
     def begin(self) -> "AnalyzeConnection":
         return self.connection
 
+    def connect(self) -> "AnalyzeConnection":
+        return self.connection
+
 
 class MappingRowsResult:
     def __init__(self, rows: list[dict[str, Any]]) -> None:
@@ -238,7 +273,7 @@ class AnalyzeConnection:
                 "description": "Hallintoa",
             }
         ]
-        self.profile = {"objective": "hallinto", "role_clusters": []}
+        self.profile = with_privacy({"objective": "hallinto", "role_clusters": []})
         self.committed = False
 
     def __enter__(self) -> "AnalyzeConnection":
@@ -254,8 +289,10 @@ class AnalyzeConnection:
             return MappingRowsResult([{"profile": self.profile}])
         if "analysis_status = 'pending'" in sql:
             return MappingRowsResult(self.rows)
+        if "from recommendation_feedback rf" in sql and "join jobs" in sql:
+            return MappingRowsResult(self.rows)
         if "from feedback_llm_analyses" in sql and "request_hash" in sql:
-            return ScalarResult(None)
+            return MappingRowsResult([])
         return MappingRowsResult([])
 
 
@@ -297,3 +334,80 @@ def test_run_analyze_feedback_skips_when_provider_unavailable(monkeypatch: pytes
     result = run_analyze_feedback(limit=5)
 
     assert result["skipped"] == 1
+
+
+def test_run_analyze_feedback_respects_privacy_consent(monkeypatch: pytest.MonkeyPatch) -> None:
+    connection = AnalyzeConnection()
+    connection.profile = with_privacy({"objective": "hallinto"}, llm_allowed=False)
+    engine = AnalyzeEngine(connection)
+    monkeypatch.setattr(feedback_analysis_module, "get_engine", lambda: engine)
+    monkeypatch.setattr(
+        feedback_analysis_module,
+        "mark_feedback_analysis_status",
+        lambda *_args, **_kwargs: None,
+    )
+    built: list[bool] = []
+
+    def fake_build(_settings: Any) -> Any:
+        built.append(True)
+        return FakeProvider()
+
+    monkeypatch.setattr(feedback_analysis_module, "build_feedback_analysis_provider", fake_build)
+
+    result = run_analyze_feedback(limit=5)
+
+    assert built == []
+    assert result["skipped"] == 1
+    assert result["completed"] == 0
+
+
+def test_openai_feedback_provider_returns_normalized_usage(monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.feedback_analysis import OpenAIFeedbackAnalysisProvider
+
+    class FakeUsage:
+        def model_dump(self) -> dict[str, Any]:
+            return {"input_tokens": 100, "output_tokens": 20, "input_tokens_details": {"cached_tokens": 40}}
+
+    class FakeResponse:
+        output_text = json.dumps(
+            {
+                "user_rating": 4,
+                "applied": False,
+                "system_alignment": "aligned",
+                "hypothesis_fi": "sopii",
+                "likely_positive_signals": [],
+                "likely_negative_signals": [],
+                "mismatch_drivers": [],
+                "suggested_actions": {},
+                "confidence": "high",
+            }
+        )
+        model = "openai-returned"
+        usage = FakeUsage()
+        id = "req-1"
+
+    class FakeResponses:
+        def create(self, **_kwargs: Any) -> Any:
+            return FakeResponse()
+
+    class FakeOpenAI:
+        def __init__(self, api_key: str, max_retries: int) -> None:  # noqa: ARG002
+            self.responses = FakeResponses()
+
+    monkeypatch.setattr("openai.OpenAI", FakeOpenAI)
+    provider = OpenAIFeedbackAnalysisProvider(api_key="test-key")
+
+    _analysis, metadata = provider.analyze_feedback(
+        profile_summary="{}",
+        job_summary_text="{}",
+        feedback_context="{}",
+        model="test-model",
+        prompt_version=1,
+    )
+
+    assert metadata["usage_normalized"]["input_tokens"] == 100
+    assert metadata["usage_normalized"]["output_tokens"] == 20
+    assert metadata["usage_normalized"]["cached_tokens"] == 40
+    assert metadata["usage_normalized"]["usage_present"] is True
+    assert metadata["request_id"] == "req-1"
+    assert metadata["attempts"] == 1

@@ -1,5 +1,12 @@
 import { notFound } from "next/navigation";
-import { JobDescription, RecommendationActionBadge, RecommendationEvidence, ScoreBadge } from "../../ui";
+import {
+  formatCommuteLimitMinutes,
+  JobDescription,
+  RecommendationActionBadge,
+  RecommendationEvidence,
+  ScoreBadge,
+} from "../../ui";
+import { formatFinnishDate } from "../../datetime";
 
 type JobSourceItem = {
   source_name: string;
@@ -43,6 +50,7 @@ type RecommendationItem = {
   concerns: string[];
   is_active: boolean;
   feedback: RecommendationFeedback | null;
+  travel_commute_limit_minutes: number | null;
   location_evidence: {
     text: string;
     tone: "good" | "warning" | "bad";
@@ -79,7 +87,9 @@ type PageProps = {
 
 async function getJob(id: string): Promise<JobDetailResponse | null> {
   const baseUrl = process.env.INTERNAL_API_BASE_URL ?? "http://localhost:8008";
-  const response = await fetch(`${baseUrl}/jobs/${id}`, { cache: "no-store" });
+  const token = process.env.OPERATOR_API_TOKEN?.trim();
+  const headers: Record<string, string> = token ? { Authorization: `Bearer ${token}` } : {};
+  const response = await fetch(`${baseUrl}/jobs/${id}`, { cache: "no-store", headers });
   if (response.status === 404) {
     return null;
   }
@@ -87,17 +97,6 @@ async function getJob(id: string): Promise<JobDetailResponse | null> {
     throw new Error("Työpaikan lataus epäonnistui");
   }
   return (await response.json()) as JobDetailResponse;
-}
-
-function formatDate(value: string | null): string {
-  if (!value) {
-    return "Ei tiedossa";
-  }
-  return new Intl.DateTimeFormat("fi-FI", {
-    day: "numeric",
-    month: "numeric",
-    year: "numeric",
-  }).format(new Date(value));
 }
 
 export default async function JobPage({ params }: PageProps) {
@@ -112,6 +111,9 @@ export default async function JobPage({ params }: PageProps) {
   const feedbackStatusNote = job.recommendation?.feedback
     ? feedbackAnalysisNote(job.recommendation.feedback)
     : null;
+  const commuteLimitLabel = formatCommuteLimitMinutes(
+    job.recommendation?.travel_commute_limit_minutes ?? null,
+  );
 
   return (
     <main className="app-shell">
@@ -134,13 +136,19 @@ export default async function JobPage({ params }: PageProps) {
             </div>
             {job.location_evidence ? (
               <div>
-                <dt>Matka Oulusta</dt>
+                <dt>Työmatka</dt>
                 <dd>{job.location_evidence.text}</dd>
+              </div>
+            ) : null}
+            {commuteLimitLabel ? (
+              <div>
+                <dt>Matkan enimmäisaika</dt>
+                <dd>{commuteLimitLabel}</dd>
               </div>
             ) : null}
             <div>
               <dt>Julkaistu</dt>
-              <dd>{formatDate(job.published_at)}</dd>
+              <dd>{formatFinnishDate(job.published_at, "Ei tiedossa")}</dd>
             </div>
           </dl>
           {primaryApplicationUrl ? (
@@ -169,7 +177,7 @@ export default async function JobPage({ params }: PageProps) {
                 <RecommendationActionBadge value={job.recommendation.suggested_action} />
               </div>
             </div>
-            {!job.recommendation.is_active || (job.recommendation.feedback?.rating ?? 5) <= 2 ? (
+            {!job.recommendation.is_active || (job.recommendation.feedback?.rating ?? 5) <= 1 ? (
               <p className="feedback-hidden-note" role="status">
                 Piilotettu suosituksista
               </p>
@@ -181,6 +189,7 @@ export default async function JobPage({ params }: PageProps) {
               locationEvidence={job.recommendation.location_evidence ?? job.location_evidence}
               rationale={job.recommendation.rationale}
               score={job.recommendation.llm_score ?? job.recommendation.machine_score}
+              travelCommuteLimitMinutes={job.recommendation.travel_commute_limit_minutes}
             />
             <p className="job-meta">Oma arvio</p>
             <form className="feedback-form" action={`/suositukset/${job.recommendation.id}/palaute`} method="post">
@@ -259,7 +268,9 @@ export default async function JobPage({ params }: PageProps) {
               <div className="source-row" key={`${source.source_name}-${source.last_seen_at}`}>
                 <div>
                   <p className="job-employer">{source.source_name}</p>
-                  <p className="job-meta">Viimeksi nähty {formatDate(source.last_seen_at)}</p>
+                  <p className="job-meta">
+                    Viimeksi nähty {formatFinnishDate(source.last_seen_at, "Ei tiedossa")}
+                  </p>
                   {source.attribution ? <p className="job-sources">{source.attribution}</p> : null}
                 </div>
                 <div className="job-row-actions">

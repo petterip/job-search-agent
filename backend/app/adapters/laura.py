@@ -7,9 +7,12 @@ from dateutil.parser import isoparse
 
 from app.adapters.base import (
     CollectionFetchResult,
+    ensure_aware_utc,
     NormalizedListing,
     USER_AGENT,
     payload_content_hash,
+    safe_source_url,
+    validated_external_id,
 )
 from app.config import get_settings
 from app.feedback_learning import get_discovery_search_queries
@@ -146,7 +149,7 @@ class LauraAdapter:
                     candidate = listing.published_at
                     modified_raw = payload.get("modified_gmt")
                     if modified_raw:
-                        modified_at = isoparse(modified_raw)
+                        modified_at = ensure_aware_utc(isoparse(modified_raw))
                         if candidate is None or modified_at > candidate:
                             candidate = modified_at
                     if candidate is not None and (
@@ -164,20 +167,23 @@ class LauraAdapter:
 
     def normalize(self, payload: dict) -> NormalizedListing:
         external_id = str(payload["id"])
+        safe_id = validated_external_id(external_id)
         published_raw = payload.get("date_gmt") or payload.get("date")
-        published_at = isoparse(published_raw) if published_raw else None
+        published_at = ensure_aware_utc(isoparse(published_raw)) if published_raw else None
         link = str(payload.get("link") or "").strip()
+        safe_link = safe_source_url("laura", link) or ""
+        fallback_url = f"https://laura.fi/?p={safe_id}" if safe_id else ""
         content = laura_content_text(payload.get("content"))
 
         return NormalizedListing(
             external_id=external_id,
-            canonical_source_url=link or f"https://laura.fi/?p={external_id}",
+            canonical_source_url=safe_link or fallback_url,
             title=laura_rendered(payload.get("title")),
-            employer=laura_employer_from_link(link),
+            employer=laura_employer_from_link(safe_link),
             description=content or None,
             location=laura_location(payload),
             published_at=published_at,
             content_hash=payload_content_hash(payload),
             payload=payload,
-            application_url=link or None,
+            application_url=safe_link or None,
         )

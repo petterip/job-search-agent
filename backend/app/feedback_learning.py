@@ -1,3 +1,4 @@
+import hashlib
 import json
 import logging
 from collections import defaultdict
@@ -78,6 +79,29 @@ def learned_state(profile: dict[str, Any]) -> dict[str, Any]:
     if isinstance(learned, dict):
         return learned
     return {}
+
+
+def learned_content_fingerprint(learned: dict[str, Any], preferences: dict[str, Any]) -> str:
+    """Fingerprint the effective learned state only.
+
+    `version`, `updated_at`, `source_feedback_count` and diagnostic provenance
+    (net weights, first-seen dates) are deliberately excluded: they change on
+    every run without changing what scoring or the prompt actually consume. A
+    real threshold crossing still changes this fingerprint because the promoted
+    or excluded term sets are included.
+    """
+    boosts = preferences.get("learned_boosts") if isinstance(preferences, dict) else {}
+    payload = {
+        "exclusions": learned.get("exclusions") or {},
+        "discovery_queries": learned.get("discovery_queries") or [],
+        "lane_quota_overrides": learned.get("lane_quota_overrides") or {},
+        "few_shot_examples": learned.get("few_shot_examples") or [],
+        "eval_hints": learned.get("eval_hints") or [],
+        "learned_boosts": boosts or {},
+    }
+    return hashlib.sha256(
+        json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    ).hexdigest()
 
 
 def learned_boosts(profile: dict[str, Any]) -> dict[str, list[str]]:
@@ -261,6 +285,25 @@ def merge_analysis_terms(
             sector_jobs[sector_key].add(job_id)
 
 
+def _grounded_example_reason(row: dict[str, Any]) -> str:
+    """Prefer the user-grounded analysis explanation over the system rationale.
+
+    Reusing the system rationale for a user correction would teach the model the
+    very reasoning the user disagreed with, so an ungrounded row omits `reason`.
+    """
+    analysis = row.get("analysis")
+    if isinstance(analysis, str):
+        try:
+            analysis = json.loads(analysis)
+        except ValueError:
+            analysis = None
+    if isinstance(analysis, dict):
+        hypothesis = str(analysis.get("hypothesis_fi") or "").strip()
+        if hypothesis:
+            return hypothesis[:160]
+    return ""
+
+
 def build_few_shot_examples(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     positives: list[dict[str, Any]] = []
     negatives: list[dict[str, Any]] = []
@@ -279,7 +322,7 @@ def build_few_shot_examples(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
                     "title": snapshot.get("title"),
                     "employer": snapshot.get("employer"),
                     "verdict": "apply" if applied or rating >= 5 else "consider",
-                    "reason": (snapshot.get("rationale") or "")[:160],
+                    "reason": _grounded_example_reason(row),
                 }
             )
             if employer:
@@ -293,7 +336,7 @@ def build_few_shot_examples(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
                     "title": snapshot.get("title"),
                     "employer": snapshot.get("employer"),
                     "verdict": "skip",
-                    "reason": (snapshot.get("rationale") or "")[:160],
+                    "reason": _grounded_example_reason(row),
                 }
             )
             if employer:
@@ -498,9 +541,7 @@ def recompute_learned_state(
         if score > 0 and term not in baseline_queries and term not in discovery_remove
     ][: settings.learned_discovery_query_cap]
 
-    version = int(previous.get("version") or 0) + 1
-    learned = {
-        "version": version,
+    new_learned = {
         "exclusions": {
             "terms_fi": exclusion_terms,
             "employers": exclusion_employers,
@@ -511,15 +552,30 @@ def recompute_learned_state(
         "lane_quota_overrides": lane_overrides,
         "few_shot_examples": build_few_shot_examples(rows),
         "eval_hints": collect_eval_hints(rows),
-        "updated_at": datetime.now(timezone.utc).isoformat(),
         "source_feedback_count": len(rows),
+        "updated_at": datetime.now(timezone.utc).isoformat(),
     }
     preferences = dict(profile.get("preferences") or {})
-    preferences["learned_boosts"] = {
+    new_preferences = {
         "boost_titles_fi": boost_titles[:20],
         "boost_keywords_fi": boost_keywords[:30],
         "boost_locations": boost_locations[:10],
     }
+    previous_fingerprint = learned_content_fingerprint(previous, preferences)
+    effective_preferences = dict(preferences)
+    effective_preferences["learned_boosts"] = new_preferences
+    new_fingerprint = learned_content_fingerprint(new_learned, effective_preferences)
+    state_changed = new_fingerprint != previous_fingerprint
+    if state_changed or previous.get("version") is None:
+        version = int(previous.get("version") or 0) + 1
+    else:
+        # Nothing effective changed: keep the previous version and timestamp so
+        # repeated runs preserve evaluation request identity.
+        version = int(previous.get("version") or 0)
+        new_learned["updated_at"] = previous.get("updated_at") or new_learned["updated_at"]
+    new_learned["version"] = version
+    learned = new_learned
+    preferences["learned_boosts"] = new_preferences
     profile["preferences"] = preferences
     profile["learned"] = learned
 
@@ -530,23 +586,44 @@ def recompute_learned_state(
         "exclusion_terms": exclusion_terms,
         "discovery_queries": learned_discovery,
         "learned_version": version,
+        "learned_state_changed": state_changed,
         "alignment_counts": dict(alignment_counts),
     }
     return profile, changes
 
 
-def save_profile(connection: Connection, *, profile_id: int, profile: dict[str, Any]) -> None:
-    connection.execute(
+def save_profile(
+    connection: Connection,
+    *,
+    profile_id: int,
+    profile: dict[str, Any],
+    expected_base_revision: str | None = None,
+) -> bool:
+    """Write learner-owned state with an optimistic base-revision check.
+
+    Returns False when an import changed the base profile while learning ran, so
+    the caller can retry instead of restoring a stale user configuration.
+    """
+    result = connection.execute(
         sa.text(
             """
             update job_seeker_profiles
             set profile = CAST(:profile AS jsonb),
                 updated_at = now()
             where id = :profile_id
+              and (
+                  CAST(:expected_base_revision AS text) is null
+                  or coalesce(profile->>'base_revision', '') = :expected_base_revision
+              )
             """
         ),
-        {"profile_id": profile_id, "profile": json.dumps(profile, ensure_ascii=False)},
+        {
+            "profile_id": profile_id,
+            "profile": json.dumps(profile, ensure_ascii=False),
+            "expected_base_revision": expected_base_revision,
+        },
     )
+    return bool(getattr(result, "rowcount", 1))
 
 
 def start_learning_run(connection: Connection) -> int:
@@ -622,12 +699,44 @@ def _learn_from_feedback_impl(connection: Connection, settings: Settings) -> dic
     rows = load_feedback_rows(connection)
     analysis_completed = sum(1 for row in rows if row.get("analysis_status") == "completed")
     try:
-        profile, changes = recompute_learned_state(
-            rows=rows,
-            profile=profile_row["profile"],
-            settings=settings,
-        )
-        save_profile(connection, profile_id=profile_row["profile_id"], profile=profile)
+        profile = None
+        changes: dict[str, Any] = {}
+        saved = False
+        for _attempt in range(3):
+            profile_row = load_profile_row(connection)
+            if profile_row is None:
+                return {"status": "skipped", "reason": "no_profile"}
+            expected_revision = profile_row["profile"].get("base_revision")
+            profile, changes = recompute_learned_state(
+                rows=rows,
+                profile=profile_row["profile"],
+                settings=settings,
+            )
+            saved = save_profile(
+                connection,
+                profile_id=profile_row["profile_id"],
+                profile=profile,
+                expected_base_revision=(
+                    str(expected_revision) if expected_revision is not None else None
+                ),
+            )
+            if saved:
+                break
+            logger.warning(
+                "event=learn_from_feedback_base_revision_changed run_id=%s", run_id
+            )
+        if not saved:
+            finish_learning_run(
+                connection,
+                run_id=run_id,
+                status="conflict",
+                feedback_total=len(rows),
+                analysis_completed=analysis_completed,
+                learned_version=None,
+                changes_applied={"reason": "profile_base_revision_changed"},
+            )
+            return {"status": "conflict", "run_id": run_id, "reason": "profile_changed"}
+        assert profile is not None
         from app.embeddings import recompute_learned_preference_embeddings
 
         centroid_result = recompute_learned_preference_embeddings(

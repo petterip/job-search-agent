@@ -3,6 +3,7 @@ import json
 import httpx
 
 from app.config import Settings
+from support import with_privacy
 from app.llm import (
     EVALUATION_INSTRUCTIONS,
     EVALUATION_TASK,
@@ -23,12 +24,14 @@ from app.llm import (
 
 def test_minimized_profile_summary_omits_unapproved_fields() -> None:
     summary = minimized_profile_summary(
-        {
-            "objective": "fit",
-            "location": {"home_city": "Oulu"},
-            "raw_cv": "private",
-            "email": "private@example.com",
-        }
+        with_privacy(
+            {
+                "objective": "fit",
+                "location": {"home_city": "Oulu"},
+                "raw_cv": "private",
+                "email": "private@example.com",
+            }
+        )
     )
 
     assert "Oulu" in summary
@@ -38,7 +41,7 @@ def test_minimized_profile_summary_omits_unapproved_fields() -> None:
 
 def test_minimized_profile_summary_includes_verified_fit_evidence() -> None:
     summary = minimized_profile_summary(
-        {
+        with_privacy({
             "career_evidence": {
                 "qualifications": ["kirjastonhoitajan / kirjastoalan kelpoisuus"],
                 "languages_verified": ["sv: sujuva B2"],
@@ -53,7 +56,7 @@ def test_minimized_profile_summary_includes_verified_fit_evidence() -> None:
             ],
             "raw_cv": "private",
             "email": "private@example.com",
-        }
+        })
     )
 
     assert "sujuva B2" in summary
@@ -389,3 +392,91 @@ def test_gemini_provider_retries_transient_server_errors(monkeypatch) -> None:
 
 def json_dumps(value: dict[str, object]) -> str:
     return json.dumps(value, ensure_ascii=False)
+
+
+def test_evaluation_request_hash_tracks_prompt_content_not_just_version() -> None:
+    base = {
+        "profile_summary": "{}",
+        "job_summary_text": "{}",
+        "model": "model",
+        "prompt_version": 8,
+        "provider": "openai",
+        "job_id": 1,
+        "profile_id": 2,
+    }
+    baseline = evaluation_request_hash(**base)
+    changed_instructions = evaluation_request_hash(
+        **base, instructions=EVALUATION_INSTRUCTIONS + " extra"
+    )
+    changed_schema = evaluation_request_hash(
+        **base, schema={"type": "object", "properties": {"score": {"type": "integer"}}}
+    )
+
+    assert baseline != changed_instructions
+    assert baseline != changed_schema
+
+
+def test_evaluation_request_hash_separates_ownership_and_provider() -> None:
+    base = {
+        "profile_summary": "{}",
+        "job_summary_text": "{}",
+        "model": "model",
+        "prompt_version": 8,
+    }
+    baseline = evaluation_request_hash(provider="openai", job_id=1, profile_id=2, **base)
+
+    assert baseline != evaluation_request_hash(provider="gemini", job_id=1, profile_id=2, **base)
+    assert baseline != evaluation_request_hash(provider="openai", job_id=9, profile_id=2, **base)
+    assert baseline != evaluation_request_hash(provider="openai", job_id=1, profile_id=3, **base)
+    assert "returned_model" not in evaluation_request_hash.__code__.co_varnames
+
+
+def test_validated_evaluation_payload_recovers_from_invalid_cache() -> None:
+    from app.llm import validated_evaluation_payload
+
+    valid = {
+        "score": 82,
+        "fit_tier": "strong_fit",
+        "rationale": "Hyvä osuma.",
+        "concerns": [],
+        "suggested_action": "apply",
+    }
+
+    assert validated_evaluation_payload(valid)["score"] == 82
+    assert validated_evaluation_payload(json.dumps(valid))["score"] == 82
+    assert validated_evaluation_payload(None) is None
+    assert validated_evaluation_payload("not json") is None
+    assert validated_evaluation_payload({"score": "not-an-int"}) is None
+
+
+def test_normalize_provider_usage_flags_missing_and_maps_providers() -> None:
+    from app.llm import normalize_provider_usage
+
+    assert normalize_provider_usage("openai", None) == {
+        "input_tokens": None,
+        "output_tokens": None,
+        "cached_tokens": None,
+        "usage_present": False,
+    }
+
+    openai_usage = {
+        "input_tokens": 1200,
+        "output_tokens": 300,
+        "input_tokens_details": {"cached_tokens": 800},
+    }
+    normalized = normalize_provider_usage("openai", openai_usage)
+    assert normalized["input_tokens"] == 1200
+    assert normalized["output_tokens"] == 300
+    assert normalized["cached_tokens"] == 800
+    assert normalized["usage_present"] is True
+
+    gemini = normalize_provider_usage(
+        "gemini",
+        {"promptTokenCount": 50, "candidatesTokenCount": 10, "cachedContentTokenCount": 5},
+    )
+    assert gemini == {
+        "input_tokens": 50,
+        "output_tokens": 10,
+        "cached_tokens": 5,
+        "usage_present": True,
+    }

@@ -1,10 +1,16 @@
 import html as html_lib
 import re
 from datetime import datetime
+from urllib.parse import urljoin, urlsplit
 
 from dateutil.parser import parse as parse_date
 
-from app.adapters.base import USER_AGENT, NormalizedListing, payload_content_hash
+from app.adapters.base import (
+    USER_AGENT,
+    NormalizedListing,
+    payload_content_hash,
+    url_rejection_reason,
+)
 from app.location import talentech_location
 
 
@@ -37,10 +43,22 @@ def extract_talentech_description(html: str) -> str | None:
     return None
 
 
-def talentech_canonical_url(base_url: str, url_path: str) -> str:
-    if url_path.startswith("http"):
-        return url_path
-    return f"{base_url.rstrip('/')}{url_path}"
+def talentech_canonical_url(base_url: str, url_path: str) -> str | None:
+    """Resolve a Talentech detail path against the source's documented host.
+
+    Absolute and scheme-relative values are accepted only while they stay on the
+    configured source host; everything else is rejected.
+    """
+    text = str(url_path or "").strip()
+    if not text:
+        return None
+    base_host = (urlsplit(base_url).hostname or "").lower()
+    if not base_host:
+        return None
+    candidate = urljoin(f"{base_url.rstrip('/')}/", text)
+    if url_rejection_reason(candidate, allowed_host_suffixes=(base_host,)) is not None:
+        return None
+    return candidate
 
 
 def normalize_talentech_summary(
@@ -51,7 +69,7 @@ def normalize_talentech_summary(
     description: str | None = None,
 ) -> NormalizedListing:
     external_id = str(payload["id"])
-    canonical_source_url = talentech_canonical_url(base_url, str(payload["url"]))
+    canonical_source_url = talentech_canonical_url(base_url, str(payload["url"])) or ""
     published_at = parse_talentech_publication(
         payload.get("publication_date"),
         payload.get("publication_time"),

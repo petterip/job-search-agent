@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 from dataclasses import dataclass
 from typing import Any, Literal, Mapping
@@ -49,6 +51,8 @@ class TravelAssessment:
     reason_code: str
     origin_address: str
     commute_limit_minutes: int
+    origin_city: str | None = None
+    policy_fingerprint: str = ""
     routing_profile: str = ROUTING_PROFILE
 
     @property
@@ -69,6 +73,8 @@ class TravelAssessment:
             "reason_code": self.reason_code,
             "origin_address": self.origin_address,
             "commute_limit_minutes": self.commute_limit_minutes,
+            "origin_city": self.origin_city,
+            "policy_fingerprint": self.policy_fingerprint,
             "routing_profile": self.routing_profile,
         }
 
@@ -81,6 +87,46 @@ def home_city_from_profile(profile: dict[str, Any]) -> str | None:
     if not isinstance(home_city, str) or not home_city.strip():
         return None
     return home_city.strip()
+
+
+def origin_city_from_address(address: str | None) -> str | None:
+    """Safe city label from the configured routing origin; never the street line.
+
+    A typical address is ``"Jalkatie 2, Oulu, Finland"``: the part containing a
+    digit is the street, so the first digit-free part is the city.
+    """
+    if not address or not address.strip():
+        return None
+    parts = [part.strip() for part in address.split(",") if part.strip()]
+    for part in parts:
+        if not any(character.isdigit() for character in part):
+            return part
+    return parts[0] if parts else None
+
+
+def travel_policy_fingerprint(
+    *,
+    home_city: str | None,
+    origin_address: str,
+    commute_limit_minutes: int,
+    routing_profile: str = ROUTING_PROFILE,
+) -> str:
+    """Stable identity of the effective local-travel policy.
+
+    A stored local shortcut is only valid while this fingerprint matches, so
+    changing the origin, home city, limit or routing profile invalidates stale
+    local eligibility before the next refresh. The street address is hashed,
+    never stored in the fingerprint.
+    """
+    payload = {
+        "home_city": (home_city or "").strip().casefold(),
+        "origin_hash": hashlib.sha256((origin_address or "").encode("utf-8")).hexdigest()[:16],
+        "commute_limit_minutes": commute_limit_minutes,
+        "routing_profile": routing_profile,
+    }
+    return hashlib.sha256(
+        json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    ).hexdigest()[:16]
 
 
 def normalize_city_name(value: str) -> str:
@@ -228,6 +274,8 @@ def _assessment(
     reason_code: str,
     origin_address: str,
     commute_limit_minutes: int,
+    origin_city: str | None = None,
+    policy_fingerprint: str = "",
 ) -> TravelAssessment:
     return TravelAssessment(
         commutable=commutable,
@@ -241,6 +289,8 @@ def _assessment(
         reason_code=reason_code,
         origin_address=origin_address,
         commute_limit_minutes=commute_limit_minutes,
+        origin_city=origin_city,
+        policy_fingerprint=policy_fingerprint,
     )
 
 
@@ -258,12 +308,27 @@ def assess_travel(
     work_mode = location_work_mode(location)
     verified_full_remote = is_verified_full_remote(location) or is_verified_full_remote(work_mode_text)
     limit_seconds = commute_limit_minutes * 60
+    origin_city = origin_city_from_address(origin_address)
+    fingerprint = travel_policy_fingerprint(
+        home_city=home_city,
+        origin_address=origin_address,
+        commute_limit_minutes=commute_limit_minutes,
+    )
+    # A home-city shortcut is only valid when the configured routing origin
+    # agrees with the profile home city; otherwise route from the real origin.
+    origin_agrees_with_home_city = bool(
+        home_city
+        and origin_city
+        and normalize_city_name(origin_city) == home_city.strip().casefold()
+    )
     common = {
         "origin_address": origin_address,
         "commute_limit_minutes": commute_limit_minutes,
+        "origin_city": origin_city,
+        "policy_fingerprint": fingerprint,
     }
 
-    if is_exact_home_city(location, home_city):
+    if origin_agrees_with_home_city and is_exact_home_city(location, home_city):
         label = location_display_label(location) or home_city or "Kotikaupunki"
         return _assessment(
             commutable=True,
@@ -278,7 +343,7 @@ def assess_travel(
             **common,
         )
 
-    if contains_home_city_destination(location, home_city):
+    if origin_agrees_with_home_city and contains_home_city_destination(location, home_city):
         label = home_city or "Kotikaupunki"
         return _assessment(
             commutable=True,
@@ -340,7 +405,8 @@ def assess_travel(
                 reason_code="transit_unavailable",
                 **common,
             )
-        had_lookup = any(query in transit_by_destination for query in destination_queries)
+        no_route_queries = getattr(transit_by_destination, "no_route_queries", frozenset())
+        had_lookup = any(query in no_route_queries for query in destination_queries)
         status: TravelStatus = "unrouteable" if had_lookup else "unknown"
         reason_code = "transit_unrouteable" if had_lookup else "transit_unknown"
         return _assessment(

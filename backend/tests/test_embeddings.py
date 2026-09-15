@@ -1,3 +1,4 @@
+from support import with_privacy
 from app.embeddings import embedding_hash, job_embedding_text, profile_embedding_text, vector_literal
 
 
@@ -32,15 +33,17 @@ def test_job_embedding_text_is_minimized_and_stable() -> None:
 
 def test_profile_embedding_text_uses_positive_matching_signals_not_exclusions() -> None:
     text = profile_embedding_text(
-        {
-            "role_clusters": [{"titles_fi": ["kirjastonhoitaja"]}],
-            "exclusions": {"hard_negative_titles_fi": ["lähihoitaja"]},
-            "llm_guidance": {
-                "objective": "Find good jobs.",
-                "reward_signals": ["library"],
-                "caution_signals": ["healthcare"],
-            },
-        }
+        with_privacy(
+            {
+                "role_clusters": [{"titles_fi": ["kirjastonhoitaja"]}],
+                "exclusions": {"hard_negative_titles_fi": ["lähihoitaja"]},
+                "llm_guidance": {
+                    "objective": "Find good jobs.",
+                    "reward_signals": ["library"],
+                    "caution_signals": ["healthcare"],
+                },
+            }
+        )
     )
 
     assert "kirjastonhoitaja" in text

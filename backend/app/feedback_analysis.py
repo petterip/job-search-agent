@@ -20,8 +20,16 @@ from app.llm import (
     gemini_response_schema,
     job_summary,
     minimized_profile_summary,
+    normalize_provider_usage,
 )
 from app.matching import expanded_tokens, token_variants
+from app.privacy import (
+    PrivacyConfigurationError,
+    collect_forbidden_values,
+    outbound_llm_allowed,
+    redact_sensitive_text,
+    sanitize_feedback_snapshot_fields,
+)
 
 logger = logging.getLogger("matcher.feedback_analysis")
 
@@ -209,6 +217,13 @@ def analysis_request_hash(
     applied: bool,
     sanitized_comment: str | None,
     prompt_version: int,
+    provider: str = "",
+    model: str = "",
+    feedback_id: int | None = None,
+    job_id: int | None = None,
+    schema: dict[str, Any] | None = None,
+    instructions: str | None = None,
+    task: str | None = None,
 ) -> str:
     payload = {
         "profile_summary": profile_summary,
@@ -218,6 +233,15 @@ def analysis_request_hash(
         "applied": applied,
         "sanitized_comment": sanitized_comment,
         "prompt_version": prompt_version,
+        "provider": provider,
+        "model": model,
+        "feedback_id": feedback_id,
+        "job_id": job_id,
+        "schema": schema if schema is not None else FeedbackAnalysis.model_json_schema(),
+        "instructions": (
+            FEEDBACK_ANALYSIS_INSTRUCTIONS if instructions is None else instructions
+        ),
+        "task": FEEDBACK_ANALYSIS_TASK if task is None else task,
     }
     return hashlib.sha256(
         json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
@@ -372,10 +396,14 @@ class OpenAIFeedbackAnalysisProvider:
                 raise EvaluationProviderUnavailable("openai quota is unavailable") from exc
             raise
         parsed = FeedbackAnalysis.model_validate(json.loads(response.output_text))
+        usage = getattr(response, "usage", None)
         metadata = {
             "returned_model": getattr(response, "model", None),
             "prompt_version": prompt_version,
-            "usage": getattr(response, "usage", None).model_dump() if getattr(response, "usage", None) else None,
+            "usage": usage.model_dump() if usage is not None and hasattr(usage, "model_dump") else usage,
+            "usage_normalized": normalize_provider_usage("openai", usage),
+            "request_id": getattr(response, "id", None),
+            "attempts": 1,
         }
         return parsed, metadata
 
@@ -398,8 +426,10 @@ class GeminiFeedbackAnalysisProvider:
                     json=body,
                 )
                 if response.status_code < 500:
+                    self.last_attempts = attempt + 1
                     return response
                 if attempt == 2:
+                    self.last_attempts = 3
                     return response
                 time.sleep(1.5 * (attempt + 1))
         raise RuntimeError("unreachable Gemini retry state")
@@ -455,10 +485,14 @@ class GeminiFeedbackAnalysisProvider:
         payload = response.json()
         raw_text = str(payload["candidates"][0]["content"]["parts"][0]["text"])
         parsed = FeedbackAnalysis.model_validate(json.loads(raw_text))
+        usage = payload.get("usageMetadata")
         metadata = {
             "returned_model": payload.get("modelVersion") or model,
             "prompt_version": prompt_version,
-            "usage": payload.get("usageMetadata"),
+            "usage": usage,
+            "usage_normalized": normalize_provider_usage("gemini", usage),
+            "request_id": payload.get("responseId"),
+            "attempts": int(getattr(self, "last_attempts", 1)),
         }
         return parsed, metadata
 
@@ -523,6 +557,14 @@ def store_feedback_analysis(
     prompt_version: int,
     request_hash: str,
     analysis: dict[str, Any],
+    input_tokens: int | None = None,
+    output_tokens: int | None = None,
+    cached_tokens: int | None = None,
+    latency_ms: int | None = None,
+    attempts: int = 1,
+    outcome: str = "succeeded",
+    provider_request_id: str | None = None,
+    usage_present: bool = False,
 ) -> None:
     connection.execute(
         sa.text(
@@ -534,7 +576,15 @@ def store_feedback_analysis(
                 returned_model,
                 prompt_version,
                 request_hash,
-                analysis
+                analysis,
+                input_tokens,
+                output_tokens,
+                cached_tokens,
+                latency_ms,
+                attempts,
+                outcome,
+                provider_request_id,
+                usage_present
             )
             values (
                 :feedback_id,
@@ -543,7 +593,15 @@ def store_feedback_analysis(
                 :returned_model,
                 :prompt_version,
                 :request_hash,
-                CAST(:analysis AS jsonb)
+                CAST(:analysis AS jsonb),
+                :input_tokens,
+                :output_tokens,
+                :cached_tokens,
+                :latency_ms,
+                :attempts,
+                :outcome,
+                :provider_request_id,
+                :usage_present
             )
             on conflict (feedback_id)
             do update set
@@ -553,6 +611,14 @@ def store_feedback_analysis(
                 prompt_version = excluded.prompt_version,
                 request_hash = excluded.request_hash,
                 analysis = excluded.analysis,
+                input_tokens = excluded.input_tokens,
+                output_tokens = excluded.output_tokens,
+                cached_tokens = excluded.cached_tokens,
+                latency_ms = excluded.latency_ms,
+                attempts = excluded.attempts,
+                outcome = excluded.outcome,
+                provider_request_id = excluded.provider_request_id,
+                usage_present = excluded.usage_present,
                 created_at = now()
             """
         ),
@@ -564,6 +630,14 @@ def store_feedback_analysis(
             "prompt_version": prompt_version,
             "request_hash": request_hash,
             "analysis": json.dumps(analysis, ensure_ascii=False),
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "cached_tokens": cached_tokens,
+            "latency_ms": latency_ms,
+            "attempts": attempts,
+            "outcome": outcome,
+            "provider_request_id": provider_request_id,
+            "usage_present": usage_present,
         },
     )
 
@@ -577,31 +651,47 @@ def reuse_cached_analysis(
     row = connection.execute(
         sa.text(
             """
-            select id
+            select analysis
             from feedback_llm_analyses
             where feedback_id = :feedback_id
               and request_hash = :request_hash
             """
         ),
         {"feedback_id": feedback_id, "request_hash": request_hash},
-    ).scalar_one_or_none()
+    ).mappings().one_or_none()
     if row is None:
+        return False
+    analysis = row["analysis"]
+    if isinstance(analysis, str):
+        try:
+            analysis = json.loads(analysis)
+        except ValueError:
+            return False
+    try:
+        FeedbackAnalysis.model_validate(analysis)
+    except Exception:
+        logger.warning("event=feedback_analysis_cache_unusable feedback_id=%s", feedback_id)
         return False
     mark_feedback_analysis_status(connection, feedback_id=feedback_id, status="completed")
     return True
 
 
-def analyze_feedback_row(
-    connection: Connection,
+def _feedback_analysis_inputs(
     row: dict[str, Any],
     *,
-    provider: FeedbackAnalysisProvider,
-    settings: Settings,
     profile: dict[str, Any],
-) -> str:
-    feedback_id = int(row["id"])
-    snapshot = snapshot_dict(row["scoring_snapshot"])
+    provider_name: str,
+    model: str,
+) -> tuple[dict[str, Any], str | None, str, str, str]:
+    snapshot = sanitize_feedback_snapshot_fields(
+        snapshot_dict(row["scoring_snapshot"]),
+        extra_secrets=collect_forbidden_values(profile),
+    )
     sanitized_comment = sanitize_feedback_comment(row.get("comment"), profile=profile)
+    if sanitized_comment:
+        sanitized_comment = redact_sensitive_text(
+            sanitized_comment, extra_secrets=collect_forbidden_values(profile)
+        )
     profile_summary = minimized_profile_summary(profile)
     job_summary_text = job_summary(
         {
@@ -619,10 +709,94 @@ def analyze_feedback_row(
         applied=bool(row["applied"]),
         sanitized_comment=sanitized_comment,
         prompt_version=FEEDBACK_ANALYSIS_PROMPT_VERSION,
+        provider=provider_name,
+        model=model,
+        feedback_id=int(row["id"]),
+        job_id=int(row["job_id"]) if row.get("job_id") is not None else None,
     )
-    if reuse_cached_analysis(connection, feedback_id=feedback_id, request_hash=request_hash):
-        logger.info("event=feedback_analysis_reused feedback_id=%s", feedback_id)
-        return "reused"
+    return snapshot, sanitized_comment, profile_summary, job_summary_text, request_hash
+
+
+def load_feedback_row(connection: Connection, *, feedback_id: int) -> dict[str, Any] | None:
+    row = connection.execute(
+        sa.text(
+            """
+            select
+                rf.id,
+                rf.recommendation_id,
+                rf.job_id,
+                rf.rating,
+                rf.applied,
+                rf.comment,
+                rf.scoring_snapshot,
+                rf.updated_at,
+                j.title,
+                j.employer,
+                j.location,
+                j.description
+            from recommendation_feedback rf
+            join jobs j on j.id = rf.job_id
+            where rf.id = :feedback_id
+            for update of rf
+            """
+        ),
+        {"feedback_id": feedback_id},
+    ).mappings().one_or_none()
+    return dict(row) if row is not None else None
+
+
+def _mark_status_if_current(
+    connection: Connection,
+    *,
+    feedback_id: int,
+    expected_updated_at: Any,
+    status: str,
+) -> bool:
+    """Terminal status update that refuses to overwrite a newer user edit."""
+    result = connection.execute(
+        sa.text(
+            """
+            update recommendation_feedback
+            set analysis_status = :status,
+                updated_at = now()
+            where id = :feedback_id
+              and updated_at = :expected_updated_at
+            """
+        ),
+        {
+            "feedback_id": feedback_id,
+            "status": status,
+            "expected_updated_at": expected_updated_at,
+        },
+    )
+    return bool(getattr(result, "rowcount", 1))
+
+
+def analyze_feedback_row(
+    row: dict[str, Any],
+    *,
+    provider: FeedbackAnalysisProvider,
+    settings: Settings,
+    profile: dict[str, Any],
+    engine: Any,
+) -> str:
+    """Analyze one feedback row without holding a transaction over the call.
+
+    Provider calls happen outside any write transaction; publication re-reads
+    the feedback input and only writes when it is unchanged, so an edit during
+    the call cannot be overwritten by the older analysis.
+    """
+    feedback_id = int(row["id"])
+    model = configured_eval_model(settings, provider.provider_name)
+    snapshot, sanitized_comment, profile_summary, job_summary_text, request_hash = (
+        _feedback_analysis_inputs(
+            row, profile=profile, provider_name=provider.provider_name, model=model
+        )
+    )
+    with engine.begin() as connection:
+        if reuse_cached_analysis(connection, feedback_id=feedback_id, request_hash=request_hash):
+            logger.info("event=feedback_analysis_reused feedback_id=%s", feedback_id)
+            return "reused"
 
     feedback_context = build_feedback_context(
         rating=int(row["rating"]),
@@ -630,7 +804,7 @@ def analyze_feedback_row(
         sanitized_comment=sanitized_comment,
         scoring_snapshot=snapshot,
     )
-    model = configured_eval_model(settings, provider.provider_name)
+    started = time.monotonic()
     try:
         analysis, metadata = provider.analyze_feedback(
             profile_summary=profile_summary,
@@ -639,31 +813,69 @@ def analyze_feedback_row(
             model=model,
             prompt_version=FEEDBACK_ANALYSIS_PROMPT_VERSION,
         )
+        latency_ms = int((time.monotonic() - started) * 1000)
     except EvaluationProviderUnavailable as exc:
-        mark_feedback_analysis_unavailable(settings, str(exc))
-        mark_feedback_analysis_status(connection, feedback_id=feedback_id, status="skipped")
-        return "skipped"
+        with engine.begin() as connection:
+            mark_feedback_analysis_unavailable(settings, str(exc))
+            stored = _mark_status_if_current(
+                connection,
+                feedback_id=feedback_id,
+                expected_updated_at=row.get("updated_at"),
+                status="skipped",
+            )
+        return "skipped" if stored else "stale"
     except Exception:
         logger.exception("event=feedback_analysis_failed feedback_id=%s", feedback_id)
-        mark_feedback_analysis_status(connection, feedback_id=feedback_id, status="failed")
-        return "failed"
+        with engine.begin() as connection:
+            stored = _mark_status_if_current(
+                connection,
+                feedback_id=feedback_id,
+                expected_updated_at=row.get("updated_at"),
+                status="failed",
+            )
+        return "failed" if stored else "stale"
 
     grounded = apply_grounding_guard(
         analysis,
         snapshot=snapshot,
         profile_summary=profile_summary,
     )
-    store_feedback_analysis(
-        connection,
-        feedback_id=feedback_id,
-        provider_name=provider.provider_name,
-        configured_model=model,
-        returned_model=metadata.get("returned_model"),
-        prompt_version=FEEDBACK_ANALYSIS_PROMPT_VERSION,
-        request_hash=request_hash,
-        analysis=grounded.model_dump(),
-    )
-    mark_feedback_analysis_status(connection, feedback_id=feedback_id, status="completed")
+    accounting = metadata.get("usage_normalized") or {}
+    with engine.begin() as connection:
+        current = load_feedback_row(connection, feedback_id=feedback_id)
+        if current is None:
+            return "stale"
+        _snapshot, _comment, _profile, _job, current_hash = _feedback_analysis_inputs(
+            current, profile=profile, provider_name=provider.provider_name, model=model
+        )
+        if current_hash != request_hash:
+            logger.info("event=feedback_analysis_stale feedback_id=%s", feedback_id)
+            return "stale"
+        store_feedback_analysis(
+            connection,
+            feedback_id=feedback_id,
+            provider_name=provider.provider_name,
+            configured_model=model,
+            returned_model=metadata.get("returned_model"),
+            prompt_version=FEEDBACK_ANALYSIS_PROMPT_VERSION,
+            request_hash=request_hash,
+            analysis=grounded.model_dump(),
+            input_tokens=accounting.get("input_tokens"),
+            output_tokens=accounting.get("output_tokens"),
+            cached_tokens=accounting.get("cached_tokens"),
+            latency_ms=latency_ms,
+            attempts=int(metadata.get("attempts") or 1),
+            provider_request_id=metadata.get("request_id"),
+            usage_present=bool(accounting.get("usage_present")),
+        )
+        if not _mark_status_if_current(
+            connection,
+            feedback_id=feedback_id,
+            expected_updated_at=current.get("updated_at"),
+            status="completed",
+        ):
+            logger.info("event=feedback_analysis_stale_on_publish feedback_id=%s", feedback_id)
+            return "stale"
     logger.info(
         "event=feedback_analysis_completed feedback_id=%s alignment=%s confidence=%s",
         feedback_id,
@@ -685,6 +897,7 @@ def pending_feedback_rows(connection: Connection, *, limit: int) -> list[dict[st
                 rf.applied,
                 rf.comment,
                 rf.scoring_snapshot,
+                rf.updated_at,
                 j.title,
                 j.employer,
                 j.location,
@@ -703,31 +916,36 @@ def pending_feedback_rows(connection: Connection, *, limit: int) -> list[dict[st
 
 def run_analyze_feedback(*, limit: int = 20) -> dict[str, int]:
     settings = get_settings()
-    provider = build_feedback_analysis_provider(settings)
-    counts = {"pending": 0, "completed": 0, "reused": 0, "failed": 0, "skipped": 0}
+    counts = {"pending": 0, "completed": 0, "reused": 0, "failed": 0, "skipped": 0, "stale": 0}
     engine = get_engine()
-    with engine.begin() as connection:
+    with engine.connect() as connection:
         profile = load_profile_for_analysis(connection)
         if profile is None:
             return counts
         rows = pending_feedback_rows(connection, limit=limit)
-        counts["pending"] = len(rows)
-        if not rows:
-            return counts
-        if provider is None:
+    counts["pending"] = len(rows)
+    if not rows:
+        return counts
+    try:
+        allowed = outbound_llm_allowed(profile)
+    except PrivacyConfigurationError:
+        allowed = False
+    provider = build_feedback_analysis_provider(settings) if allowed else None
+    if provider is None:
+        with engine.begin() as connection:
             for row in rows:
                 mark_feedback_analysis_status(connection, feedback_id=int(row["id"]), status="skipped")
-                counts["skipped"] += 1
-            return counts
-        for row in rows:
-            outcome = analyze_feedback_row(
-                connection,
-                row,
-                provider=provider,
-                settings=settings,
-                profile=profile,
-            )
-            counts[outcome] = counts.get(outcome, 0) + 1
+        counts["skipped"] = len(rows)
+        return counts
+    for row in rows:
+        outcome = analyze_feedback_row(
+            row,
+            provider=provider,
+            settings=settings,
+            profile=profile,
+            engine=engine,
+        )
+        counts[outcome] = counts.get(outcome, 0) + 1
     return counts
 
 

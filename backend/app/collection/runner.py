@@ -4,9 +4,10 @@ from datetime import datetime
 import re
 import time
 from typing import Any
+import uuid
 
 import sqlalchemy as sa
-from sqlalchemy.engine import Connection
+from sqlalchemy.engine import Connection, Engine
 
 from app.adapters.base import NormalizedListing, SourceAdapter, ensure_aware_utc
 from app.collection.events import (
@@ -15,7 +16,6 @@ from app.collection.events import (
     current_source_run_id,
     insert_source_run_event,
 )
-from app.config import get_settings
 from app.db import get_engine
 from app.enrichers.repository import preserve_enriched_description_on_upsert, record_source_provenance
 
@@ -24,75 +24,281 @@ logger = logging.getLogger("collector")
 MATCH_TEXT_PATTERN = re.compile(r"[^0-9a-zåäö]+")
 GENERIC_LOCATIONS = {"", "suomi", "finland", "sijainti ei tiedossa"}
 
+# PostgreSQL advisory-lock namespaces. The two-integer lock form keeps the
+# families apart, so a source id can never collide with a pipeline or profile
+# lock object. Every run owner holds its lock on a dedicated connection for the
+# whole run. Matching, feedback analysis/learning and the daily pipeline share
+# the active profile's publication lock so same-profile publication cannot
+# interleave; profile import is required by this contract to acquire the same
+# lock (``app/profile.py`` is outside this change).
+SOURCE_RUN_LOCK_CLASS = 1001
+PIPELINE_RUN_LOCK_CLASS = 1002
+PROFILE_PUBLICATION_LOCK_CLASS = 1003
 
-def ensure_source(connection: Connection, adapter: SourceAdapter) -> tuple[int, datetime | None]:
-    row = connection.execute(
-        sa.text(
-            """
-            select id, incremental_watermark
-            from sources
-            where name = :name
-            """
-        ),
-        {"name": adapter.source_name},
-    ).one_or_none()
-    if row is not None:
-        return int(row.id), row.incremental_watermark
 
-    source_id = int(
-        connection.execute(
-            sa.text(
-                """
-                insert into sources (name, method, url, poll_interval_min)
-                values (:name, :method, :url, :poll_interval_min)
-                returning id
-                """
-            ),
-            {
-                "name": adapter.source_name,
-                "method": adapter.source_method,
-                "url": adapter.url,
-                "poll_interval_min": adapter.poll_interval_min,
-            },
-        ).scalar_one()
+class RunOwnership:
+    """A dedicated advisory-lock connection held for the whole run.
+
+    Session advisory locks live in the database session, so the owning
+    connection must stay checked out for the entire run, including while the
+    run awaits remote HTTP responses. Write transactions use other short-lived
+    connections; this session stays idle and never holds a long write
+    transaction. Closing it early would either release mutual exclusion or park
+    the lock on a session returned to the pool, so ``release`` is the only way
+    to give it up.
+    """
+
+    def __init__(
+        self,
+        *,
+        engine: Engine,
+        connection: Connection,
+        lock_class: int,
+        lock_object: int,
+        lock_name: str,
+        dispose_engine: bool,
+        shared: bool = False,
+    ) -> None:
+        self.engine = engine
+        self.connection = connection
+        self.lock_class = lock_class
+        self.lock_object = lock_object
+        self.lock_name = lock_name
+        self.dispose_engine = dispose_engine
+        self.shared = shared
+        self.released = False
+
+    def release(self) -> None:
+        if self.released:
+            return
+        self.released = True
+        try:
+            unlock = (
+                "select pg_advisory_unlock_shared(:lock_class, :lock_object)"
+                if self.shared
+                else "select pg_advisory_unlock(:lock_class, :lock_object)"
+            )
+            self.connection.execute(
+                sa.text(unlock),
+                {"lock_class": self.lock_class, "lock_object": self.lock_object},
+            )
+        except Exception:
+            logger.warning(
+                "event=run_ownership_unlock_failed lock=%s", self.lock_name, exc_info=True
+            )
+        finally:
+            try:
+                self.connection.close()
+            finally:
+                if self.dispose_engine:
+                    self.engine.dispose()
+
+
+def acquire_run_ownership(
+    *,
+    lock_class: int,
+    lock_object: int,
+    lock_name: str,
+    engine: Engine | None = None,
+    dispose_engine: bool | None = None,
+    shared: bool = False,
+) -> RunOwnership | None:
+    """Try to own ``lock_name`` for the whole run.
+
+    Returns ``None`` when another live session already owns the lock; the
+    caller must then record a skip and do no work. ``shared=True`` takes a
+    shared lock, so many collectors can hold it concurrently while the pipeline
+    takes it exclusively.
+    """
+    owner_engine = engine if engine is not None else get_engine()
+    if dispose_engine is None:
+        dispose_engine = engine is None
+    connection = owner_engine.connect().execution_options(isolation_level="AUTOCOMMIT")
+    try:
+        acquire_sql = (
+            "select pg_try_advisory_lock_shared(:lock_class, :lock_object)"
+            if shared
+            else "select pg_try_advisory_lock(:lock_class, :lock_object)"
+        )
+        acquired = bool(
+            connection.execute(
+                sa.text(acquire_sql),
+                {"lock_class": lock_class, "lock_object": lock_object},
+            ).scalar_one()
+        )
+    except Exception:
+        connection.close()
+        if dispose_engine:
+            owner_engine.dispose()
+        raise
+    if not acquired:
+        connection.close()
+        if dispose_engine:
+            owner_engine.dispose()
+        return None
+    return RunOwnership(
+        engine=owner_engine,
+        connection=connection,
+        lock_class=lock_class,
+        lock_object=lock_object,
+        lock_name=lock_name,
+        dispose_engine=dispose_engine,
+        shared=shared,
     )
-    return source_id, None
 
 
-def reconcile_stale_runs(connection: Connection, source_id: int) -> None:
-    settings = get_settings()
-    connection.execute(
-        sa.text(
-            """
-            update source_runs
-            set status = 'failed',
-                finished_at = now(),
-                error_summary = 'abandoned: stale running run'
-            where source_id = :source_id
-              and status = 'running'
-              and started_at < now() - make_interval(mins => :stale_minutes)
-            """
-        ),
-        {"source_id": source_id, "stale_minutes": settings.collector_stale_run_minutes},
-    )
-
-
-def has_active_run(connection: Connection, source_id: int) -> bool:
-    return (
+def advisory_lock_is_held(connection: Connection, *, lock_class: int, lock_object: int) -> bool:
+    """Whether any live session currently owns a two-integer advisory lock."""
+    return bool(
         connection.execute(
             sa.text(
                 """
                 select exists (
                     select 1
-                    from source_runs
-                    where source_id = :source_id and status = 'running'
+                    from pg_locks
+                    where locktype = 'advisory'
+                      and classid = :lock_class
+                      and objid = :lock_object
+                      and objsubid = 2
+                      and granted
                 )
                 """
             ),
-            {"source_id": source_id},
+            {"lock_class": lock_class, "lock_object": lock_object},
         ).scalar_one()
-        is True
     )
+
+
+def resolve_active_profile_id(connection: Connection) -> int | None:
+    row = connection.execute(
+        sa.text("select id from job_seeker_profiles order by id limit 1")
+    ).scalar_one_or_none()
+    return int(row) if row is not None else None
+
+
+def acquire_publication_ownership(*, engine: Engine | None = None) -> RunOwnership | None:
+    """Own the active profile's publication lock.
+
+    Matching, feedback analysis/learning and profile import all publish into
+    the same profile row; they must share this lock so same-profile publication
+    cannot interleave. Manual commands use it exactly like the scheduler does.
+    """
+    owner_engine = engine if engine is not None else get_engine()
+    try:
+        with owner_engine.connect() as lookup:
+            profile_id = resolve_active_profile_id(lookup)
+    except Exception:
+        if engine is None:
+            owner_engine.dispose()
+        raise
+    lock_object = int(profile_id) if profile_id is not None else 0
+    return acquire_run_ownership(
+        engine=owner_engine,
+        lock_class=PROFILE_PUBLICATION_LOCK_CLASS,
+        lock_object=lock_object,
+        lock_name=f"profile:{lock_object}",
+        dispose_engine=engine is None,
+    )
+
+
+def ensure_source(connection: Connection, adapter: SourceAdapter) -> tuple[int, datetime | None]:
+    """Return the source id and watermark, creating the row atomically.
+
+    A concurrent first collection must not fail with a uniqueness error before
+    the advisory lock is even acquired, so creation is a single upsert rather
+    than SELECT-then-INSERT.
+    """
+    row = connection.execute(
+        sa.text(
+            """
+            insert into sources (name, method, url, poll_interval_min)
+            values (:name, :method, :url, :poll_interval_min)
+            on conflict (name) do update set name = excluded.name
+            returning id, incremental_watermark
+            """
+        ),
+        {
+            "name": adapter.source_name,
+            "method": adapter.source_method,
+            "url": adapter.url,
+            "poll_interval_min": adapter.poll_interval_min,
+        },
+    ).one_or_none()
+    if row is None:
+        raise RuntimeError(f"source upsert returned no row for {adapter.source_name}")
+    return int(row.id), row.incremental_watermark
+
+
+def reconcile_abandoned_runs(connection: Connection, source_id: int) -> int:
+    """Fail running rows for a source whose advisory lock we now hold.
+
+    The caller must already own the source lock. PostgreSQL releases session
+    advisory locks when a session ends, so holding the lock proves no live
+    owner exists and any remaining ``running`` row is abandoned regardless of
+    its age. The 30-minute staleness threshold is never used to declare a live
+    run dead.
+    """
+    result = connection.execute(
+        sa.text(
+            """
+            update source_runs
+            set status = 'failed',
+                finished_at = now(),
+                error_summary = coalesce(error_summary, 'abandoned: owner lock was free')
+            where source_id = :source_id
+              and status = 'running'
+            """
+        ),
+        {"source_id": source_id},
+    )
+    return int(result.rowcount or 0)
+
+
+def finish_source_run(
+    connection: Connection,
+    *,
+    run_id: int,
+    owner_token: str,
+    status: str,
+    fetched_count: int | None = None,
+    inserted_count: int | None = None,
+    updated_count: int | None = None,
+    unchanged_count: int | None = None,
+    error_summary: str | None = None,
+) -> bool:
+    """Transition a run exactly once, only while this owner still holds it.
+
+    Returns ``False`` when the row is gone, already terminal, or owned by
+    somebody else, so a stale finisher cannot overwrite a terminal status.
+    """
+    result = connection.execute(
+        sa.text(
+            """
+            update source_runs
+            set status = :status,
+                finished_at = now(),
+                fetched_count = coalesce(cast(:fetched_count as integer), fetched_count),
+                inserted_count = coalesce(cast(:inserted_count as integer), inserted_count),
+                updated_count = coalesce(cast(:updated_count as integer), updated_count),
+                unchanged_count = coalesce(cast(:unchanged_count as integer), unchanged_count),
+                error_summary = :error_summary
+            where id = :run_id
+              and status = 'running'
+              and owner_token = :owner_token
+            """
+        ),
+        {
+            "run_id": run_id,
+            "owner_token": owner_token,
+            "status": status,
+            "fetched_count": fetched_count,
+            "inserted_count": inserted_count,
+            "updated_count": updated_count,
+            "unchanged_count": unchanged_count,
+            "error_summary": error_summary,
+        },
+    )
+    return bool(result.rowcount)
 
 
 def normalize_match_text(value: str | None) -> str:
@@ -585,17 +791,32 @@ async def run_source_collection(
     max_urls: int | None = None,
     skip_if_running: bool = True,
 ) -> dict[str, Any]:
+    """Collect one source under database-owned mutual exclusion.
+
+    Ownership is a PostgreSQL advisory lock held on a dedicated connection for
+    the whole run, including the remote fetch. ``skip_if_running=False`` (the
+    manual ``--force`` flag) no longer bypasses exclusion: a second process
+    must never write the same source concurrently. It is kept for callers that
+    still pass it.
+    """
     engine = get_engine()
 
     with engine.begin() as connection:
         source_id, watermark = ensure_source(connection, adapter)
-        reconcile_stale_runs(connection, source_id)
-        if skip_if_running and has_active_run(connection, source_id):
-            logger.warning(
-                "event=source_collection_skipped source=%s reason=already_running source_id=%s",
-                adapter.source_name,
-                source_id,
-            )
+
+    ownership = acquire_run_ownership(
+        engine=engine,
+        lock_class=SOURCE_RUN_LOCK_CLASS,
+        lock_object=source_id,
+        lock_name=f"source:{adapter.source_name}",
+    )
+    if ownership is None:
+        logger.warning(
+            "event=source_collection_skipped source=%s reason=run_ownership_not_acquired source_id=%s",
+            adapter.source_name,
+            source_id,
+        )
+        with engine.begin() as connection:
             insert_source_run_event(
                 connection,
                 source_run_id=None,
@@ -603,114 +824,78 @@ async def run_source_collection(
                 source_name=adapter.source_name,
                 level="warning",
                 event_type="source_collection_skipped",
-                message="source collection skipped: already running",
+                message="source collection skipped: run ownership held elsewhere",
                 details={"reason": "already_running"},
             )
-            return {
-                "source": adapter.source_name,
-                "skipped": True,
-                "fetched": 0,
-                "inserted": 0,
-                "updated": 0,
-                "unchanged": 0,
-            }
-
-        run_id = connection.execute(
-            sa.text(
-                """
-                insert into source_runs (source_id, status)
-                values (:source_id, 'running')
-                returning id
-                """
-            ),
-            {"source_id": source_id},
-        ).scalar_one()
-        insert_source_run_event(
-            connection,
-            source_run_id=run_id,
-            source_id=source_id,
-            source_name=adapter.source_name,
-            level="info",
-            event_type="source_collection_started",
-            message="source collection started",
-            details={
-                "watermark": watermark.isoformat() if watermark else None,
-                "page_size": page_size,
-                "max_pages": max_pages,
-                "max_urls": max_urls,
-            },
-        )
-
-    started_monotonic = time.monotonic()
-    run_token = current_source_run_id.set(int(run_id))
-    source_id_token = current_source_id.set(int(source_id))
-    source_name_token = current_source_name.set(adapter.source_name)
-    try:
-        fetch_result = await adapter.collect(
-            watermark=watermark,
-            page_size=page_size,
-            max_pages=max_pages,
-            max_urls=max_urls,
-        )
-        counts: dict[str, Any] = {
+        return {
             "source": adapter.source_name,
-            "skipped": False,
-            "fetched": len(fetch_result.listings),
+            "skipped": True,
+            "reason": "already_running",
+            "fetched": 0,
             "inserted": 0,
-            "deduplicated": 0,
             "updated": 0,
             "unchanged": 0,
-            "removed": 0,
-            "pages_fetched": fetch_result.pages_fetched,
-            "stopped_at_watermark": fetch_result.stopped_at_watermark,
         }
 
+    # Collectors take the pipeline coordination lock in shared mode: many
+    # collectors may run together, but the daily pipeline takes it exclusively
+    # so it cannot start while collection is changing the catalogue.
+    coordination = acquire_run_ownership(
+        engine=engine,
+        lock_class=PIPELINE_RUN_LOCK_CLASS,
+        lock_object=0,
+        lock_name="pipeline:shared",
+        shared=True,
+    )
+    if coordination is None:
+        ownership.release()
+        logger.warning(
+            "event=source_collection_skipped source=%s reason=pipeline_running source_id=%s",
+            adapter.source_name,
+            source_id,
+        )
         with engine.begin() as connection:
-            seen_external_ids: set[str] = set()
-            for listing in fetch_result.listings:
-                seen_external_ids.add(listing.external_id)
-                result = upsert_listing(connection, source_id, listing)
-                counts[result] = int(counts[result]) + 1
-            if should_mark_missing_source_listings_removed(
-                watermark=watermark,
-                fetched_count=len(fetch_result.listings),
-                stopped_at_watermark=fetch_result.stopped_at_watermark,
-                max_urls=max_urls,
-                max_pages=max_pages,
-            ):
-                counts["removed"] = mark_missing_source_listings_removed(
-                    connection,
-                    source_id=source_id,
-                    seen_external_ids=seen_external_ids,
-                )
-
-            next_watermark = advance_watermark(
+            insert_source_run_event(
                 connection,
-                source_id,
-                watermark,
-                fetch_result.newest_watermark,
+                source_run_id=None,
+                source_id=source_id,
+                source_name=adapter.source_name,
+                level="warning",
+                event_type="source_collection_skipped",
+                message="source collection skipped: pipeline owns the catalogue",
+                details={"reason": "pipeline_running"},
             )
+        return {
+            "source": adapter.source_name,
+            "skipped": True,
+            "reason": "pipeline_running",
+            "fetched": 0,
+            "inserted": 0,
+            "updated": 0,
+            "unchanged": 0,
+        }
 
-            connection.execute(
-                sa.text(
-                    """
-                    update source_runs
-                    set status = 'success',
-                        finished_at = now(),
-                        fetched_count = :fetched_count,
-                        inserted_count = :inserted_count,
-                        updated_count = :updated_count,
-                        unchanged_count = :unchanged_count
-                    where id = :run_id
-                    """
-                ),
-                {
-                    "run_id": run_id,
-                    "fetched_count": counts["fetched"],
-                    "inserted_count": counts["inserted"],
-                    "updated_count": counts["updated"],
-                    "unchanged_count": counts["unchanged"],
-                },
+    started_monotonic = time.monotonic()
+    owner_token = uuid.uuid4().hex
+    run_token: Any = None
+    source_id_token: Any = None
+    source_name_token: Any = None
+    try:
+        # Holding the lock proves any earlier owner is gone, so abandoned rows
+        # are reconciled here instead of by a wall-clock timeout.
+        with engine.begin() as connection:
+            reconcile_abandoned_runs(connection, source_id)
+            run_id = int(
+                connection.execute(
+                    sa.text(
+                        """
+                        insert into source_runs (source_id, status, owner_token)
+                        values (:source_id, 'running', :owner_token)
+                        returning id
+                        """
+                    ),
+                    {"source_id": source_id, "owner_token": owner_token},
+                ).scalar_one()
             )
             insert_source_run_event(
                 connection,
@@ -718,53 +903,132 @@ async def run_source_collection(
                 source_id=source_id,
                 source_name=adapter.source_name,
                 level="info",
-                event_type="source_collection_succeeded",
-                message="source collection succeeded",
+                event_type="source_collection_started",
+                message="source collection started",
                 details={
-                    **counts,
                     "watermark": watermark.isoformat() if watermark else None,
-                    "next_watermark": next_watermark.isoformat() if next_watermark else None,
-                    "duration_seconds": round(time.monotonic() - started_monotonic, 3),
+                    "page_size": page_size,
+                    "max_pages": max_pages,
+                    "max_urls": max_urls,
                 },
             )
 
-        logger.info(
-            "event=source_collected source=%s watermark=%s next_watermark=%s counts=%s",
-            adapter.source_name,
-            watermark,
-            next_watermark,
-            counts,
-        )
-        return counts
-    except Exception as exc:
-        with engine.begin() as connection:
-            connection.execute(
-                sa.text(
-                    """
-                    update source_runs
-                    set status = 'failed',
-                        finished_at = now(),
-                        error_summary = :error_summary
-                    where id = :run_id
-                    """
-                ),
-                {"run_id": run_id, "error_summary": str(exc)[:1000]},
+        run_token = current_source_run_id.set(run_id)
+        source_id_token = current_source_id.set(int(source_id))
+        source_name_token = current_source_name.set(adapter.source_name)
+        try:
+            fetch_result = await adapter.collect(
+                watermark=watermark,
+                page_size=page_size,
+                max_pages=max_pages,
+                max_urls=max_urls,
             )
-            insert_source_run_event(
-                connection,
-                source_run_id=run_id,
-                source_id=source_id,
-                source_name=adapter.source_name,
-                level="error",
-                event_type="source_collection_failed",
-                message=str(exc),
-                details={
-                    "exception_type": type(exc).__name__,
-                    "duration_seconds": round(time.monotonic() - started_monotonic, 3),
-                },
+            counts: dict[str, Any] = {
+                "source": adapter.source_name,
+                "skipped": False,
+                "fetched": len(fetch_result.listings),
+                "inserted": 0,
+                "deduplicated": 0,
+                "updated": 0,
+                "unchanged": 0,
+                "removed": 0,
+                "pages_fetched": fetch_result.pages_fetched,
+                "stopped_at_watermark": fetch_result.stopped_at_watermark,
+            }
+
+            with engine.begin() as connection:
+                seen_external_ids: set[str] = set()
+                for listing in fetch_result.listings:
+                    seen_external_ids.add(listing.external_id)
+                    result = upsert_listing(connection, source_id, listing)
+                    counts[result] = int(counts[result]) + 1
+                if should_mark_missing_source_listings_removed(
+                    watermark=watermark,
+                    fetched_count=len(fetch_result.listings),
+                    stopped_at_watermark=fetch_result.stopped_at_watermark,
+                    max_urls=max_urls,
+                    max_pages=max_pages,
+                ):
+                    counts["removed"] = mark_missing_source_listings_removed(
+                        connection,
+                        source_id=source_id,
+                        seen_external_ids=seen_external_ids,
+                    )
+
+                next_watermark = advance_watermark(
+                    connection,
+                    source_id,
+                    watermark,
+                    fetch_result.newest_watermark,
+                )
+
+                finished = finish_source_run(
+                    connection,
+                    run_id=run_id,
+                    owner_token=owner_token,
+                    status="success",
+                    fetched_count=counts["fetched"],
+                    inserted_count=counts["inserted"],
+                    updated_count=counts["updated"],
+                    unchanged_count=counts["unchanged"],
+                )
+                if not finished:
+                    logger.warning(
+                        "event=source_run_completion_ignored source=%s run_id=%s reason=not_running_owner",
+                        adapter.source_name,
+                        run_id,
+                    )
+                insert_source_run_event(
+                    connection,
+                    source_run_id=run_id,
+                    source_id=source_id,
+                    source_name=adapter.source_name,
+                    level="info",
+                    event_type="source_collection_succeeded",
+                    message="source collection succeeded",
+                    details={
+                        **counts,
+                        "watermark": watermark.isoformat() if watermark else None,
+                        "next_watermark": next_watermark.isoformat() if next_watermark else None,
+                        "duration_seconds": round(time.monotonic() - started_monotonic, 3),
+                    },
+                )
+
+            logger.info(
+                "event=source_collected source=%s watermark=%s next_watermark=%s counts=%s",
+                adapter.source_name,
+                watermark,
+                next_watermark,
+                counts,
             )
-        raise
+            return counts
+        except Exception as exc:
+            with engine.begin() as connection:
+                finish_source_run(
+                    connection,
+                    run_id=run_id,
+                    owner_token=owner_token,
+                    status="failed",
+                    error_summary=str(exc)[:1000],
+                )
+                insert_source_run_event(
+                    connection,
+                    source_run_id=run_id,
+                    source_id=source_id,
+                    source_name=adapter.source_name,
+                    level="error",
+                    event_type="source_collection_failed",
+                    message=str(exc),
+                    details={
+                        "exception_type": type(exc).__name__,
+                        "duration_seconds": round(time.monotonic() - started_monotonic, 3),
+                    },
+                )
+            raise
     finally:
-        current_source_name.reset(source_name_token)
-        current_source_id.reset(source_id_token)
-        current_source_run_id.reset(run_token)
+        if source_name_token is not None:
+            current_source_name.reset(source_name_token)
+            current_source_id.reset(source_id_token)
+            current_source_run_id.reset(run_token)
+        ownership.release()
+        coordination.release()

@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import json
 import logging
 import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from zoneinfo import ZoneInfo
 from typing import Any, Literal
 
@@ -11,7 +13,7 @@ import httpx
 import sqlalchemy as sa
 from sqlalchemy.engine import Connection
 
-from app.config import get_settings
+from app.config import Settings, get_settings
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +40,18 @@ class TransitDistanceResult:
 
 class TransitDistanceError(RuntimeError):
     pass
+
+
+class TransitNoRouteError(TransitDistanceError):
+    """The provider confirmed there is no public transit route."""
+
+
+class TransitTransientError(TransitDistanceError):
+    """Timeout, transport, provider 5xx/429, auth or parse failure."""
+
+
+class TransitInvalidDestinationError(TransitDistanceError):
+    """Destination cannot be routed as given; not evidence of no route."""
 
 
 def routing_departure_time(*, when: datetime | None = None) -> datetime:
@@ -157,36 +171,51 @@ def compute_transit_distance(
         "X-Goog-FieldMask": "routes.duration,routes.distanceMeters",
     }
 
-    if client is None:
-        with httpx.Client(timeout=30) as owned_client:
-            response = owned_client.post(ROUTES_COMPUTE_URL, headers=headers, json=body)
-    else:
-        response = client.post(ROUTES_COMPUTE_URL, headers=headers, json=body)
+    try:
+        if client is None:
+            with httpx.Client(timeout=30) as owned_client:
+                response = owned_client.post(ROUTES_COMPUTE_URL, headers=headers, json=body)
+        else:
+            response = client.post(ROUTES_COMPUTE_URL, headers=headers, json=body)
+    except httpx.HTTPError as exc:
+        raise TransitTransientError(
+            f"Google Routes API transport failure: {exc.__class__.__name__}"
+        ) from exc
 
     try:
         payload = response.json()
     except ValueError as exc:
-        raise TransitDistanceError("Google Routes API returned invalid JSON") from exc
+        raise TransitTransientError("Google Routes API returned invalid JSON") from exc
 
+    if response.status_code in {401, 403}:
+        raise TransitTransientError(
+            _routes_error_message(payload if isinstance(payload, dict) else {})
+        )
+    if response.status_code == 429 or response.status_code >= 500:
+        raise TransitTransientError(
+            _routes_error_message(payload if isinstance(payload, dict) else {})
+        )
     if response.status_code >= 400:
-        raise TransitDistanceError(_routes_error_message(payload if isinstance(payload, dict) else {}))
+        raise TransitInvalidDestinationError(
+            _routes_error_message(payload if isinstance(payload, dict) else {})
+        )
 
     if not isinstance(payload, dict):
-        raise TransitDistanceError("Google Routes API returned an unexpected payload")
+        raise TransitTransientError("Google Routes API returned an unexpected payload")
 
     routes = payload.get("routes")
     if not isinstance(routes, list) or not routes:
-        raise TransitDistanceError(
+        raise TransitNoRouteError(
             f"No public transit route found from {resolved_origin!r} to {destination_query!r}"
         )
 
     route = routes[0]
     if not isinstance(route, dict):
-        raise TransitDistanceError("Google Routes API returned an unexpected route payload")
+        raise TransitTransientError("Google Routes API returned an unexpected route payload")
 
     distance_meters = int(route.get("distanceMeters") or 0)
     if distance_meters <= 0:
-        raise TransitDistanceError("Google Routes API returned zero distance")
+        raise TransitTransientError("Google Routes API returned zero distance")
 
     duration_seconds = parse_duration_seconds(route.get("duration"))
     duration_text = format_duration_fi(duration_seconds)
@@ -246,7 +275,7 @@ def build_location_evidence(
         if not location:
             return None
         return LocationEvidence(
-            text=f"{location} · julkisen liikenteen matka Oulusta ei tiedossa",
+            text=f"{location} · julkisen liikenteen matka ei tiedossa",
             tone="warning",
         )
 
@@ -256,7 +285,7 @@ def build_location_evidence(
 
     if km <= 25:
         return LocationEvidence(
-            text=f"{label} · Oulun seutu · {transit.duration_text} (julkiset)",
+            text=f"{label} · lähialue · {transit.duration_text} (julkiset)",
             tone="good",
         )
     if mode == "hybrid":
@@ -342,9 +371,14 @@ def fetch_cached_transit_distances(
                 from transit_distance_cache
                 where origin_address = :origin_address
                   and destination_query = any(:destination_queries)
+                  and fetched_at >= now() - make_interval(days => :ttl_days)
                 """
             ),
-            {"origin_address": origin_address, "destination_queries": destination_queries},
+            {
+                "origin_address": origin_address,
+                "destination_queries": destination_queries,
+                "ttl_days": get_settings().transit_cache_ttl_days,
+            },
         ).mappings()
 
     rows = _run_cache_query(connection, _query, default=None)
@@ -376,6 +410,7 @@ def fetch_recent_transit_failures(
                 from transit_distance_failures
                 where origin_address = :origin_address
                   and destination_query = any(:destination_queries)
+                  and reason = 'no_route'
                   and failed_at >= now() - interval '7 days'
                 """
             ),
@@ -491,15 +526,79 @@ def store_transit_failure(
         logger.warning("event=transit_distance_failure_cache_write_failed")
 
 
+class TransitLookupResult(dict):
+    """Transit results with explicit outcome provenance.
+
+    Values are successful :class:`TransitDistanceResult` or ``None``. The
+    attributes distinguish a confirmed no-route from a failed, budget-skipped or
+    provider-backoff lookup, so an unknown location is never silently treated as
+    unreachable.
+    """
+
+    def __init__(
+        self,
+        *args: Any,
+        attempted: int = 0,
+        no_route: Any = frozenset(),
+        not_attempted: Any = frozenset(),
+        failed: Any = frozenset(),
+        provider_backoff: bool = False,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(*args, **kwargs)
+        self.attempted = attempted
+        self.no_route_queries = frozenset(no_route)
+        self.not_attempted_queries = frozenset(not_attempted)
+        self.failed_queries = frozenset(failed)
+        self.provider_backoff = provider_backoff
+
+
+def transit_provider_backoff_path(settings: Settings) -> Path:
+    return Path(settings.storage_dir) / "transit_provider_backoff.json"
+
+
+def transit_provider_in_backoff(settings: Settings) -> bool:
+    path = transit_provider_backoff_path(settings)
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        failed_at = datetime.fromisoformat(str(payload["failed_at"]))
+    except (OSError, KeyError, ValueError, json.JSONDecodeError):
+        return False
+    if failed_at.tzinfo is None:
+        failed_at = failed_at.replace(tzinfo=timezone.utc)
+    return datetime.now(timezone.utc) < failed_at + timedelta(
+        minutes=settings.transit_provider_backoff_min
+    )
+
+
+def mark_transit_provider_backoff(settings: Settings, reason: str) -> None:
+    path = transit_provider_backoff_path(settings)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps(
+                {
+                    "failed_at": datetime.now(timezone.utc).isoformat(),
+                    "reason": reason[:200],
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            ),
+            encoding="utf-8",
+        )
+    except OSError:
+        logger.warning("event=transit_provider_backoff_write_failed")
+
+
 def resolve_transit_for_queries(
     connection: Connection,
     destination_queries: list[str],
     *,
     max_lookups: int = 20,
-) -> dict[str, TransitDistanceResult | None]:
+) -> TransitLookupResult:
     settings = get_settings()
     if not settings.google_maps_configured():
-        return {}
+        return TransitLookupResult()
 
     origin = settings.transit_origin_address or DEFAULT_ORIGIN
     unique_queries: list[str] = []
@@ -510,7 +609,11 @@ def resolve_transit_for_queries(
             unique_queries.append(query)
 
     if not unique_queries:
-        return {}
+        return TransitLookupResult()
+
+    provider_backoff = transit_provider_in_backoff(settings)
+    if provider_backoff:
+        logger.info("event=transit_lookup_backoff_active")
 
     cached = fetch_cached_transit_distances(
         connection,
@@ -523,33 +626,77 @@ def resolve_transit_for_queries(
         destination_queries=unique_queries,
     )
     results: dict[str, TransitDistanceResult | None] = {}
-    lookups = 0
+    no_route: set[str] = set()
+    not_attempted: set[str] = set()
+    failed: set[str] = set()
+    attempted = 0
     for query in unique_queries:
         if query in cached:
             results[query] = cached[query]
             continue
         if query in recent_failures:
             results[query] = None
+            no_route.add(query)
             continue
-        if lookups >= max_lookups:
+        if provider_backoff:
+            # Valid cache entries above stay usable; only unresolved lookups wait.
             results[query] = None
+            not_attempted.add(query)
             continue
+        if attempted >= max_lookups:
+            results[query] = None
+            not_attempted.add(query)
+            continue
+        # Every attempt consumes budget, including timeouts and parse failures.
+        attempted += 1
         try:
             transit = compute_transit_distance(query.removesuffix(", Finland"), origin=origin)
-        except TransitDistanceError as exc:
-            logger.info("event=transit_distance_lookup_failed query=%s error=%s", query, exc)
+        except TransitNoRouteError as exc:
+            logger.info("event=transit_distance_no_route query=%s", query)
             store_transit_failure(
                 connection,
                 origin_address=origin,
                 destination_query=query,
-                reason=str(exc),
+                reason="no_route",
             )
             results[query] = None
+            no_route.add(query)
+            continue
+        except (TransitTransientError, TransitInvalidDestinationError) as exc:
+            if isinstance(exc, TransitTransientError):
+                logger.info(
+                    "event=transit_distance_lookup_transient query=%s error=%s", query, exc
+                )
+                mark_transit_provider_backoff(settings, str(exc))
+                results[query] = None
+                failed.add(query)
+                not_attempted.update(unique_queries[unique_queries.index(query) + 1 :])
+                break
+            logger.info("event=transit_distance_invalid_destination query=%s error=%s", query, exc)
+            store_transit_failure(
+                connection,
+                origin_address=origin,
+                destination_query=query,
+                reason="invalid_destination",
+            )
+            results[query] = None
+            failed.add(query)
+            continue
+        except TransitDistanceError as exc:
+            logger.info("event=transit_distance_lookup_failed query=%s error=%s", query, exc)
+            results[query] = None
+            failed.add(query)
             continue
         store_cached_transit_distance(connection, transit)
         results[query] = transit
-        lookups += 1
-    return results
+    return TransitLookupResult(
+        results,
+        attempted=attempted,
+        no_route=no_route,
+        not_attempted=not_attempted,
+        failed=failed,
+        provider_backoff=provider_backoff,
+    )
 
 
 def resolve_transit_for_locations(
@@ -557,7 +704,7 @@ def resolve_transit_for_locations(
     locations: list[str | None],
     *,
     max_lookups: int = 20,
-) -> dict[str, TransitDistanceResult | None]:
+) -> TransitLookupResult:
     query_to_location: dict[str, str] = {}
     for location in locations:
         if not location:
@@ -567,15 +714,34 @@ def resolve_transit_for_locations(
             query_to_location.setdefault(query, location)
 
     if not query_to_location:
-        return {}
+        return TransitLookupResult()
 
     by_query = resolve_transit_for_queries(
         connection,
         list(query_to_location.keys()),
         max_lookups=max_lookups,
     )
-    return {
+    mapped = {
         query_to_location[query]: transit
         for query, transit in by_query.items()
     }
-
+    return TransitLookupResult(
+        mapped,
+        attempted=by_query.attempted,
+        no_route={
+            query_to_location[query]
+            for query in by_query.no_route_queries
+            if query in query_to_location
+        },
+        not_attempted={
+            query_to_location[query]
+            for query in by_query.not_attempted_queries
+            if query in query_to_location
+        },
+        failed={
+            query_to_location[query]
+            for query in by_query.failed_queries
+            if query in query_to_location
+        },
+        provider_backoff=by_query.provider_backoff,
+    )

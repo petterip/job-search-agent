@@ -6,10 +6,12 @@ from dateutil.parser import isoparse
 
 from app.adapters.base import (
     CollectionFetchResult,
+    ensure_aware_utc,
     NormalizedListing,
     USER_AGENT,
     collect_page_results,
     payload_content_hash,
+    validated_external_id,
 )
 from app.config import get_settings
 from app.feedback_learning import get_discovery_search_queries
@@ -17,7 +19,10 @@ from app.location import append_work_mode, detect_work_mode, infer_city_from_tex
 
 
 def duunitori_job_url(slug: str) -> str:
-    return f"https://duunitori.fi/tyopaikat/tyo/{slug}"
+    safe_slug = validated_external_id(slug)
+    if safe_slug is None:
+        return ""
+    return f"https://duunitori.fi/tyopaikat/tyo/{safe_slug}"
 
 
 @dataclass(frozen=True)
@@ -137,7 +142,7 @@ class DuunitoriAdapter:
     def normalize(self, payload: dict) -> NormalizedListing:
         slug = str(payload["slug"])
         published_raw = payload.get("date_posted")
-        published_at = isoparse(published_raw) if published_raw else None
+        published_at = ensure_aware_utc(isoparse(published_raw)) if published_raw else None
 
         job_url = duunitori_job_url(slug)
 

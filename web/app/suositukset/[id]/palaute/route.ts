@@ -14,8 +14,38 @@ function parseRating(value: FormDataEntryValue | null): number | null {
   return rating;
 }
 
+// Mutations must be same-origin. Loopback API binding does not protect an
+// externally exposed reverse proxy, so reject cross-site form posts here too.
+function isSameOrigin(request: NextRequest): boolean {
+  const configuredOrigin = process.env.PUBLIC_ORIGIN?.trim();
+  if (!configuredOrigin) {
+    return true;
+  }
+  const origin = request.headers.get("origin");
+  if (!origin) {
+    return false;
+  }
+  try {
+    return new URL(origin).origin === new URL(configuredOrigin).origin;
+  } catch {
+    return false;
+  }
+}
+
+function apiAuthHeaders(): Record<string, string> {
+  const token = process.env.OPERATOR_API_TOKEN?.trim();
+  return token ? { Authorization: `Bearer ${token}` } : {};
+}
+
 export async function POST(request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
+  if (!/^\d+$/.test(id)) {
+    redirect("/");
+    return;
+  }
+  if (!isSameOrigin(request)) {
+    return new Response("cross-origin feedback is not allowed", { status: 403 });
+  }
   const formData = await request.formData();
   const jobId = String(formData.get("job_id") ?? "");
   const legacyAction = String(formData.get("action") ?? "");
@@ -30,12 +60,16 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
   let response: Response;
   if (VALID_LEGACY_ACTIONS.has(legacyAction)) {
     url.searchParams.set("action", legacyAction);
-    response = await fetch(url, { method: "POST", cache: "no-store" });
+    response = await fetch(url, {
+      method: "POST",
+      cache: "no-store",
+      headers: apiAuthHeaders(),
+    });
   } else if (rating !== null) {
     response = await fetch(url, {
       method: "POST",
       cache: "no-store",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", ...apiAuthHeaders() },
       body: JSON.stringify({
         rating,
         applied,

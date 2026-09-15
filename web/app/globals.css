@@ -254,6 +254,10 @@ h1 {
   color: #9aa6b2;
 }
 
+.recommendations .pager {
+  margin-top: 12px;
+}
+
 .job-list {
   display: grid;
   gap: 8px;

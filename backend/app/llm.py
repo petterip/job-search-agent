@@ -11,6 +11,7 @@ import httpx
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.config import Settings
+from app.privacy import outbound_profile_summary, sanitize_job_travel, sanitize_outbound
 
 logger = logging.getLogger("matcher.llm")
 
@@ -82,6 +83,44 @@ EVALUATION_TASK = (
 )
 
 
+def normalize_provider_usage(provider_name: str, usage: Any) -> dict[str, Any]:
+    """Normalize provider token accounting, flagging absent usage.
+
+    Token counts are recorded exactly as the provider reported them. A missing
+    usage block stays null with ``usage_present`` false rather than being
+    estimated.
+    """
+    normalized: dict[str, Any] = {
+        "input_tokens": None,
+        "output_tokens": None,
+        "cached_tokens": None,
+        "usage_present": False,
+    }
+    if usage is None:
+        return normalized
+    if provider_name == "gemini":
+        data = usage if isinstance(usage, dict) else {}
+        normalized["input_tokens"] = data.get("promptTokenCount")
+        normalized["output_tokens"] = data.get("candidatesTokenCount")
+        normalized["cached_tokens"] = data.get("cachedContentTokenCount")
+    else:
+        if hasattr(usage, "model_dump"):
+            data = usage.model_dump()
+        elif isinstance(usage, dict):
+            data = usage
+        else:
+            data = {}
+        normalized["input_tokens"] = data.get("input_tokens")
+        normalized["output_tokens"] = data.get("output_tokens")
+        details = data.get("input_tokens_details")
+        if isinstance(details, dict):
+            normalized["cached_tokens"] = details.get("cached_tokens")
+    normalized["usage_present"] = (
+        normalized["input_tokens"] is not None or normalized["output_tokens"] is not None
+    )
+    return normalized
+
+
 def provider_cooldown_path(settings: Settings) -> Path:
     return Path(settings.storage_dir) / "llm_provider_unavailable.json"
 
@@ -121,22 +160,8 @@ def mark_provider_unavailable(settings: Settings, reason: str) -> None:
 
 
 def minimized_profile_summary(profile: dict[str, Any]) -> str:
-    allowed_keys = [
-        "objective",
-        "location",
-        "career_evidence",
-        "role_clusters",
-        "skills",
-        "strength_signals",
-        "languages",
-        "availability",
-        "preferences",
-        "exclusions",
-        "freshness",
-        "llm_guidance",
-    ]
-    minimized = {key: profile[key] for key in allowed_keys if key in profile}
-    return json.dumps(minimized, ensure_ascii=False, sort_keys=True)
+    """Privacy-projected profile summary. Fails closed without a valid policy."""
+    return outbound_profile_summary(profile)
 
 
 def job_summary(job: dict[str, Any]) -> str:
@@ -145,7 +170,7 @@ def job_summary(job: dict[str, Any]) -> str:
     deterministic_result = job.get("deterministic_result") or {}
     if isinstance(deterministic_result, str):
         deterministic_result = json.loads(deterministic_result)
-    travel_assessment = deterministic_result.get("travel_assessment")
+    travel_assessment = sanitize_job_travel(deterministic_result.get("travel_assessment"))
     minimized = {
         "title": job.get("title"),
         "employer": job.get("employer"),
@@ -153,7 +178,11 @@ def job_summary(job: dict[str, Any]) -> str:
         "description_excerpt": excerpt,
         "travel_assessment": travel_assessment,
     }
-    return json.dumps(minimized, ensure_ascii=False, sort_keys=True)
+    return json.dumps(sanitize_outbound(minimized), ensure_ascii=False, sort_keys=True)
+
+
+def canonical_json(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
 def evaluation_request_hash(
@@ -162,18 +191,39 @@ def evaluation_request_hash(
     job_summary_text: str,
     model: str,
     prompt_version: int,
+    provider: str = "",
     schema_version: int = 1,
-    learned_version: int = 0,
+    schema: dict[str, Any] | None = None,
+    instructions: str | None = None,
+    task: str | None = None,
+    job_id: int | None = None,
+    profile_id: int | None = None,
+    learned_input: Any = None,
 ) -> str:
+    """Fingerprint the exact sanitized evaluation request.
+
+    The hash covers the actual prompt/schema content sent, the configured
+    provider and model, and the job/profile ownership. Readable version numbers
+    stay in the payload as provenance, but they are never the only thing that
+    makes a request distinct: changing instructions or schema content changes
+    the identity even at a constant version. `returned_model` is deliberately
+    absent because it is only known after the response.
+    """
     payload = {
         "profile_summary": profile_summary,
         "job_summary": job_summary_text,
         "model": model,
+        "provider": provider,
         "prompt_version": prompt_version,
         "schema_version": schema_version,
-        "learned_version": learned_version,
+        "schema": schema if schema is not None else JobFitEvaluation.model_json_schema(),
+        "instructions": EVALUATION_INSTRUCTIONS if instructions is None else instructions,
+        "task": EVALUATION_TASK if task is None else task,
+        "job_id": job_id,
+        "profile_id": profile_id,
+        "learned_input": learned_input,
     }
-    return hashlib.sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
+    return hashlib.sha256(canonical_json(payload).encode("utf-8")).hexdigest()
 
 
 def gemini_response_schema(schema: dict[str, Any]) -> dict[str, Any]:
@@ -230,6 +280,26 @@ def normalized_evaluation_payload(payload: dict[str, Any]) -> dict[str, Any]:
     return JobFitEvaluation.model_validate(normalized).model_dump()
 
 
+def validated_evaluation_payload(response: Any) -> dict[str, Any] | None:
+    """Return a normalized payload, or None for an unusable cached response.
+
+    An invalid cache row is a recoverable miss: the caller may pay for one fresh
+    call and replace the row, instead of repeatedly failing on it forever.
+    """
+    if isinstance(response, str):
+        try:
+            response = json.loads(response)
+        except (TypeError, ValueError):
+            return None
+    if not isinstance(response, dict):
+        return None
+    try:
+        return normalized_evaluation_payload(response)
+    except Exception:
+        logger.warning("event=llm_evaluation_cache_unusable")
+        return None
+
+
 class OpenAIEvaluationProvider:
     provider_name = "openai"
 
@@ -283,10 +353,13 @@ class OpenAIEvaluationProvider:
         parsed = JobFitEvaluation.model_validate(
             normalized_evaluation_payload(json.loads(raw_text))
         )
+        usage = getattr(response, "usage", None)
         metadata = {
             "returned_model": getattr(response, "model", None),
             "prompt_version": prompt_version,
-            "usage": getattr(response, "usage", None).model_dump() if getattr(response, "usage", None) else None,
+            "usage": usage.model_dump() if usage is not None and hasattr(usage, "model_dump") else usage,
+            "usage_normalized": normalize_provider_usage("openai", usage),
+            "request_id": getattr(response, "id", None),
         }
         return parsed, metadata
 
@@ -375,10 +448,13 @@ class GeminiEvaluationProvider:
         parsed = JobFitEvaluation.model_validate(
             normalized_evaluation_payload(json.loads(raw_text))
         )
+        usage = payload.get("usageMetadata")
         metadata = {
             "returned_model": payload.get("modelVersion") or model,
             "prompt_version": prompt_version,
-            "usage": payload.get("usageMetadata"),
+            "usage": usage,
+            "usage_normalized": normalize_provider_usage("gemini", usage),
+            "request_id": payload.get("responseId"),
         }
         return parsed, metadata
 

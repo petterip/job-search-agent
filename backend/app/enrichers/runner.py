@@ -7,6 +7,15 @@ from typing import Any
 
 import httpx
 
+from app.adapters.base import (
+    URL_REASON_REJECTED,
+    is_allowed_source_url,
+    log_url_rejection,
+    safe_source_url,
+    source_redirect_guard,
+    source_url_rejection_reason,
+    validated_external_id,
+)
 from app.adapters.eures import EuresAdapter
 from app.adapters.jobly import JoblyAdapter, extract_jobly_static_description
 from app.adapters.laura import LauraAdapter
@@ -200,13 +209,28 @@ def _http_detail_result(candidate: EnrichmentInput, payload: dict[str, Any]) -> 
         enricher_version=candidate.enricher_version,
     )
     if candidate.source_name in {"tmt", "tmt_oulu"}:
-        external_id = str(payload.get("id") or "")
-        if not external_id:
+        external_id = validated_external_id(payload.get("id"))
+        if external_id is None:
             return None
-        with httpx.Client(timeout=30) as client:
-            response = client.get(
-                f"https://tyomarkkinatori.fi/api/jobposting-new/v1/public/jobpostings/{external_id}"
+        detail_url = (
+            "https://tyomarkkinatori.fi/api/jobposting-new/v1/public/jobpostings/"
+            f"{external_id}"
+        )
+        if source_url_rejection_reason(candidate.source_name, detail_url) is not None:
+            log_url_rejection(
+                logger,
+                source_name=candidate.source_name,
+                reason=URL_REASON_REJECTED,
+                value=detail_url,
             )
+            return None
+        with httpx.Client(
+            timeout=30,
+            event_hooks={
+                "response": [source_redirect_guard(candidate.source_name)],
+            },
+        ) as client:
+            response = client.get(detail_url)
             if response.status_code == 404:
                 return None
             response.raise_for_status()
@@ -231,7 +255,22 @@ def _http_detail_result(candidate: EnrichmentInput, payload: dict[str, Any]) -> 
             return None
         base_url = TALENTECH_BASE_URLS[candidate.source_name]
         detail_url = talentech_canonical_url(base_url, detail_path)
-        with httpx.Client(timeout=60, headers={"User-Agent": TALENTECH_USER_AGENT}, follow_redirects=True) as client:
+        if detail_url is None:
+            log_url_rejection(
+                logger,
+                source_name=candidate.source_name,
+                reason=URL_REASON_REJECTED,
+                value=detail_path,
+            )
+            return None
+        with httpx.Client(
+            timeout=60,
+            headers={"User-Agent": TALENTECH_USER_AGENT},
+            follow_redirects=True,
+            event_hooks={
+                "response": [source_redirect_guard(candidate.source_name)],
+            },
+        ) as client:
             response = client.get(detail_url)
             if response.status_code == 404:
                 return None
@@ -253,10 +292,29 @@ def _http_detail_result(candidate: EnrichmentInput, payload: dict[str, Any]) -> 
     return None
 
 
+async def _install_navigation_guard(page: Any, source_name: str) -> None:
+    """Abort browser navigations that leave the source's documented domains."""
+    route = getattr(page, "route", None)
+    if route is None:
+        return
+
+    async def guard(route_handle: Any, request: Any) -> None:
+        request_url = getattr(request, "url", None)
+        is_navigation_request = getattr(request, "is_navigation_request", None)
+        is_navigation = is_navigation_request() if callable(is_navigation_request) else True
+        if is_navigation and not is_allowed_source_url(source_name, request_url):
+            await route_handle.abort()
+        else:
+            await route_handle.continue_()
+
+    await route("**/*", guard)
+
+
 async def _jobly_browser_result_async(candidate: EnrichmentInput) -> EnrichmentResult | None:
-    url = candidate.canonical_source_url or candidate.application_url
-    if candidate.source_name != "jobly" or not url:
+    safe_url = safe_source_url("jobly", candidate.canonical_source_url or candidate.application_url)
+    if candidate.source_name != "jobly" or safe_url is None:
         return None
+    url = safe_url
     input_hash = compute_enrichment_input_hash(
         last_content_hash=candidate.last_content_hash,
         application_url=candidate.application_url,
@@ -272,8 +330,28 @@ async def _jobly_browser_result_async(candidate: EnrichmentInput) -> EnrichmentR
             return None
         try:
             async with connect_playwright_over_cdp(session_handle.session.connect_url) as cdp:
+                await _install_navigation_guard(cdp.page, "jobly")
                 await cdp.page.goto(url, wait_until="domcontentloaded", timeout=30_000)
+                final_url = getattr(cdp.page, "url", None)
+                final_reason = source_url_rejection_reason(
+                    "jobly",
+                    final_url if isinstance(final_url, str) else None,
+                )
+                if final_reason is not None:
+                    log_url_rejection(
+                        logger,
+                        source_name="jobly",
+                        reason=final_reason,
+                        value=final_url if isinstance(final_url, str) else None,
+                    )
+                    raise BrowserEnrichmentError(
+                        f"navigation rejected source=jobly reason={final_reason}",
+                        browser_session_id=session_handle.session.session_id,
+                        browser_dashboard_url=session_handle.session.dashboard_url,
+                    )
                 content = await cdp.page.content()
+        except BrowserEnrichmentError:
+            raise
         except Exception as exc:  # noqa: BLE001 - preserve browser session metadata for audit.
             raise BrowserEnrichmentError(
                 str(exc),

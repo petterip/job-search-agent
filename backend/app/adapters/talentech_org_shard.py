@@ -3,7 +3,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 import logging
 
-from app.adapters.base import CollectionFetchResult, ensure_aware_utc, is_newer_than_watermark
+from app.adapters.base import (
+    CollectionFetchResult,
+    URL_REASON_REJECTED,
+    async_source_redirect_guard,
+    ensure_aware_utc,
+    is_newer_than_watermark,
+    log_url_rejection,
+)
 from app.adapters.talentech import (
     TALENTECH_USER_AGENT,
     extract_talentech_description,
@@ -76,6 +83,7 @@ class TalentechOrgShardAdapter:
             timeout=60,
             headers={"User-Agent": TALENTECH_USER_AGENT},
             follow_redirects=True,
+            event_hooks={"response": [async_source_redirect_guard(self.source_name)]},
         ) as client:
             filters_response = await client.get(
                 self.url,
@@ -139,6 +147,14 @@ class TalentechOrgShardAdapter:
                     self.config.site_root,
                     str(summary["url"]),
                 )
+                if detail_url is None:
+                    log_url_rejection(
+                        logger,
+                        source_name=self.source_name,
+                        reason=URL_REASON_REJECTED,
+                        value=summary.get("url"),
+                    )
+                    continue
                 detail_response = None
                 for attempt in range(4):
                     detail_response = await client.get(detail_url)

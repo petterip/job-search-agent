@@ -2,6 +2,7 @@ import argparse
 import json
 import logging
 
+from app.collection.runner import PIPELINE_RUN_LOCK_CLASS, acquire_run_ownership
 from app.enrichers.runner import run_enrichment
 from app.logging import configure_logging
 
@@ -18,13 +19,41 @@ def main() -> int:
     parser.add_argument("--max-jobs", type=int, default=None, help="Cap candidates for this run.")
     args = parser.parse_args()
 
-    result = run_enrichment(
-        dry_run=args.dry_run,
-        enqueue_only=args.enqueue_only,
-        enricher=args.enricher,
-        source=args.source,
-        max_jobs=args.max_jobs,
+    if args.dry_run:
+        # Read-only inventory needs no ownership.
+        result = run_enrichment(
+            dry_run=True,
+            enqueue_only=args.enqueue_only,
+            enricher=args.enricher,
+            source=args.source,
+            max_jobs=args.max_jobs,
+        )
+        print(json.dumps(result, ensure_ascii=False, default=str))
+        return 0
+
+    ownership = acquire_run_ownership(
+        lock_class=PIPELINE_RUN_LOCK_CLASS,
+        lock_object=0,
+        lock_name="pipeline",
     )
+    if ownership is None:
+        print(
+            json.dumps(
+                {"status": "skipped", "reason": "pipeline_owned"},
+                ensure_ascii=False,
+            )
+        )
+        return 0
+    try:
+        result = run_enrichment(
+            dry_run=False,
+            enqueue_only=args.enqueue_only,
+            enricher=args.enricher,
+            source=args.source,
+            max_jobs=args.max_jobs,
+        )
+    finally:
+        ownership.release()
     print(json.dumps(result, ensure_ascii=False, default=str))
     return 0
 

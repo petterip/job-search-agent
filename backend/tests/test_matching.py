@@ -1,6 +1,7 @@
 from typing import Any
 
 from app.config import Settings
+from support import DEFAULT_PRIVACY
 from app.matching import (
     JobForScoring,
     ScoreResult,
@@ -396,6 +397,7 @@ class RecordingConnection:
                     {
                         "id": 1,
                         "profile": {
+                            "privacy": DEFAULT_PRIVACY,
                             "location": {"home_city": "Oulu"},
                             "role_clusters": [
                                 {
@@ -407,6 +409,8 @@ class RecordingConnection:
                     }
                 ]
             )
+        if "with eligible as" in sql:
+            return FakeResult()
         if "from jobs" in sql:
             return FakeResult(
                 [
@@ -432,6 +436,7 @@ class LocalPoolConnection(RecordingConnection):
                     {
                         "id": 1,
                         "profile": {
+                            "privacy": DEFAULT_PRIVACY,
                             "location": {"home_city": "Oulu"},
                             "role_clusters": [
                                 {
@@ -716,7 +721,9 @@ def test_deterministic_recommendations_deactivate_and_upsert_without_deleting_fe
     )
     connection = RecordingConnection()
 
-    result = run_deterministic_recommendations(connection, max_jobs=10)  # type: ignore[arg-type]
+    result = run_deterministic_recommendations(
+        connection, max_jobs=10, publication_mode="deterministic_only"
+    )  # type: ignore[arg-type]
 
     executed_sql = "\n".join(connection.statements).lower()
     assert result["evaluated"] == 1
@@ -726,7 +733,7 @@ def test_deterministic_recommendations_deactivate_and_upsert_without_deleting_fe
     assert "on conflict (profile_id, job_id)" in executed_sql
     assert "s.enabled = true" in executed_sql
     assert "recommendation_feedback rf" in executed_sql
-    assert "rf.rating <= 2" in executed_sql
+    assert "rf.rating <= 1" in executed_sql
     assert "commutable_or_full_remote" in executed_sql
     assert "full_remote" in executed_sql
     assert ":is_active" in executed_sql
@@ -828,7 +835,7 @@ def test_refresh_active_recommendation_ranks_honors_rating_one_feedback() -> Non
     )  # type: ignore[arg-type]
 
     executed_sql = "\n".join(connection.statements).lower()
-    assert "rf.rating <= 2" in executed_sql
+    assert "rf.rating <= 1" in executed_sql
     assert "commutable_or_full_remote_rank = null" in executed_sql
 
 
@@ -844,7 +851,7 @@ def test_refresh_active_recommendation_ranks_deactivates_weak_llm_rows() -> None
 
     executed_sql = "\n".join(connection.statements).lower()
     assert active_count == 1
-    assert "suggested_action = 'skip'" in executed_sql
+    assert "suggested_action, '') = 'skip'" in executed_sql
     assert "llm_score < 40" in executed_sql
     assert "llm_evaluation_id is null" in executed_sql
     assert "e.prompt_version is distinct from :prompt_version" in executed_sql
@@ -875,6 +882,7 @@ class PrefilterSkipConnection:
                     {
                         "id": 1,
                         "profile": {
+                            "privacy": DEFAULT_PRIVACY,
                             "location": {"home_city": "Oulu"},
                             "role_clusters": [{"titles_fi": ["kirjastonhoitaja"], "keywords_fi": ["kirjasto"]}],
                             "learned": {"version": 3, "few_shot_examples": [], "eval_hints": []},
@@ -907,7 +915,9 @@ def test_llm_evaluations_skip_high_anti_similarity_with_learned_exclusions() -> 
 
     result = run_llm_evaluations(connection, provider=UnusedProvider(), max_jobs=10)  # type: ignore[arg-type]
 
-    assert result == {"llm_evaluated": 0, "llm_failed": 0, "llm_skipped": 1}
+    assert result["llm_evaluated"] == 0
+    assert result["llm_skipped"] == 1
+    assert result["llm_paid_calls"] == 0
 
 
 def test_llm_review_bucket_limits_reserve_scope_capacity() -> None:
@@ -934,7 +944,10 @@ def test_llm_evaluations_do_not_skip_rows_just_because_old_evaluation_id_exists(
     result = run_llm_evaluations(connection, provider=UnusedProvider(), max_jobs=10)  # type: ignore[arg-type]
 
     executed_sql = "\n".join(connection.statements).lower()
-    assert result == {"llm_evaluated": 0, "llm_failed": 0, "llm_skipped": 0}
+    assert result["llm_evaluated"] == 0
+    assert result["llm_failed"] == 0
+    assert result["llm_skipped"] == 0
+    assert result["llm_deferred"] == 0
     assert "from recommendations r" in executed_sql
     assert "where r.llm_evaluation_id is null" not in executed_sql
     assert "current_eval.prompt_version is distinct from :prompt_version" in executed_sql
@@ -943,3 +956,113 @@ def test_llm_evaluations_do_not_skip_rows_just_because_old_evaluation_id_exists(
     assert "commutable_candidates" in executed_sql
     assert "remote_candidates" in executed_sql
     assert "nationwide_candidates" in executed_sql
+
+
+def test_multiword_hard_exclusion_is_phrase_and_title_scoped() -> None:
+    profile = {
+        "exclusions": {"hard_negative_titles_fi": ["henkilökohtainen avustaja"]},
+        "role_clusters": [{"titles_fi": ["kirjastonhoitaja"], "keywords_fi": ["kirjasto"]}],
+    }
+    library_job = JobForScoring(
+        id=1,
+        title="Kirjastonhoitaja",
+        employer="Kaupunginkirjasto",
+        description="Tehtävässä tuetaan asiakkaita ja avustaja voi osallistua tapahtumiin.",
+        location="Oulu",
+    )
+
+    result = score_job(profile, library_job)
+
+    assert result.passes is True
+    assert result.deterministic_result["negative_matches"] == []
+
+
+def test_multiword_hard_exclusion_still_rejects_the_actual_title() -> None:
+    profile = {
+        "exclusions": {"hard_negative_titles_fi": ["henkilökohtainen avustaja"]},
+        "role_clusters": [{"titles_fi": ["kirjastonhoitaja"], "keywords_fi": ["kirjasto"]}],
+    }
+    rejected_job = JobForScoring(
+        id=2,
+        title="Henkilökohtainen avustaja",
+        employer="Hyvinvointialue",
+        description="Avustamistehtävät.",
+        location="Oulu",
+    )
+
+    result = score_job(profile, rejected_job)
+
+    assert result.passes is False
+    assert "henkilökohtainen avustaja" in result.deterministic_result["negative_matches"]
+
+
+def test_inflected_exclusion_token_does_not_reject_unrelated_library_job() -> None:
+    # The old token-substring rule rejected a library job whose description
+    # merely mentioned equipment ("kaluston").
+    profile = {
+        "exclusions": {"hard_negative_titles_fi": ["kalustonhoitaja"]},
+        "role_clusters": [
+            {"titles_fi": ["kirjastovirkailija"], "keywords_fi": ["kirjasto", "asiakaspalvelu"]}
+        ],
+    }
+    job = JobForScoring(
+        id=3,
+        title="Kirjastovirkailija, musiikkiosasto",
+        employer="Kokkolan kaupunginkirjasto",
+        description="Tehtävään kuuluu kokoelmien ja kaluston ylläpitoa sekä asiakaspalvelua.",
+        location="Kokkola",
+    )
+
+    result = score_job(profile, job)
+
+    assert result.passes is True
+    assert result.deterministic_result["negative_matches"] == []
+
+
+def test_negative_keywords_remain_substring_matches() -> None:
+    profile = {
+        "negative_keywords": ["myynti"],
+        "role_clusters": [{"titles_fi": ["asiakaspalvelija"], "keywords_fi": ["asiakaspalvelu"]}],
+    }
+    job = JobForScoring(
+        id=4,
+        title="Asiakaspalvelija",
+        employer="Example Oy",
+        description="Tehtävä on aktiivista myyntiä.",
+        location=None,
+    )
+
+    assert score_job(profile, job).deterministic_result["negative_matches"] == ["myynti"]
+
+
+def test_discovery_pool_terms_keeps_phrases_and_learned_queries() -> None:
+    profile = {
+        "role_clusters": [{"titles_fi": ["tiedonhallinnan asiantuntija", "koordinaattori"]}],
+        "preferences": {
+            "application_history_signals": {"boost_titles_fi": ["kirjastovirkailija"]}
+        },
+    }
+
+    terms = discovery_pool_terms(
+        profile,
+        ["kirjastonhoitaja"],
+        learned_queries=["tietoasiantuntija", "kirjastonhoitaja"],
+    )
+
+    assert "tiedonhallinnan asiantuntija" in terms
+    assert "kirjastonhoitaja" in terms
+    assert "tietoasiantuntija" in terms
+    assert "kirjastovirkailija" in terms
+    # A duplicate learned query consumes no second slot.
+    assert terms.count("kirjastonhoitaja") == 1
+
+
+def test_discovery_pool_terms_respects_budget_without_private_logging() -> None:
+    profile = {
+        "role_clusters": [{"titles_fi": [f"nimike{i}" for i in range(50)]}],
+    }
+
+    terms = discovery_pool_terms(profile, ["kirjastonhoitaja"], term_budget=10)
+
+    assert len(terms) == 10
+    assert terms[0] == "kirjastonhoitaja"

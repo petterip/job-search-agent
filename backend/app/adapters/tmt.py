@@ -5,9 +5,12 @@ from dateutil.parser import isoparse
 
 from app.adapters.base import (
     CollectionFetchResult,
+    ensure_aware_utc,
     NormalizedListing,
     USER_AGENT,
     payload_content_hash,
+    source_url_rejection_reason,
+    validated_external_id,
 )
 from app.config import get_settings
 from app.feedback_learning import get_discovery_search_queries
@@ -25,9 +28,12 @@ def tmt_title(title_obj: dict) -> str:
 
 
 def tmt_detail_url(external_id: str) -> str:
+    safe_id = validated_external_id(external_id)
+    if safe_id is None:
+        return ""
     return (
         "https://tyomarkkinatori.fi/henkiloasiakkaat/avoimet-tyopaikat/details/"
-        f"?id={external_id}"
+        f"?id={safe_id}"
     )
 
 
@@ -109,9 +115,16 @@ class TmtAdapter:
         return watermark is not None or max_pages <= 10
 
     async def fetch_detail(self, client: "httpx.AsyncClient", external_id: str) -> dict | None:
-        response = await client.get(
-            f"https://tyomarkkinatori.fi/api/jobposting-new/v1/public/jobpostings/{external_id}"
+        safe_id = validated_external_id(external_id)
+        if safe_id is None:
+            return None
+        detail_url = (
+            "https://tyomarkkinatori.fi/api/jobposting-new/v1/public/jobpostings/"
+            f"{safe_id}"
         )
+        if source_url_rejection_reason(self.source_name, detail_url) is not None:
+            return None
+        response = await client.get(detail_url)
         if response.status_code == 404:
             return None
         response.raise_for_status()
@@ -208,7 +221,7 @@ class TmtAdapter:
     def normalize(self, payload: dict) -> NormalizedListing:
         external_id = str(payload["id"])
         published_raw = payload.get("publishDate") or payload.get("created")
-        published_at = isoparse(published_raw) if published_raw else None
+        published_at = ensure_aware_utc(isoparse(published_raw)) if published_raw else None
         detail_url = tmt_detail_url(external_id)
 
         return NormalizedListing(
