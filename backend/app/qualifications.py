@@ -88,6 +88,50 @@ def phrase_present(phrase: str, text: str | None) -> bool:
     return False
 
 
+NEGATION_MARKERS = (
+    "ei ole vaatimus",
+    "ei vaadita",
+    "ei edellytä",
+    "ei edellytetä",
+    "ei tarvitse",
+    "ei ole pakollinen",
+    "ei kuulu",
+    "not required",
+)
+OPTIONAL_MARKERS = (
+    "eduksi",
+    "toivottava",
+    "toivomme",
+    "arvostamme",
+    "optional",
+    "nice to have",
+    "etuna",
+    "plussaa",
+)
+
+
+def _sentence_around(text: str, phrase: str) -> str:
+    folded = (text or "").casefold()
+    needle = phrase.casefold()
+    index = folded.find(needle)
+    if index < 0:
+        return ""
+    start = max(folded.rfind(mark, 0, index) for mark in (".", "!", "?", "\n")) + 1
+    ends = [pos for pos in (folded.find(mark, index) for mark in (".", "!", "?", "\n")) if pos >= 0]
+    end = min(ends) + 1 if ends else len(text)
+    return text[start:end]
+
+
+def _requirement_softened(text: str, phrase: str) -> bool:
+    """True when the phrase appears in a negated or optional sentence."""
+    sentence = _sentence_around(text, phrase).casefold()
+    if not sentence:
+        return False
+    return any(marker in sentence for marker in NEGATION_MARKERS) or any(
+        marker in sentence for marker in OPTIONAL_MARKERS
+    )
+
+
 @dataclass(frozen=True)
 class QualificationGate:
     hard_reject: bool
@@ -134,17 +178,42 @@ def evaluate_qualification_checks(
         reason = str(raw_config.get("reason") or "").strip()
 
         title_or_phrases = _phrase_list(raw_config, "reject_when_title_or_phrases_present")
-        if title_or_phrases and any(
-            phrase_present(phrase, title) or phrase_present(phrase, haystack)
-            for phrase in title_or_phrases
-        ):
-            reasons.append(str(name))
-            evidence.append(f"{name}: {reason or 'title or required phrase present'}"[:200])
-            continue
+        if title_or_phrases:
+            title_match = next(
+                (phrase for phrase in title_or_phrases if phrase_present(phrase, title)), None
+            )
+            text_match = next(
+                (phrase for phrase in title_or_phrases if phrase_present(phrase, haystack)), None
+            )
+            if title_match is not None:
+                reasons.append(str(name))
+                evidence.append(f"{name}: {title_match}"[:200])
+                continue
+            if text_match is not None:
+                if _requirement_softened(haystack, text_match):
+                    cautions.append(str(name))
+                    evidence.append(f"{name}: negated/optional mention of {text_match}"[:200])
+                else:
+                    reasons.append(str(name))
+                    evidence.append(f"{name}: {text_match}"[:200])
+                continue
 
         reject_phrases = _phrase_list(raw_config, "reject_when_phrases_present")
         if reject_phrases:
-            matched = [phrase for phrase in reject_phrases if phrase_present(phrase, haystack)]
+            matched = [
+                phrase
+                for phrase in reject_phrases
+                if phrase_present(phrase, haystack) and not _requirement_softened(haystack, phrase)
+            ]
+            softened = [
+                phrase
+                for phrase in reject_phrases
+                if phrase_present(phrase, haystack) and _requirement_softened(haystack, phrase)
+            ]
+            if not matched and softened:
+                cautions.append(str(name))
+                evidence.append(f"{name}: negated/optional mention of {softened[0]}"[:200])
+                continue
             if matched:
                 adjacent = _phrase_list(raw_config, "adjacent_roles_that_can_pass")
                 if adjacent and any(phrase_present(role, title) for role in adjacent):

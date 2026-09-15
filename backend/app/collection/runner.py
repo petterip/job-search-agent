@@ -574,71 +574,76 @@ def upsert_listing(
                 "last_content_hash": listing.content_hash,
             },
         ).scalar_one()
-        if listing.description and listing.description.strip():
-            if result == "inserted":
-                record_source_provenance(
-                    connection,
-                    job_id=int(job_id),
-                    job_source_id=int(inserted_job_source_id),
-                )
-            elif job_id is not None:
+        effective_description: str | None = None
+        if result == "inserted" and listing.description and listing.description.strip():
+            record_source_provenance(
+                connection,
+                job_id=int(job_id),
+                job_source_id=int(inserted_job_source_id),
+            )
+        elif result != "inserted" and job_id is not None:
+            if listing.description and listing.description.strip():
                 effective_description = preserve_enriched_description_on_upsert(
                     connection,
                     job_id=int(job_id),
                     source_description=listing.description,
                     job_source_id=int(inserted_job_source_id),
                 )
-                current = connection.execute(
-                    sa.text("select title, employer, location from jobs where id = :job_id"),
-                    {"job_id": job_id},
-                ).mappings().one()
-                effective_title = canonical_field(current["title"], listing.title)
-                effective_employer = canonical_field(current["employer"], listing.employer)
-                effective_location = canonical_field(current["location"], listing.location)
-                if (
-                    effective_description is not None
-                    or effective_title != current["title"]
-                    or effective_employer != current["employer"]
-                    or effective_location != current["location"]
-                ):
-                    record_source_provenance(
-                        connection,
-                        job_id=int(job_id),
-                        job_source_id=int(inserted_job_source_id),
-                    )
-                connection.execute(
-                    sa.text(
-                        """
-                        update jobs
-                        set title = coalesce(:title, jobs.title),
-                            employer = coalesce(:employer, jobs.employer),
-                            description = coalesce(:effective_description, jobs.description),
-                            location = coalesce(:location, jobs.location),
-                            expires_at = case
-                                when :expires_at is not null
-                                 and (jobs.expires_at is null or :expires_at > jobs.expires_at)
-                                then :expires_at
-                                else jobs.expires_at
-                            end,
-                            updated_at = case
-                                when jobs.title is distinct from coalesce(:title, jobs.title) then now()
-                                when jobs.employer is distinct from coalesce(:employer, jobs.employer) then now()
-                                when jobs.description is null and :effective_description is not null then now()
-                                when jobs.location is distinct from coalesce(:location, jobs.location) then now()
-                                else jobs.updated_at
-                            end
-                        where id = :job_id
-                        """
-                    ),
-                    {
-                        "job_id": job_id,
-                        "title": effective_title,
-                        "employer": effective_employer,
-                        "effective_description": effective_description,
-                        "location": effective_location,
-                        "expires_at": listing.expires_at,
-                    },
+            # Canonical fields (including the source deadline) are refreshed even
+            # when this occurrence has no description of its own.
+            current = connection.execute(
+                sa.text("select title, employer, location from jobs where id = :job_id"),
+                {"job_id": job_id},
+            ).mappings().one()
+            effective_title = canonical_field(current["title"], listing.title)
+            effective_employer = canonical_field(current["employer"], listing.employer)
+            effective_location = canonical_field(current["location"], listing.location)
+            if (
+                effective_description is not None
+                or effective_title != current["title"]
+                or effective_employer != current["employer"]
+                or effective_location != current["location"]
+            ):
+                record_source_provenance(
+                    connection,
+                    job_id=int(job_id),
+                    job_source_id=int(inserted_job_source_id),
                 )
+            connection.execute(
+                sa.text(
+                    """
+                    update jobs
+                    set title = coalesce(:title, jobs.title),
+                        employer = coalesce(:employer, jobs.employer),
+                        description = coalesce(:effective_description, jobs.description),
+                        location = coalesce(:location, jobs.location),
+                        expires_at = case
+                            when :expires_at is not null
+                             and (jobs.expires_at is null or :expires_at > jobs.expires_at)
+                            then :expires_at
+                            else jobs.expires_at
+                        end,
+                        updated_at = case
+                            when jobs.title is distinct from coalesce(:title, jobs.title) then now()
+                            when jobs.employer is distinct from coalesce(:employer, jobs.employer) then now()
+                            when jobs.description is null and :effective_description is not null then now()
+                            when jobs.location is distinct from coalesce(:location, jobs.location) then now()
+                            when :expires_at is not null
+                             and (jobs.expires_at is null or :expires_at > jobs.expires_at) then now()
+                            else jobs.updated_at
+                        end
+                    where id = :job_id
+                    """
+                ),
+                {
+                    "job_id": job_id,
+                    "title": effective_title,
+                    "employer": effective_employer,
+                    "effective_description": effective_description,
+                    "location": effective_location,
+                    "expires_at": listing.expires_at,
+                },
+            )
         return result
 
     if existing_hash == listing.content_hash:
@@ -1050,21 +1055,9 @@ async def run_source_collection(
                 scan_drained = True
                 if resumable_scan:
                     settings_for_scan = get_settings()
-                    scan_entries = [
-                        SitemapEntry(
-                            external_id=str(external_id),
-                            canonical_url=str(url),
-                            lastmod=lastmod,
-                        )
-                        for external_id, url, lastmod in fetch_result.scan_entries
-                    ]
-                    counts["scan_sync"] = sync_sitemap_entries(
-                        connection,
-                        source_id=source_id,
-                        entries=scan_entries,
-                    )
                     closed_ids: list[str] = []
                     reopened_ids: list[str] = []
+                    # Fetch outcomes for the claimed batch are always durable.
                     for external_id, _url, _lastmod in pending_entries or []:
                         external_id = str(external_id)
                         state = mark_scan_outcome(
@@ -1081,16 +1074,42 @@ async def run_source_collection(
                             closed_ids.append(external_id)
                         elif state == SCAN_STATE_CLASSIFIED:
                             reopened_ids.append(external_id)
+
+                    # Only a validated, complete sitemap may establish absence.
+                    if fetch_result.scan_frontier_complete:
+                        scan_entries = [
+                            SitemapEntry(
+                                external_id=str(external_id),
+                                canonical_url=str(url),
+                                lastmod=lastmod,
+                            )
+                            for external_id, url, lastmod in fetch_result.scan_entries
+                        ]
+                        counts["scan_sync"] = sync_sitemap_entries(
+                            connection,
+                            source_id=source_id,
+                            entries=scan_entries,
+                        )
+                        absent_closed = close_absent_members(
+                            connection,
+                            source_id=source_id,
+                            grace_hours=settings_for_scan.jobly_scan_grace_hours,
+                        )
+                        counts["scan_closed_absent"] = len(absent_closed)
+                        closed_ids.extend(absent_closed)
+                    else:
+                        counts["scan_closed_absent"] = 0
+                        logger.warning(
+                            "event=source_scan_frontier_incomplete source=%s warnings=%s",
+                            adapter.source_name,
+                            fetch_result.warnings,
+                        )
+
                     counts["scan_removed_jobs"] = apply_scan_closure(
                         connection, source_id=source_id, closed_external_ids=closed_ids
                     )
                     counts["scan_reopened_jobs"] = reopen_scan_members(
                         connection, source_id=source_id, reopened_external_ids=reopened_ids
-                    )
-                    counts["scan_closed_absent"] = close_absent_members(
-                        connection,
-                        source_id=source_id,
-                        grace_hours=settings_for_scan.jobly_scan_grace_hours,
                     )
                     scan_drained = frontier_drained(connection, source_id=source_id)
                     counts["scan_backlog"] = scan_backlog_report(

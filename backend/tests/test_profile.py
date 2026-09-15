@@ -135,3 +135,50 @@ def test_base_revision_ignores_learned_state_but_tracks_base_edits() -> None:
 
     assert profile_base_revision(base) == profile_base_revision(with_learned)
     assert profile_base_revision(base) != profile_base_revision(edited)
+
+
+def test_validate_profile_document_rejects_bad_qualification_checks() -> None:
+    from app.profile import ProfileValidationError, validate_profile_document
+
+    with pytest.raises(ProfileValidationError, match="qualification_checks"):
+        validate_profile_document(
+            _importable_profile(exclusions={"qualification_checks": ["not-a-mapping"]})
+        )
+    with pytest.raises(ProfileValidationError, match="reject_when_phrases_present"):
+        validate_profile_document(
+            _importable_profile(
+                exclusions={
+                    "qualification_checks": {
+                        "x": {"reject_when_phrases_present": "not-a-list"}
+                    }
+                }
+            )
+        )
+
+
+def test_validate_profile_document_rejects_unknown_language_filter() -> None:
+    from app.profile import ProfileValidationError, validate_profile_document
+
+    with pytest.raises(ProfileValidationError, match="hard_filter"):
+        validate_profile_document(
+            _importable_profile(
+                languages=[{"code": "de", "hard_filter": "reject_everything"}]
+            )
+        )
+
+
+def test_validate_profile_document_accepts_supported_language_filters() -> None:
+    from app.profile import validate_profile_document
+
+    assert validate_profile_document(
+        _importable_profile(
+            languages=[
+                {"code": "fi", "hard_filter": "pass"},
+                {"code": "de", "hard_filter": "reject_if_required"},
+                {
+                    "code": "en",
+                    "hard_filter": "reject_if_required_level_above_B2_or_native",
+                },
+            ]
+        )
+    ) == []

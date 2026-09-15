@@ -97,3 +97,14 @@ def test_unrelated_role_passes_all_checks() -> None:
 
     assert gate.hard_reject is False
     assert gate.cautions == ()
+
+
+def test_negated_required_phrase_is_only_a_caution() -> None:
+    gate = evaluate_qualification_checks(
+        PROFILE,
+        title="Kuljettaja",
+        text="CE-ajokortti ei ole vaatimus tähän tehtävään.",
+    )
+
+    assert gate.hard_reject is False
+    assert "kirjastoautonkuljettaja" in gate.cautions

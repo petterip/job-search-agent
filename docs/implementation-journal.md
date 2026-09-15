@@ -385,11 +385,48 @@ action was run.
   budget; `LLM_REQUIREMENT_AWARE_EXCERPT` (default `false`) selects it, so
   current evaluation identities are preserved until the change is measured.
 
+### coWork review round 2 (Astra Low) and fixes (2026-09-16)
+
+A second independent Astra-Low review covered the diff `0be1fad..HEAD`
+(rounds 2–6). Verdict: `CHANGES_REQUESTED`; all findings were verified against
+source and fixed:
+
+- **Regression (blocker):** the pre-remote-call commits ran inside
+  `engine.begin()` and would raise "Can't operate on closed transaction inside
+  context manager". `run_matching` now uses a plain connection with an explicit
+  final commit, so the commits are legal and the final write transaction still
+  commits.
+- **Scan reopen/revalidation:** a `closed` member that reappears, a member that
+  was absent, or a member whose `lastmod` changes now returns to `pending` so it
+  is claimed and re-fetched again; unchanged classified members keep their state.
+- **Absence closure integration:** `close_absent_members` now returns the
+  confirmed-closed external ids and the runner applies occurrence closure for
+  them, so a listing absent beyond grace actually hides its occurrence.
+- **Completeness guard:** absence is reconciled only when the sitemap frontier is
+  validated complete (`scan_frontier_complete`); a non-XML/error page is no
+  longer parsed as an empty frontier.
+- **Closure accounting:** `missing_attempts` is tracked separately (migration
+  `20260916_0024`), so parse/transport failures no longer shorten the 404
+  confirmation grace.
+- **Date-only deadlines:** interpreted as inclusive through the end of the
+  Helsinki calendar day (21:00Z in summer, 22:00Z in winter) instead of midnight.
+- **Dedupe deadline:** canonical field/deadline refresh now runs even when the
+  new occurrence has no description.
+- **Closed occurrences:** excluded from the `/jobs?source=` filter, all four
+  retrieval pools and the backlog inventory (the structural predicate already
+  excluded them).
+- **Negated qualifications:** a requirement phrase in a negated or optional
+  sentence becomes a caution instead of a hard rejection.
+- **Country mentions:** a bare country/adjective mention (for example "Saksan
+  markkinan tuntemus") is no longer read as a language requirement.
+- **Profile validation:** `qualification_checks` shapes and language
+  `hard_filter` values are validated on import.
+
 ### Verification commands
 
 ```bash
 cd backend
-python -m pytest --timeout=10 -q                       # 421 passed, 38 skipped
+python -m pytest --timeout=10 -q                       # 427 passed, 41 skipped
 TEST_DATABASE_URL=postgresql+psycopg://... python -m pytest --timeout=30 -q  # 451 passed
 cd ../web && npm run typecheck && npm run build
 ```

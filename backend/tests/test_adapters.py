@@ -763,3 +763,18 @@ def test_jobly_normalize_carries_valid_through_deadline() -> None:
 
     assert listing.expires_at is not None
     assert listing.expires_at.year == 2026 and listing.expires_at.month == 10
+
+
+def test_extract_deadline_date_only_is_inclusive_helsinki_end_of_day() -> None:
+    from datetime import datetime, timezone
+
+    from app.adapters.base import extract_deadline
+
+    # 2026-09-16 in Helsinki (UTC+3) ends at 2026-09-16T21:00Z.
+    assert extract_deadline({"validThrough": "2026-09-16"}) == datetime(
+        2026, 9, 16, 21, 0, tzinfo=timezone.utc
+    )
+    # Winter (UTC+2): 2026-01-15 ends at 2026-01-15T22:00Z.
+    assert extract_deadline({"validThrough": "2026-01-15"}) == datetime(
+        2026, 1, 15, 22, 0, tzinfo=timezone.utc
+    )

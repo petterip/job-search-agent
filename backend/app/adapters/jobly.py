@@ -164,6 +164,7 @@ class JoblyAdapter:
         effective_max_urls = max_urls or self.max_urls
         resumable = pending_entries is not None
         merged: dict[str, tuple[str, datetime | None]] = {}
+        sitemap_complete = True
 
         async with httpx.AsyncClient(
             timeout=60,
@@ -179,9 +180,13 @@ class JoblyAdapter:
                         reason=sitemap_reason,
                         value=sitemap_url,
                     )
+                    sitemap_complete = False
                     continue
                 response = await client.get(sitemap_url)
                 response.raise_for_status()
+                if "<urlset" not in response.text:
+                    # An HTML error page must not be read as an empty frontier.
+                    sitemap_complete = False
                 for url, lastmod in parse_sitemap_urls(response.text, watermark=None):
                     external_id = validated_external_id(jobly_external_id(url))
                     if not external_id:
@@ -276,6 +281,7 @@ class JoblyAdapter:
             warnings=warnings,
             scan_entries=scan_entries,
             scan_outcomes=outcomes,
+            scan_frontier_complete=sitemap_complete,
         )
 
     def normalize(self, payload: dict, *, source_url: str) -> NormalizedListing:

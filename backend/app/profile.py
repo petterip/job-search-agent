@@ -148,6 +148,53 @@ def validate_profile_document(profile: dict[str, Any]) -> list[str]:
         for index, language in enumerate(languages):
             if "code" in language and not isinstance(language["code"], str):
                 raise ProfileValidationError(f"profile.languages[{index}].code must be a string")
+    supported_language_filters = {
+        "pass",
+        "reject_if_required",
+        "reject_if_required_level_above_B2_or_native",
+    }
+    languages = profile.get("languages")
+    if isinstance(languages, list):
+        for index, language in enumerate(languages):
+            if not isinstance(language, dict):
+                continue
+            hard_filter = language.get("hard_filter")
+            if hard_filter is not None and str(hard_filter) not in supported_language_filters:
+                raise ProfileValidationError(
+                    f"profile.languages[{index}].hard_filter is unsupported: {hard_filter!r}"
+                )
+    exclusions_for_checks = profile.get("exclusions") or {}
+    if isinstance(exclusions_for_checks, dict):
+        checks = exclusions_for_checks.get("qualification_checks")
+        if checks is not None:
+            if not isinstance(checks, dict):
+                raise ProfileValidationError(
+                    "profile.exclusions.qualification_checks must be a mapping"
+                )
+            for check_name, check_config in checks.items():
+                if not isinstance(check_config, dict):
+                    raise ProfileValidationError(
+                        f"profile.exclusions.qualification_checks.{check_name} must be a mapping"
+                    )
+                for key, value in check_config.items():
+                    if key == "do_not_title_reject":
+                        if not isinstance(value, bool):
+                            raise ProfileValidationError(
+                                f"profile.exclusions.qualification_checks.{check_name}.{key} must be a boolean"
+                            )
+                        continue
+                    if key == "reason":
+                        if not isinstance(value, str):
+                            raise ProfileValidationError(
+                                f"profile.exclusions.qualification_checks.{check_name}.reason must be a string"
+                            )
+                        continue
+                    if not isinstance(value, list) or not all(
+                        isinstance(item, str) for item in value
+                    ):
+                        raise ProfileValidationError(
+                            f"profile.exclusions.qualification_checks.{check_name}.{key} must be a list of strings"
+                        )
     guidance = profile.get("llm_guidance") or {}
     if isinstance(guidance, dict):
         rules = guidance.get("profile_rules")

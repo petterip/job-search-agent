@@ -73,3 +73,10 @@ def test_language_mere_mention_is_not_a_requirement() -> None:
 
     assert gate.failed is False
     assert gate.requires_review is False
+
+
+def test_country_mention_is_not_a_language_requirement() -> None:
+    gate = _gate("Edellytämme Saksan markkinan tuntemusta ja myyntikokemusta.")
+
+    assert gate.failed is False
+    assert gate.requires_review is False

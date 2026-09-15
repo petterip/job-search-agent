@@ -96,6 +96,24 @@ def sync_sitemap_entries(
                     canonical_url = excluded.canonical_url,
                     lastmod = excluded.lastmod,
                     sitemap_present = true,
+                    state = case
+                        when source_scan_members.state = 'closed' then 'pending'
+                        when source_scan_members.sitemap_present = false then 'pending'
+                        when excluded.lastmod is not null
+                         and excluded.lastmod is distinct from source_scan_members.lastmod
+                        then 'pending'
+                        else source_scan_members.state
+                    end,
+                    next_attempt_at = case
+                        when source_scan_members.state = 'closed'
+                          or source_scan_members.sitemap_present = false
+                          or (
+                              excluded.lastmod is not null
+                              and excluded.lastmod is distinct from source_scan_members.lastmod
+                          )
+                        then null
+                        else source_scan_members.next_attempt_at
+                    end,
                     updated_at = :now
                 """
             ),
@@ -215,27 +233,33 @@ def mark_scan_outcome(
     row = connection.execute(
         sa.text(
             """
-            select attempts from source_scan_members
+            select attempts, missing_attempts from source_scan_members
             where source_id = :source_id and external_id = :external_id
             """
         ),
         {"source_id": source_id, "external_id": external_id},
-    ).scalar_one_or_none()
+    ).mappings().one_or_none()
     if row is None:
         return SCAN_STATE_PENDING
-    attempts = int(row) + 1
+    attempts = int(row["attempts"]) + 1
+    missing_attempts = int(row["missing_attempts"] or 0)
     if outcome == OUTCOME_CLASSIFIED:
         state = SCAN_STATE_CLASSIFIED
         next_attempt_at = None
         error = None
-    elif outcome == OUTCOME_MISSING and attempts >= closure_attempts:
-        state = SCAN_STATE_CLOSED
-        next_attempt_at = None
-        error = "missing_confirmed"
+        missing_attempts = 0
     elif outcome == OUTCOME_MISSING:
-        state = SCAN_STATE_RETRY
-        next_attempt_at = moment + timedelta(minutes=retry_delay_minutes)
-        error = "missing_retry"
+        # Only consecutive 404 confirmations count toward closure; parse and
+        # transport failures must not shorten the grace period.
+        missing_attempts += 1
+        if missing_attempts >= closure_attempts:
+            state = SCAN_STATE_CLOSED
+            next_attempt_at = None
+            error = "missing_confirmed"
+        else:
+            state = SCAN_STATE_RETRY
+            next_attempt_at = moment + timedelta(minutes=retry_delay_minutes)
+            error = "missing_retry"
     else:
         # Parse/schema failure is never closure evidence.
         state = SCAN_STATE_RETRY
@@ -247,6 +271,7 @@ def mark_scan_outcome(
             update source_scan_members
             set state = :state,
                 attempts = :attempts,
+                missing_attempts = :missing_attempts,
                 last_error = :error,
                 next_attempt_at = :next_attempt_at,
                 updated_at = :now
@@ -258,6 +283,7 @@ def mark_scan_outcome(
             "external_id": external_id,
             "state": state,
             "attempts": attempts,
+            "missing_attempts": missing_attempts,
             "error": error,
             "next_attempt_at": next_attempt_at,
             "now": moment,
@@ -277,8 +303,9 @@ def close_absent_members(
     """Close members absent from the sitemap beyond the source grace period."""
     moment = now or datetime.now(timezone.utc)
     cutoff = moment - timedelta(hours=grace_hours)
-    closed = int(
-        connection.execute(
+    closed_ids = [
+        str(row[0])
+        for row in connection.execute(
             sa.text(
                 """
                 update source_scan_members
@@ -290,14 +317,14 @@ def close_absent_members(
                   and sitemap_present = false
                   and state <> 'closed'
                   and updated_at <= :cutoff
+                returning external_id
                 """
             ),
             {"source_id": source_id, "now": moment, "cutoff": cutoff},
-        ).rowcount
-        or 0
-    )
+        )
+    ]
     _refresh_progress(connection, source_id=source_id, now=moment)
-    return closed
+    return closed_ids
 
 
 def _refresh_progress(connection: Connection, *, source_id: int, now: datetime) -> None:

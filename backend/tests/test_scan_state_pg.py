@@ -198,19 +198,21 @@ def test_parse_invalid_never_closes(pg_engine: Any) -> None:
     assert state == SCAN_STATE_RETRY
 
 
-def test_classified_member_stays_classified_on_resync(pg_engine: Any) -> None:
+def test_classified_member_survives_unchanged_resync(pg_engine: Any) -> None:
     now = datetime(2026, 9, 16, 12, 0, tzinfo=timezone.utc)
     with pg_engine.begin() as connection:
         source_id = _source(connection)
-        sync_sitemap_entries(connection, source_id=source_id, entries=[_entry("1")], now=now)
+        sync_sitemap_entries(
+            connection, source_id=source_id, entries=[_entry("1", lastmod=now)], now=now
+        )
         mark_scan_outcome(
             connection, source_id=source_id, external_id="1", outcome=OUTCOME_CLASSIFIED, now=now
         )
-        # A corrected lastmod and url refresh evidence without resetting state.
+        # An unchanged sitemap entry keeps the classified state.
         sync_sitemap_entries(
             connection,
             source_id=source_id,
-            entries=[_entry("1", lastmod=now - timedelta(days=1))],
+            entries=[_entry("1", lastmod=now)],
             now=now + timedelta(hours=1),
         )
         state = connection.execute(
@@ -244,8 +246,8 @@ def test_absent_members_close_only_after_grace(pg_engine: Any) -> None:
             connection, source_id=source_id, grace_hours=24, now=now + timedelta(hours=30)
         )
 
-    assert closed_early == 0
-    assert closed_late == 1
+    assert closed_early == []
+    assert closed_late == ["gone"]
 
 
 def test_backlog_report_reports_age_and_counts_independent_of_cap(pg_engine: Any) -> None:
@@ -374,3 +376,117 @@ def test_closure_removes_only_when_no_live_occurrence_remains(pg_engine: Any) ->
     assert status_all_closed == "removed"
     assert reopened == 1
     assert status_reopened == "active"
+
+
+def test_reappearing_closed_member_is_reopened_for_claim(pg_engine: Any) -> None:
+    from app.collection.scan_state import (
+        OUTCOME_CLASSIFIED,
+        OUTCOME_MISSING,
+        claim_scan_batch,
+        mark_scan_outcome,
+        sync_sitemap_entries,
+    )
+
+    now = datetime(2026, 9, 16, 12, 0, tzinfo=timezone.utc)
+    with pg_engine.begin() as connection:
+        source_id = _source(connection)
+        sync_sitemap_entries(connection, source_id=source_id, entries=[_entry("reopen")], now=now)
+        for attempt in range(3):
+            mark_scan_outcome(
+                connection,
+                source_id=source_id,
+                external_id="reopen",
+                outcome=OUTCOME_MISSING,
+                now=now + timedelta(hours=attempt),
+                closure_attempts=3,
+            )
+        closed_state = connection.execute(
+            sa.text("select state from source_scan_members where source_id = :s and external_id = 'reopen'"),
+            {"s": source_id},
+        ).scalar_one()
+
+        # The sitemap lists it again: it must become claimable once more.
+        sync_sitemap_entries(
+            connection,
+            source_id=source_id,
+            entries=[_entry("reopen", lastmod=now)],
+            now=now + timedelta(hours=5),
+        )
+        batch = claim_scan_batch(connection, source_id=source_id, limit=5, now=now + timedelta(hours=5))
+        claimed = [member.external_id for member in batch]
+        mark_scan_outcome(
+            connection,
+            source_id=source_id,
+            external_id="reopen",
+            outcome=OUTCOME_CLASSIFIED,
+            now=now + timedelta(hours=5),
+        )
+        final_state = connection.execute(
+            sa.text("select state from source_scan_members where source_id = :s and external_id = 'reopen'"),
+            {"s": source_id},
+        ).scalar_one()
+
+    assert closed_state == "closed"
+    assert claimed == ["reopen"]
+    assert final_state == "classified"
+
+
+def test_corrected_lastmod_schedules_revalidation(pg_engine: Any) -> None:
+    from app.collection.scan_state import OUTCOME_CLASSIFIED, mark_scan_outcome, sync_sitemap_entries
+
+    now = datetime(2026, 9, 16, 12, 0, tzinfo=timezone.utc)
+    with pg_engine.begin() as connection:
+        source_id = _source(connection)
+        sync_sitemap_entries(
+            connection, source_id=source_id, entries=[_entry("x", lastmod=now)], now=now
+        )
+        mark_scan_outcome(
+            connection, source_id=source_id, external_id="x", outcome=OUTCOME_CLASSIFIED, now=now
+        )
+        sync_sitemap_entries(
+            connection,
+            source_id=source_id,
+            entries=[_entry("x", lastmod=now + timedelta(days=2))],
+            now=now + timedelta(hours=1),
+        )
+        state = connection.execute(
+            sa.text("select state from source_scan_members where source_id = :s and external_id = 'x'"),
+            {"s": source_id},
+        ).scalar_one()
+
+    assert state == "pending"
+
+
+def test_parse_failure_does_not_shorten_closure(pg_engine: Any) -> None:
+    from app.collection.scan_state import (
+        OUTCOME_INVALID,
+        OUTCOME_MISSING,
+        SCAN_STATE_CLOSED,
+        SCAN_STATE_RETRY,
+        mark_scan_outcome,
+        sync_sitemap_entries,
+    )
+
+    now = datetime(2026, 9, 16, 12, 0, tzinfo=timezone.utc)
+    with pg_engine.begin() as connection:
+        source_id = _source(connection)
+        sync_sitemap_entries(connection, source_id=source_id, entries=[_entry("mix")], now=now)
+        mark_scan_outcome(
+            connection, source_id=source_id, external_id="mix", outcome=OUTCOME_INVALID, now=now,
+            closure_attempts=2,
+        )
+        mark_scan_outcome(
+            connection, source_id=source_id, external_id="mix", outcome=OUTCOME_INVALID,
+            now=now + timedelta(hours=1), closure_attempts=2,
+        )
+        after_one_missing = mark_scan_outcome(
+            connection, source_id=source_id, external_id="mix", outcome=OUTCOME_MISSING,
+            now=now + timedelta(hours=2), closure_attempts=2,
+        )
+        after_second_missing = mark_scan_outcome(
+            connection, source_id=source_id, external_id="mix", outcome=OUTCOME_MISSING,
+            now=now + timedelta(hours=3), closure_attempts=2,
+        )
+
+    assert after_one_missing == SCAN_STATE_RETRY
+    assert after_second_missing == SCAN_STATE_CLOSED

@@ -1,6 +1,7 @@
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import date, datetime, time, timedelta, timezone
+from zoneinfo import ZoneInfo
 from hashlib import sha256
 import ipaddress
 import json
@@ -318,6 +319,9 @@ class CollectionFetchResult:
     # of each claimed member ("classified" | "missing" | "invalid").
     scan_entries: list[tuple[str, str, datetime | None]] = field(default_factory=list)
     scan_outcomes: dict[str, str] = field(default_factory=dict)
+    # True only when every sitemap page was fetched and parsed; absence may not
+    # be established from an incomplete frontier.
+    scan_frontier_complete: bool = False
 
     @property
     def complete(self) -> bool:
@@ -357,8 +361,18 @@ def extract_deadline(payload: object) -> datetime | None:
             value = container.get(key)
             if not isinstance(value, str) or not value.strip():
                 continue
+            text = value.strip()
+            # A date-only deadline is inclusive through the end of that Helsinki
+            # calendar day; storing midnight would reject applications early.
+            if len(text) == 10 and text[4] == "-" and text[7] == "-":
+                try:
+                    day = date.fromisoformat(text)
+                except ValueError:
+                    continue
+                end_of_day = datetime.combine(day, time.min, tzinfo=ZoneInfo("Europe/Helsinki"))
+                return (end_of_day + timedelta(days=1)).astimezone(timezone.utc)
             try:
-                parsed = isoparse(value.strip())
+                parsed = isoparse(text)
             except (ValueError, OverflowError):
                 continue
             return ensure_aware_utc(parsed)

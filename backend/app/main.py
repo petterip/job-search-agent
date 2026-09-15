@@ -725,6 +725,7 @@ def build_jobs_where_clause(
                 join sources filter_s on filter_s.id = filter_js.source_id
                 where filter_js.job_id = j.id
                   and filter_s.enabled = true
+                  and filter_js.closed_at is null
                   and filter_s.name = :source
             )
             """

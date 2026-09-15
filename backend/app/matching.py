@@ -939,6 +939,7 @@ def fetch_active_job_rows(
               join sources s on s.id = js.source_id
               where js.job_id = jobs.id
                 and s.enabled = true
+                and js.closed_at is null
           )
         order by published_at desc nulls last, id desc
         limit :max_jobs
@@ -969,6 +970,7 @@ def fetch_active_job_rows(
                   join sources s on s.id = js.source_id
                   where js.job_id = jobs.id
                     and s.enabled = true
+                    and js.closed_at is null
               )
               and ({' or '.join(clauses)})
             order by published_at desc nulls last, id desc
@@ -993,6 +995,7 @@ def fetch_active_job_rows(
                   join sources s on s.id = js.source_id
                   where js.job_id = jobs.id
                     and s.enabled = true
+                    and js.closed_at is null
               )
               and (
                   coalesce(location, '') ~* '(^|[[:space:],/])etä([[:space:],/]|$)'
@@ -1041,6 +1044,7 @@ def fetch_active_job_rows(
                   join sources s on s.id = js.source_id
                   where js.job_id = jobs.id
                     and s.enabled = true
+                    and js.closed_at is null
               )
               and ({' or '.join(clauses)})
             order by published_at desc nulls last, id desc
@@ -2480,6 +2484,7 @@ def inventory_review_backlog(
                       join sources s on s.id = js.source_id
                       where js.job_id = j.id
                         and s.enabled = true
+                        and js.closed_at is null
                   )
                   and not exists (
                       select 1
@@ -2625,13 +2630,17 @@ def run_matching(max_jobs: int = 500) -> dict[str, int]:
     provider = build_evaluation_provider(settings) if hosted_allowed else None
     mode = resolve_publication_mode(settings, hosted_allowed=hosted_allowed, provider=provider)
     as_of = capture_as_of()
-    with engine.begin() as connection:
+    # A plain connection (not engine.begin()) so the embedding/transit phases can
+    # commit before their remote calls; the final write transaction is committed
+    # explicitly here.
+    with engine.connect() as connection:
         result = run_deterministic_recommendations(
             connection,
             max_jobs=max_jobs,
             hosted_calls_allowed=hosted_allowed,
             publication_mode=mode,
         )
+        connection.commit()
     profile_id = int(result.get("profile_id") or 0)
     result["publication_mode"] = mode
     structure_predicate = "true"

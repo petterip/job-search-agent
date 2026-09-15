@@ -64,6 +64,19 @@ EXCELLENT_MARKERS = ("erinoma", "excellent", "täydellis")
 # Levels at or below the supported B2 that satisfy an "above B2" gate.
 AT_OR_BELOW_B2_MARKERS = ("sujuv", "fluent", "hyvä", "hyvin", "tyydyttävä", "perus", "b1", "b2")
 
+LANGUAGE_CONTEXT_MARKERS = (
+    "kiel",
+    "taito",
+    "osaaminen",
+    "osaa",
+    "puhu",
+    "fluent",
+    "language",
+    "proficien",
+    "äidinkiel",
+    "sujuv",
+)
+
 SENTENCE_SPLIT = re.compile(r"[.!?\n;]+")
 
 
@@ -90,8 +103,15 @@ def _sentences(text: str) -> list[str]:
 
 
 def _mentions(sentence: str, language: str) -> bool:
+    """True only when the sentence ties the language to a language skill.
+
+    A bare country/adjective mention ("Saksan markkinan tuntemus") must not read
+    as a German-language requirement.
+    """
     folded = sentence.casefold()
-    return any(name in folded for name in LANGUAGE_NAMES.get(language, ()))
+    if not any(name in folded for name in LANGUAGE_NAMES.get(language, ())):
+        return False
+    return any(marker in folded for marker in LANGUAGE_CONTEXT_MARKERS)
 
 
 def _is_negated(sentence: str) -> bool:
