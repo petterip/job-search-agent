@@ -1243,3 +1243,52 @@ def test_concurrent_evaluation_stops_dispatch_on_provider_outage(
         ).scalar_one()
     assert evaluated == 0
     assert result["llm_evaluated"] == 0
+
+
+def test_concurrent_evaluation_defers_rate_limited_candidates(
+    pg_engine: Any,
+) -> None:
+    import threading
+
+    from app.llm import EvaluationProviderRateLimited
+    from app.matching import run_llm_evaluations_concurrent
+
+    with pg_engine.begin() as connection:
+        profile_id = seed_profile(connection)
+        source_id = seed_source(connection, name="enabled", enabled=True)
+        for _index in range(6):
+            job_id = seed_job(connection, source_id=source_id)
+            seed_recommendation(connection, job_id=job_id, profile_id=profile_id)
+
+    class RateLimitedProvider:
+        provider_name = "openai"
+
+        def __init__(self) -> None:
+            self.calls = 0
+            self.lock = threading.Lock()
+
+        def evaluate_job_fit(self, **_kwargs):
+            with self.lock:
+                self.calls += 1
+            raise EvaluationProviderRateLimited("slow down")
+
+    provider = RateLimitedProvider()
+    result = run_llm_evaluations_concurrent(
+        pg_engine,
+        provider=provider,  # type: ignore[arg-type]
+        max_jobs=6,
+        concurrency=2,
+    )
+
+    # Throttling defers work instead of recording failures, stops dispatch and
+    # writes no evaluation.
+    assert result["llm_failed"] == 0
+    assert result["llm_deferred"] >= 1
+    assert provider.calls <= 2
+    with pg_engine.connect() as connection:
+        evaluated = connection.execute(
+            sa.text(
+                "select count(*) from recommendations where llm_evaluation_id is not null"
+            )
+        ).scalar_one()
+    assert evaluated == 0

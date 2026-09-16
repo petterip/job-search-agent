@@ -562,6 +562,17 @@ source and fixed:
   and raises `PaidBudgetExhausted`, so a parse retry can no longer push a run
   above its declared aggregate budget; both evaluation paths treat that as
   `deferred`.
+- **P0-3 first authorized execution (2026-09-16).** `python -m app.match
+  --allow-paid-backfill --max-paid-calls 200` on production: status `executed`,
+  concurrency 4, 129 evaluated, 71 failed and 6,270 deferred within the 200-call
+  budget, stale backlog 18,457 -> 18,328, cohort hash
+  `802d4a4d…` -> `f6dffbb3…`, ~6 minutes. All 71 failures were provider
+  throttling (HTTP 429 after the client's own retries) rather than data or
+  schema errors, so a second fix followed: OpenAI/Gemini 429 responses now raise
+  `EvaluationProviderRateLimited`, which stops dispatch for the run, defers the
+  remaining candidates and does **not** persist the long provider cooldown that
+  quota/outage failures justify. No paid work is silently lost: deferred
+  candidates return to the same request-hash backlog and the next run resumes.
 - **P2-4 startup validation and smoke check.** `Settings.llm_config_problems()`
   reports unsupported provider, missing key, empty model and invalid concurrency
   /retry/max-jobs/timeout values without exposing secrets; `/health` returns them

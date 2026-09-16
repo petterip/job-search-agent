@@ -668,3 +668,45 @@ def test_settings_expose_evaluation_concurrency_and_parse_retries() -> None:
     assert settings.llm_eval_concurrency >= 1
     assert settings.llm_eval_parse_retries >= 0
     assert settings.llm_requirement_aware_excerpt is False
+
+
+def test_openai_provider_maps_rate_limit_without_a_long_cooldown() -> None:
+    import pytest
+
+    from app.llm import (
+        EvaluationProviderRateLimited,
+        EvaluationProviderUnavailable,
+        OpenAIEvaluationProvider,
+    )
+
+    class RateLimited(Exception):
+        status_code = 429
+        body = {"code": "rate_limit_exceeded"}
+
+    class Responses:
+        @staticmethod
+        def create(**_kwargs):
+            raise RateLimited("slow down")
+
+    provider = OpenAIEvaluationProvider(api_key="test-key")
+    provider.client = type("Client", (), {"responses": Responses()})()  # type: ignore[assignment]
+
+    with pytest.raises(EvaluationProviderRateLimited):
+        provider.evaluate_job_fit(
+            profile_summary="{}", job_summary="{}", model="m", prompt_version=1
+        )
+
+    class QuotaExceeded(Exception):
+        status_code = 429
+        body = {"code": "insufficient_quota"}
+
+    class QuotaResponses:
+        @staticmethod
+        def create(**_kwargs):
+            raise QuotaExceeded("quota")
+
+    provider.client = type("Client", (), {"responses": QuotaResponses()})()  # type: ignore[assignment]
+    with pytest.raises(EvaluationProviderUnavailable):
+        provider.evaluate_job_fit(
+            profile_summary="{}", job_summary="{}", model="m", prompt_version=1
+        )

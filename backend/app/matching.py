@@ -39,8 +39,9 @@ from app.feedback_learning import (
 )
 from app.llm import (
     EvaluationProvider,
-    PaidBudgetExhausted,
+    EvaluationProviderRateLimited,
     EvaluationProviderUnavailable,
+    PaidBudgetExhausted,
     build_evaluation_provider,
     configured_eval_model,
     evaluate_with_parse_retry,
@@ -2023,6 +2024,16 @@ def run_llm_evaluations(
                     len(rows),
                     row["job_id"],
                 )
+        except EvaluationProviderRateLimited:
+            # Transient throttling: stop dispatching, defer the remaining
+            # candidates, and do not persist a long cooldown.
+            rollback_if_supported(connection)
+            deferred += 1
+            logger.warning(
+                "event=llm_evaluation_deferred reason=provider_rate_limited job_id=%s",
+                row["job_id"],
+            )
+            break
         except Exception as exc:
             # A database error leaves the transaction aborted; roll back so later
             # candidates can still be processed.
@@ -2156,6 +2167,9 @@ def _process_llm_candidate(
                 claim_attempt=budget.claim,
             )
         except PaidBudgetExhausted:
+            return "deferred"
+        except EvaluationProviderRateLimited:
+            stop.set()
             return "deferred"
         except EvaluationProviderUnavailable as exc:
             stop.set()

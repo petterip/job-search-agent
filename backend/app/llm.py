@@ -52,6 +52,15 @@ class EvaluationProviderUnavailable(RuntimeError):
     pass
 
 
+class EvaluationProviderRateLimited(RuntimeError):
+    """The provider throttled this run; defer candidates instead of failing them.
+
+    Distinct from ``EvaluationProviderUnavailable``: a throttle is transient and
+    must stop dispatch for the current run without persisting a long cooldown
+    that a quota/outage failure would justify.
+    """
+
+
 EVALUATION_INSTRUCTIONS = (
     "Olet suomenkielinen työnhakusuositusten arvioija. "
     "Arvioit yhtä työpaikkaa yksittäiselle hakijaprofiilille. "
@@ -417,11 +426,15 @@ class OpenAIEvaluationProvider:
                 timeout=self.timeout_seconds,
             )
         except Exception as exc:
-            code = getattr(getattr(exc, "body", None), "get", lambda _key: None)("code")
+            body = getattr(exc, "body", None)
+            code = body.get("code") if isinstance(body, dict) else None
             if code == "insufficient_quota":
                 raise EvaluationProviderUnavailable(
                     "openai quota is unavailable"
                 ) from exc
+            status_code = getattr(exc, "status_code", None)
+            if status_code == 429 or exc.__class__.__name__ == "RateLimitError":
+                raise EvaluationProviderRateLimited("openai rate limit") from exc
             raise
         raw_text = response.output_text
         parsed = JobFitEvaluation.model_validate(
@@ -512,10 +525,12 @@ class GeminiEvaluationProvider:
             except ValueError:
                 error_payload = {}
             error_status = str(error_payload.get("error", {}).get("status", ""))
-            if status_code in {402, 429} or error_status in {
+            if status_code == 429 or error_status in {
                 "RESOURCE_EXHAUSTED",
                 "QUOTA_EXCEEDED",
             }:
+                raise EvaluationProviderRateLimited("gemini rate limit") from exc
+            if status_code == 402:
                 raise EvaluationProviderUnavailable(
                     "gemini quota is unavailable"
                 ) from exc
