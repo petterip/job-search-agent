@@ -480,14 +480,18 @@ source and fixed:
   (ancestor symlink swaps bypassed validation; wrong `ENOTDIR` diagnosis) and
   round 6 (`resolve()` collapsed symlinked ancestors before the walk; temp
   cleanup could delete a collision file) were all fixed with regression tests.
-  Verification continued until no concrete sampling defect remained.
+  Round 7 approved the delta. Deployment verification then exposed one more
+  container-layout defect: `Path(__file__).resolve().parents[2]` is `/` inside
+  the image, so every non-`/profile` destination looked like a repository path.
+  Project-root detection now prefers the version-control root and falls back to
+  the project file, and applies no repository rule when neither marker exists.
 
 ### Verification commands
 
 ```bash
 cd backend
-python -m pytest --timeout=10 -q                       # 436 passed, 50 skipped
-TEST_DATABASE_URL=postgresql+psycopg://... python -m pytest --timeout=30 -q  # 486 passed
+python -m pytest --timeout=10 -q                       # 437 passed, 50 skipped
+TEST_DATABASE_URL=postgresql+psycopg://... python -m pytest --timeout=30 -q  # 487 passed
 cd ../web && npm run typecheck && npm run build
 ```
 

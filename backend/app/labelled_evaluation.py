@@ -583,6 +583,25 @@ def build_label_sample(
     }
 
 
+def _project_root() -> Path | None:
+    """Locate the repository/project root used by the private-path policy.
+
+    A source checkout is recognised by its version-control directory. The
+    container image ships no ``.git`` and has a different directory depth
+    (``/app/app/...``), so the project file marks the root there instead.
+    Returns ``None`` when neither marker exists, and then only the ``profile/``
+    rule applies rather than treating the filesystem root as the repository.
+    """
+    module_path = Path(__file__).resolve()
+    for parent in module_path.parents:
+        if (parent / ".git").exists():
+            return parent
+    for parent in module_path.parents:
+        if (parent / "pyproject.toml").is_file():
+            return parent
+    return None
+
+
 def resolve_private_destination(path: Path) -> Path:
     """Validate the private destination and keep it unresolved for the writer.
 
@@ -596,8 +615,10 @@ def resolve_private_destination(path: Path) -> Path:
         )
     absolute = path if path.is_absolute() else Path.cwd() / path
     resolved = absolute.resolve()
-    repo_root = Path(__file__).resolve().parents[2]
-    if resolved == repo_root or repo_root in resolved.parents:
+    repo_root = _project_root()
+    if repo_root is not None and (
+        resolved == repo_root or repo_root in resolved.parents
+    ):
         private_root = repo_root / "profile"
         if resolved == private_root or private_root not in resolved.parents:
             raise LabelledEvaluationError(

@@ -592,6 +592,37 @@ def test_unlabelled_sample_template_is_rejected_by_evaluation(
         load_labels(path)
 
 
+def test_resolve_private_destination_uses_detected_project_root(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import app.labelled_evaluation as labelled
+
+    # The source checkout resolves to the repository root, not the app package.
+    assert labelled._project_root() == Path(__file__).resolve().parents[2]
+
+    # The container layout has no .git: the project file marks /app instead.
+    fake_root = tmp_path / "app"
+    (fake_root / "profile").mkdir(parents=True)
+    monkeypatch.setattr(labelled, "_project_root", lambda: fake_root)
+    allowed = labelled.resolve_private_destination(
+        tmp_path / "elsewhere" / "labels.json"
+    )
+    assert allowed.name == "labels.json"
+    assert (
+        labelled.resolve_private_destination(fake_root / "profile" / "labels.json").name
+        == "labels.json"
+    )
+    with pytest.raises(LabelledEvaluationError, match="outside"):
+        labelled.resolve_private_destination(fake_root / "labels.json")
+
+    # Without any marker only the profile/ rule applies, never the filesystem root.
+    monkeypatch.setattr(labelled, "_project_root", lambda: None)
+    assert (
+        labelled.resolve_private_destination(tmp_path / "anywhere.json").name
+        == "anywhere.json"
+    )
+
+
 def test_sample_writer_refuses_repository_and_overwrite(tmp_path) -> None:
     from app.labelled_evaluation import (
         resolve_private_destination,
