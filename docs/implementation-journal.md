@@ -605,6 +605,24 @@ source and fixed:
   production: the run claims members, fetches them, and persists
   `classified`/`missing` outcomes.
 
+- **P2-18 restore drill executed (2026-09-16).** The pre-deploy backup
+  `jobsearchagent-20260915T223008Z.dump` (783 MB) passed its `sha256sum -c`
+  check and restored into a throwaway `pgvector/pgvector:pg18` container with
+  **zero** `pg_restore` errors in 1 m 25 s. Restored state: alembic
+  `20260705_0015`, 100,694 jobs, 108,571 raw listings, 18,463 recommendations,
+  8,923 evaluations, 9 sources, 1 profile, 1 feedback, `plpgsql` + `vector`.
+  `alembic upgrade head` with the current image then applied 0016-0024 on the
+  restored data, reaching `20260916_0024` and creating the scan tables. The
+  retention dry-run ran against that database and reported the table sizes and
+  thresholds (raw listings 526.9 MB, jobs 231.2 MB, source events 19.5 MB). The
+  drill container and volume were removed afterwards. `make backup-private`
+  also produced `private-20260916T065302Z.tar.gz` (mode 600, checksum OK,
+  contains `.env` and `profile/`), so both halves of the recovery set are
+  evidenced.
+- **P1-10 residual.** The retention report is verified on restored real data;
+  the remaining unimplemented part is normalizer/revision-based location
+  reprocessing for historical rows.
+
 ### Verification commands
 
 ```bash
