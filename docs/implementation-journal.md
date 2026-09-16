@@ -7,7 +7,21 @@ Concise record of what is actually implemented. Keep this file current when code
 ### Production deployment (Pi, inkeri.etto.fi)
 
 - **Deployed commit:** `518e045` (initial `451c32c`, plus the audit-serialization
-  fix and the `app.match --inventory` flag).
+  fix and the `app.match --inventory` flag). Later deploys on the same day:
+  `c31a608`/`4b99848` (opt-in bounded evaluation concurrency, P2-1),
+  `4da8a8e` (P2-23 private labelled-sample builder), `1810fb9` (container
+  project-root detection) and `14de575` (bounded gate replay), verified with
+  `alembic current` = `20260916_0024 (head)`, `/health` 200, unauthenticated
+  `/recommendations` 401 and no error logs.
+- **P2-23 production check after `14de575`:** `python -m
+  app.labelled_evaluation --build-sample /tmp/... --per-stratum 5` ran inside
+  the api container in ~8 s and returned the expected strata (nationwide 5,
+  remote 5, hard_rejection 5, unreviewed 5, accepted 1, not_retrieved 5,
+  oulu_local 0 because production currently has no commutable recommendations),
+  scanned 116 missing-row jobs with 87 deterministic rejects and no
+  classification errors. The file was mode `0600` and was removed after the
+  check; a repository destination (`/app/...`) was refused and not created.
+  The relevance labels themselves remain private human input.
 - **Backups taken before deploy:** `jobsearchagent-20260915T223008Z.dump`
   (+ `.sha256`) and `.env.bak.20260915T222900Z` on the host.
 - **`.env` changes (names only):** added `OPERATOR_API_TOKEN` (generated),
