@@ -6,7 +6,9 @@ from pydantic import BaseModel, Field
 
 class Settings(BaseModel):
     app_name: str = "job-search-agent"
-    database_url: str = "postgresql+psycopg://jobsearchagent:change-me@db:5432/jobsearchagent"
+    database_url: str = (
+        "postgresql+psycopg://jobsearchagent:change-me@db:5432/jobsearchagent"
+    )
     llm_provider: str = ""
     operator_api_token: str = ""
     public_origin: str = ""
@@ -97,7 +99,9 @@ class Settings(BaseModel):
     jobly_scan_grace_hours: int = 72
     jobly_scan_retry_minutes: int = 60
     jobly_scan_closure_attempts: int = 3
-    eures_url: str = "https://europa.eu/eures/api/jv-searchengine/public/jv-search/search"
+    eures_url: str = (
+        "https://europa.eu/eures/api/jv-searchengine/public/jv-search/search"
+    )
     eures_page_size: int = 50
     eures_max_pages: int = 5
     oulu_varbi_rss_url: str = "https://oulunyliopisto.varbi.com/fi/what:rssfeed/"
@@ -149,6 +153,41 @@ class Settings(BaseModel):
     def google_maps_configured(self) -> bool:
         return bool(self.google_maps_api_key.strip())
 
+    def llm_config_problems(self) -> list[str]:
+        """Actionable configuration problems, reported without secret values.
+
+        A blank provider is an intentional offline mode, not an error. Anything
+        that would make every evaluation fail is reported once at startup
+        instead of failing per candidate.
+        """
+        problems: list[str] = []
+        provider = self.llm_provider.strip().lower()
+        if not provider:
+            return problems
+        if provider not in {"openai", "gemini"}:
+            problems.append(
+                f"LLM_PROVIDER={provider!r} is unsupported; use 'openai', 'gemini' "
+                "or leave it blank"
+            )
+        elif provider == "openai" and not self.openai_api_key.strip():
+            problems.append("LLM_PROVIDER=openai but OPENAI_API_KEY is empty")
+        elif provider == "gemini" and not self.gemini_api_key.strip():
+            problems.append("LLM_PROVIDER=gemini but GEMINI_API_KEY is empty")
+        model = (
+            self.gemini_eval_model if provider == "gemini" else self.openai_eval_model
+        ).strip()
+        if not model:
+            problems.append("the evaluation model for the selected provider is empty")
+        if self.llm_eval_concurrency < 1:
+            problems.append("LLM_EVAL_CONCURRENCY must be at least 1")
+        if self.llm_eval_parse_retries < 0:
+            problems.append("LLM_EVAL_PARSE_RETRIES cannot be negative")
+        if self.llm_eval_max_jobs < 0:
+            problems.append("LLM_EVAL_MAX_JOBS cannot be negative")
+        if self.openai_eval_timeout_seconds <= 0:
+            problems.append("OPENAI_EVAL_TIMEOUT_SECONDS must be positive")
+        return problems
+
 
 def _bool_env(name: str, default: bool) -> bool:
     raw = getenv(name)
@@ -170,7 +209,9 @@ def get_settings() -> Settings:
     defaults = Settings()
     jobly_sitemap_raw = getenv("JOBLY_SITEMAP_URLS")
     if jobly_sitemap_raw:
-        jobly_sitemap_urls = [part.strip() for part in jobly_sitemap_raw.split(",") if part.strip()]
+        jobly_sitemap_urls = [
+            part.strip() for part in jobly_sitemap_raw.split(",") if part.strip()
+        ]
     else:
         jobly_sitemap_urls = defaults.jobly_sitemap_urls
     enabled_sources_raw = getenv("COLLECTOR_ENABLED_SOURCES")
@@ -183,18 +224,14 @@ def get_settings() -> Settings:
     discovery_search_raw = getenv("DISCOVERY_SEARCH_QUERIES")
     if discovery_search_raw:
         discovery_search_queries = [
-            part.strip()
-            for part in discovery_search_raw.split(",")
-            if part.strip()
+            part.strip() for part in discovery_search_raw.split(",") if part.strip()
         ]
     else:
         discovery_search_queries = defaults.discovery_search_queries
     linkedin_search_raw = getenv("LINKEDIN_SEARCH_QUERIES")
     if linkedin_search_raw:
         linkedin_search_queries = [
-            part.strip()
-            for part in linkedin_search_raw.split(",")
-            if part.strip()
+            part.strip() for part in linkedin_search_raw.split(",") if part.strip()
         ]
     else:
         linkedin_search_queries = defaults.linkedin_search_queries
@@ -205,7 +242,9 @@ def get_settings() -> Settings:
         operator_api_token=getenv("OPERATOR_API_TOKEN", ""),
         public_origin=getenv("PUBLIC_ORIGIN", ""),
         openai_api_key=getenv("OPENAI_API_KEY", ""),
-        openai_embedding_model=getenv("OPENAI_EMBEDDING_MODEL", defaults.openai_embedding_model),
+        openai_embedding_model=getenv(
+            "OPENAI_EMBEDDING_MODEL", defaults.openai_embedding_model
+        ),
         openai_embedding_dimension=_int_env(
             "OPENAI_EMBEDDING_DIMENSION",
             defaults.openai_embedding_dimension,
@@ -221,7 +260,9 @@ def get_settings() -> Settings:
         ),
         gemini_api_key=getenv("GEMINI_API_KEY", ""),
         gemini_eval_model=getenv("GEMINI_EVAL_MODEL", defaults.gemini_eval_model),
-        llm_eval_batch_size=_int_env("LLM_EVAL_BATCH_SIZE", defaults.llm_eval_batch_size),
+        llm_eval_batch_size=_int_env(
+            "LLM_EVAL_BATCH_SIZE", defaults.llm_eval_batch_size
+        ),
         llm_eval_parse_retries=_int_env(
             "LLM_EVAL_PARSE_RETRIES", defaults.llm_eval_parse_retries
         ),
@@ -255,17 +296,23 @@ def get_settings() -> Settings:
             defaults.learner_analysis_drain_budget_minutes,
         ),
         learner_daily_hour=_int_env("LEARNER_DAILY_HOUR", defaults.learner_daily_hour),
-        learner_daily_minute=_int_env("LEARNER_DAILY_MINUTE", defaults.learner_daily_minute),
+        learner_daily_minute=_int_env(
+            "LEARNER_DAILY_MINUTE", defaults.learner_daily_minute
+        ),
         learned_discovery_query_cap=_int_env(
             "LEARNED_DISCOVERY_QUERY_CAP",
             defaults.learned_discovery_query_cap,
         ),
-        learned_exclusion_cap=_int_env("LEARNED_EXCLUSION_CAP", defaults.learned_exclusion_cap),
+        learned_exclusion_cap=_int_env(
+            "LEARNED_EXCLUSION_CAP", defaults.learned_exclusion_cap
+        ),
         feedback_decay_half_life_days=_int_env(
             "FEEDBACK_DECAY_HALF_LIFE_DAYS",
             defaults.feedback_decay_half_life_days,
         ),
-        collector_daily_hour=_int_env("COLLECTOR_DAILY_HOUR", defaults.collector_daily_hour),
+        collector_daily_hour=_int_env(
+            "COLLECTOR_DAILY_HOUR", defaults.collector_daily_hour
+        ),
         collector_daily_minute=_int_env(
             "COLLECTOR_DAILY_MINUTE",
             defaults.collector_daily_minute,
@@ -281,15 +328,21 @@ def get_settings() -> Settings:
         ),
         discovery_search_queries=discovery_search_queries,
         collector_enabled_sources=collector_enabled_sources,
-        duunitori_page_size=_int_env("DUUNITORI_PAGE_SIZE", defaults.duunitori_page_size),
-        duunitori_max_pages=_int_env("DUUNITORI_MAX_PAGES", defaults.duunitori_max_pages),
+        duunitori_page_size=_int_env(
+            "DUUNITORI_PAGE_SIZE", defaults.duunitori_page_size
+        ),
+        duunitori_max_pages=_int_env(
+            "DUUNITORI_MAX_PAGES", defaults.duunitori_max_pages
+        ),
         tmt_page_size=_int_env("TMT_PAGE_SIZE", defaults.tmt_page_size),
         tmt_max_pages=_int_env("TMT_MAX_PAGES", defaults.tmt_max_pages),
         tmt_oulu_max_pages=_int_env("TMT_OULU_MAX_PAGES", defaults.tmt_oulu_max_pages),
         laura_page_size=_int_env("LAURA_PAGE_SIZE", defaults.laura_page_size),
         laura_max_pages=_int_env("LAURA_MAX_PAGES", defaults.laura_max_pages),
         jobly_sitemap_urls=jobly_sitemap_urls,
-        jobly_max_urls_per_run=_int_env("JOBLY_MAX_URLS_PER_RUN", defaults.jobly_max_urls_per_run),
+        jobly_max_urls_per_run=_int_env(
+            "JOBLY_MAX_URLS_PER_RUN", defaults.jobly_max_urls_per_run
+        ),
         jobly_scan_grace_hours=_int_env(
             "JOBLY_SCAN_GRACE_HOURS", defaults.jobly_scan_grace_hours
         ),
@@ -328,7 +381,9 @@ def get_settings() -> Settings:
         ),
         browserbase_api_key=getenv("BROWSERBASE_API_KEY", ""),
         google_maps_api_key=getenv("GOOGLE_MAPS_API_KEY", ""),
-        transit_origin_address=getenv("TRANSIT_ORIGIN_ADDRESS", defaults.transit_origin_address),
+        transit_origin_address=getenv(
+            "TRANSIT_ORIGIN_ADDRESS", defaults.transit_origin_address
+        ),
         recommendation_commute_limit_minutes=_int_env(
             "RECOMMENDATION_COMMUTE_LIMIT_MINUTES",
             defaults.recommendation_commute_limit_minutes,
@@ -337,7 +392,9 @@ def get_settings() -> Settings:
             "RECOMMENDATION_TRANSIT_LOOKUP_BUDGET",
             defaults.recommendation_transit_lookup_budget,
         ),
-        transit_cache_ttl_days=_int_env("TRANSIT_CACHE_TTL_DAYS", defaults.transit_cache_ttl_days),
+        transit_cache_ttl_days=_int_env(
+            "TRANSIT_CACHE_TTL_DAYS", defaults.transit_cache_ttl_days
+        ),
         transit_provider_backoff_min=_int_env(
             "TRANSIT_PROVIDER_BACKOFF_MIN", defaults.transit_provider_backoff_min
         ),

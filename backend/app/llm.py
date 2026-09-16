@@ -5,7 +5,7 @@ import re
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Annotated, Any, Literal, Protocol
+from typing import Annotated, Any, Callable, Literal, Protocol
 
 import httpx
 from pydantic import BaseModel, ConfigDict, Field
@@ -15,7 +15,12 @@ from app.privacy import outbound_profile_summary, sanitize_job_travel, sanitize_
 
 logger = logging.getLogger("matcher.llm")
 
-FitTier = Literal["strong_fit", "transferable_weaker", "generic_customer_service_only", "not_applicable"]
+FitTier = Literal[
+    "strong_fit",
+    "transferable_weaker",
+    "generic_customer_service_only",
+    "not_applicable",
+]
 SuggestedAction = Literal["apply", "consider", "skip"]
 ConcernText = Annotated[str, Field(max_length=120)]
 
@@ -40,8 +45,7 @@ class EvaluationProvider(Protocol):
         job_summary: str,
         model: str,
         prompt_version: int,
-    ) -> tuple[JobFitEvaluation, dict[str, Any]]:
-        ...
+    ) -> tuple[JobFitEvaluation, dict[str, Any]]: ...
 
 
 class EvaluationProviderUnavailable(RuntimeError):
@@ -116,7 +120,8 @@ def normalize_provider_usage(provider_name: str, usage: Any) -> dict[str, Any]:
         if isinstance(details, dict):
             normalized["cached_tokens"] = details.get("cached_tokens")
     normalized["usage_present"] = (
-        normalized["input_tokens"] is not None or normalized["output_tokens"] is not None
+        normalized["input_tokens"] is not None
+        or normalized["output_tokens"] is not None
     )
     return normalized
 
@@ -232,7 +237,9 @@ def job_summary(job: dict[str, Any]) -> str:
     deterministic_result = job.get("deterministic_result") or {}
     if isinstance(deterministic_result, str):
         deterministic_result = json.loads(deterministic_result)
-    travel_assessment = sanitize_job_travel(deterministic_result.get("travel_assessment"))
+    travel_assessment = sanitize_job_travel(
+        deterministic_result.get("travel_assessment")
+    )
     minimized = {
         "title": job.get("title"),
         "employer": job.get("employer"),
@@ -278,8 +285,12 @@ def evaluation_request_hash(
         "provider": provider,
         "prompt_version": prompt_version,
         "schema_version": schema_version,
-        "schema": schema if schema is not None else JobFitEvaluation.model_json_schema(),
-        "instructions": EVALUATION_INSTRUCTIONS if instructions is None else instructions,
+        "schema": schema
+        if schema is not None
+        else JobFitEvaluation.model_json_schema(),
+        "instructions": EVALUATION_INSTRUCTIONS
+        if instructions is None
+        else instructions,
         "task": EVALUATION_TASK if task is None else task,
         "job_id": job_id,
         "profile_id": profile_id,
@@ -392,8 +403,7 @@ class OpenAIEvaluationProvider:
                 instructions=EVALUATION_INSTRUCTIONS,
                 input=(
                     f"Hakijan sallittu yhteenveto:\n{profile_summary}\n\n"
-                    f"Työpaikan yhteenveto:\n{job_summary}\n\n"
-                    + EVALUATION_TASK
+                    f"Työpaikan yhteenveto:\n{job_summary}\n\n" + EVALUATION_TASK
                 ),
                 text={
                     "format": {
@@ -409,7 +419,9 @@ class OpenAIEvaluationProvider:
         except Exception as exc:
             code = getattr(getattr(exc, "body", None), "get", lambda _key: None)("code")
             if code == "insufficient_quota":
-                raise EvaluationProviderUnavailable("openai quota is unavailable") from exc
+                raise EvaluationProviderUnavailable(
+                    "openai quota is unavailable"
+                ) from exc
             raise
         raw_text = response.output_text
         parsed = JobFitEvaluation.model_validate(
@@ -419,7 +431,9 @@ class OpenAIEvaluationProvider:
         metadata = {
             "returned_model": getattr(response, "model", None),
             "prompt_version": prompt_version,
-            "usage": usage.model_dump() if usage is not None and hasattr(usage, "model_dump") else usage,
+            "usage": usage.model_dump()
+            if usage is not None and hasattr(usage, "model_dump")
+            else usage,
             "usage_normalized": normalize_provider_usage("openai", usage),
             "request_id": getattr(response, "id", None),
         }
@@ -498,15 +512,22 @@ class GeminiEvaluationProvider:
             except ValueError:
                 error_payload = {}
             error_status = str(error_payload.get("error", {}).get("status", ""))
-            if status_code in {402, 429} or error_status in {"RESOURCE_EXHAUSTED", "QUOTA_EXCEEDED"}:
-                raise EvaluationProviderUnavailable("gemini quota is unavailable") from exc
+            if status_code in {402, 429} or error_status in {
+                "RESOURCE_EXHAUSTED",
+                "QUOTA_EXCEEDED",
+            }:
+                raise EvaluationProviderUnavailable(
+                    "gemini quota is unavailable"
+                ) from exc
             raise
 
         payload = response.json()
         try:
             raw_text = str(payload["candidates"][0]["content"]["parts"][0]["text"])
         except (KeyError, IndexError, TypeError) as exc:
-            raise ValueError("Gemini response did not include structured output text") from exc
+            raise ValueError(
+                "Gemini response did not include structured output text"
+            ) from exc
         parsed = JobFitEvaluation.model_validate(
             normalized_evaluation_payload(json.loads(raw_text))
         )
@@ -539,6 +560,10 @@ def is_retryable_output_error(exc: BaseException) -> bool:
         return False
 
 
+class PaidBudgetExhausted(RuntimeError):
+    """The declared aggregate paid-call budget is spent mid-retry."""
+
+
 def evaluate_with_parse_retry(
     provider: EvaluationProvider,
     *,
@@ -547,9 +572,18 @@ def evaluate_with_parse_retry(
     model: str,
     prompt_version: int,
     max_retries: int = 1,
+    claim_attempt: Callable[[], bool] | None = None,
 ) -> tuple[JobFitEvaluation, dict[str, Any]]:
+    """Evaluate one job, retrying a malformed response within the paid budget.
+
+    ``claim_attempt`` runs before **every** provider attempt, including a parse
+    retry, so a retry cannot exceed the declared aggregate budget. It raises
+    ``PaidBudgetExhausted`` when a further attempt is not funded.
+    """
     attempts = 0
     while True:
+        if claim_attempt is not None and not claim_attempt():
+            raise PaidBudgetExhausted("paid call budget exhausted")
         attempts += 1
         try:
             evaluation, metadata = provider.evaluate_job_fit(
@@ -579,7 +613,10 @@ def configured_eval_model(settings: Settings, provider_name: str | None = None) 
 
 def build_evaluation_provider(settings: Settings) -> EvaluationProvider | None:
     if provider_in_cooldown(settings):
-        logger.warning("event=llm_provider_skipped reason=provider_cooldown provider=%s", settings.llm_provider)
+        logger.warning(
+            "event=llm_provider_skipped reason=provider_cooldown provider=%s",
+            settings.llm_provider,
+        )
         return None
     if settings.llm_provider == "openai" and settings.openai_api_key:
         return OpenAIEvaluationProvider(

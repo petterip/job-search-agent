@@ -41,22 +41,26 @@ def test_minimized_profile_summary_omits_unapproved_fields() -> None:
 
 def test_minimized_profile_summary_includes_verified_fit_evidence() -> None:
     summary = minimized_profile_summary(
-        with_privacy({
-            "career_evidence": {
-                "qualifications": ["kirjastonhoitajan / kirjastoalan kelpoisuus"],
-                "languages_verified": ["sv: sujuva B2"],
-                "leadership": {"years": "noin 9 vuotta kirjastonjohtajatehtävissä"},
-            },
-            "skills": [{"name": "esimiestyö ja lähijohtaminen", "confidence": "high"}],
-            "strength_signals": [
-                {
-                    "name": "laajemman kokonaisuuden hahmottaminen johtamiskokemuksen kautta",
-                    "confidence": "high",
-                }
-            ],
-            "raw_cv": "private",
-            "email": "private@example.com",
-        })
+        with_privacy(
+            {
+                "career_evidence": {
+                    "qualifications": ["kirjastonhoitajan / kirjastoalan kelpoisuus"],
+                    "languages_verified": ["sv: sujuva B2"],
+                    "leadership": {"years": "noin 9 vuotta kirjastonjohtajatehtävissä"},
+                },
+                "skills": [
+                    {"name": "esimiestyö ja lähijohtaminen", "confidence": "high"}
+                ],
+                "strength_signals": [
+                    {
+                        "name": "laajemman kokonaisuuden hahmottaminen johtamiskokemuksen kautta",
+                        "confidence": "high",
+                    }
+                ],
+                "raw_cv": "private",
+                "email": "private@example.com",
+            }
+        )
     )
 
     assert "sujuva B2" in summary
@@ -76,7 +80,9 @@ def test_job_summary_limits_description() -> None:
 
 
 def test_job_summary_includes_travel_assessment_and_changes_request_hash() -> None:
-    without_travel = job_summary({"title": "Test", "location": "Oulu", "description": "d"})
+    without_travel = job_summary(
+        {"title": "Test", "location": "Oulu", "description": "d"}
+    )
     with_travel = job_summary(
         {
             "title": "Test",
@@ -123,7 +129,10 @@ def test_evaluation_request_hash_is_stable() -> None:
 
 
 def test_evaluation_instructions_do_not_let_locality_override_fit() -> None:
-    assert "Paikallinen sijainti ei saa korvata huonoa sisällöllistä sopivuutta" in EVALUATION_INSTRUCTIONS
+    assert (
+        "Paikallinen sijainti ei saa korvata huonoa sisällöllistä sopivuutta"
+        in EVALUATION_INSTRUCTIONS
+    )
     assert "transferable_weaker + consider" in EVALUATION_INSTRUCTIONS
 
 
@@ -148,7 +157,9 @@ def test_job_fit_evaluation_schema_constrains_ui_copy_length() -> None:
     assert schema["properties"]["concerns"]["items"]["maxLength"] <= 120
 
 
-def test_evaluation_instructions_use_reader_friendly_missing_requirement_language() -> None:
+def test_evaluation_instructions_use_reader_friendly_missing_requirement_language() -> (
+    None
+):
     instructions = f"{EVALUATION_INSTRUCTIONS} {EVALUATION_TASK}"
 
     assert "hakijalta puuttuu" in instructions
@@ -202,7 +213,9 @@ def test_gemini_response_schema_omits_unsupported_additional_properties() -> Non
     assert schema["properties"]["fit_tier"]["enum"]
 
 
-def test_provider_unavailable_marker_skips_provider_until_cooldown_expires(tmp_path) -> None:
+def test_provider_unavailable_marker_skips_provider_until_cooldown_expires(
+    tmp_path,
+) -> None:
     settings = Settings(
         llm_provider="openai",
         openai_api_key="test-key",
@@ -423,11 +436,19 @@ def test_evaluation_request_hash_separates_ownership_and_provider() -> None:
         "model": "model",
         "prompt_version": 8,
     }
-    baseline = evaluation_request_hash(provider="openai", job_id=1, profile_id=2, **base)
+    baseline = evaluation_request_hash(
+        provider="openai", job_id=1, profile_id=2, **base
+    )
 
-    assert baseline != evaluation_request_hash(provider="gemini", job_id=1, profile_id=2, **base)
-    assert baseline != evaluation_request_hash(provider="openai", job_id=9, profile_id=2, **base)
-    assert baseline != evaluation_request_hash(provider="openai", job_id=1, profile_id=3, **base)
+    assert baseline != evaluation_request_hash(
+        provider="gemini", job_id=1, profile_id=2, **base
+    )
+    assert baseline != evaluation_request_hash(
+        provider="openai", job_id=9, profile_id=2, **base
+    )
+    assert baseline != evaluation_request_hash(
+        provider="openai", job_id=1, profile_id=3, **base
+    )
     assert "returned_model" not in evaluation_request_hash.__code__.co_varnames
 
 
@@ -472,7 +493,11 @@ def test_normalize_provider_usage_flags_missing_and_maps_providers() -> None:
 
     gemini = normalize_provider_usage(
         "gemini",
-        {"promptTokenCount": 50, "candidatesTokenCount": 10, "cachedContentTokenCount": 5},
+        {
+            "promptTokenCount": 50,
+            "candidatesTokenCount": 10,
+            "cachedContentTokenCount": 5,
+        },
     )
     assert gemini == {
         "input_tokens": 50,
@@ -528,6 +553,48 @@ def test_evaluate_with_parse_retry_retries_once_then_succeeds() -> None:
     assert metadata["attempts"] == 2
 
 
+def test_evaluate_with_parse_retry_claims_budget_for_every_attempt() -> None:
+    import pytest as _pytest
+
+    from app.llm import (
+        PaidBudgetExhausted,
+        evaluate_with_parse_retry,
+    )
+
+    class Provider:
+        provider_name = "openai"
+
+        def __init__(self) -> None:
+            self.calls = 0
+            self.budget = 1
+
+        def evaluate_job_fit(self, **_kwargs):
+            self.calls += 1
+            raise ValueError("malformed json")
+
+    def claim() -> bool:
+        if provider.budget <= 0:
+            return False
+        provider.budget -= 1
+        return True
+
+    provider = Provider()
+    with _pytest.raises(PaidBudgetExhausted):
+        evaluate_with_parse_retry(
+            provider,  # type: ignore[arg-type]
+            profile_summary="{}",
+            job_summary="{}",
+            model="m",
+            prompt_version=8,
+            max_retries=2,
+            claim_attempt=claim,
+        )
+
+    # One funded attempt happened; the retry was refused before any call.
+    assert provider.calls == 1
+    assert provider.budget == 0
+
+
 def test_evaluate_with_parse_retry_does_not_retry_quota() -> None:
     import pytest as _pytest
 
@@ -574,7 +641,9 @@ def test_requirement_aware_excerpt_keeps_late_requirements_and_respects_limit() 
     assert "Edellytämme suomen kielen taitoa" in excerpt
 
 
-def test_job_summary_uses_requirement_aware_excerpt_only_when_enabled(monkeypatch) -> None:
+def test_job_summary_uses_requirement_aware_excerpt_only_when_enabled(
+    monkeypatch,
+) -> None:
     filler = "Yleistä kuvausta. " * 400
     description = filler + "Edellytämme kelpoisuutta."
 

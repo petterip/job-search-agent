@@ -1,4 +1,4 @@
-.PHONY: test test-regression test-smoke test-incremental test-eures test-spike-kuntarekry test-backend test-backend-pg test-web audit-db repair-urls backup-db backup-private backup-all restore-db docker-config browserbase-check transit-distance-check help
+.PHONY: test test-regression test-smoke test-incremental test-eures test-spike-kuntarekry test-backend test-backend-pg test-web audit-db repair-urls backup-db backup-private backup-all restore-db docker-config browserbase-check transit-distance-check llm-check help
 
 # Backups live outside the repository. `profile/` originals and `.env` are
 # ignored/private, so a database dump alone is not a recovery set.
@@ -23,6 +23,7 @@ help:
 	@echo "  docker-config    Validate compose.yaml"
 	@echo "  browserbase-check  Verify BROWSERBASE_API_KEY (loads .env)"
 	@echo "  transit-distance-check  Verify GOOGLE_MAPS_API_KEY transit routing (loads .env)"
+	@echo "  llm-check  Make one billable evaluation call to verify the provider and model"
 	@echo "  test             Alias for test-regression"
 
 test: test-regression
@@ -112,3 +113,6 @@ browserbase-check:
 
 transit-distance-check:
 	set -a && . ./.env && set +a && cd backend && python3 -m app.transit_distance_check
+
+llm-check:
+	set -a && . ./.env && set +a && cd backend && python3 -m app.llm_check

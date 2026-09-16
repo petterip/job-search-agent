@@ -13,6 +13,13 @@ logger = logging.getLogger("worker")
 async def run_worker() -> None:
     configure_logging()
     settings = get_settings()
+    problems = settings.llm_config_problems()
+    if problems:
+        # A worker whose provider configuration cannot succeed should stop with
+        # one actionable message instead of failing every scheduled candidate.
+        for problem in problems:
+            logger.error("event=config_invalid problem=%s", problem)
+        raise SystemExit("invalid LLM configuration: " + "; ".join(problems))
     stop_event = asyncio.Event()
     scheduler = build_scheduler()
 

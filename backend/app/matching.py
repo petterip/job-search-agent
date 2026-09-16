@@ -39,6 +39,7 @@ from app.feedback_learning import (
 )
 from app.llm import (
     EvaluationProvider,
+    PaidBudgetExhausted,
     EvaluationProviderUnavailable,
     build_evaluation_provider,
     configured_eval_model,
@@ -65,7 +66,11 @@ from app.transit_distance import (
     format_duration_fi,
     resolve_transit_for_queries,
 )
-from app.travel_policy import TravelAssessment, assess_travel, extract_destination_candidates
+from app.travel_policy import (
+    TravelAssessment,
+    assess_travel,
+    extract_destination_candidates,
+)
 
 logger = logging.getLogger("matcher")
 
@@ -214,7 +219,9 @@ def expanded_tokens(value: str | None) -> set[str]:
 
 
 def matching_terms(profile_term_set: set[str], job_term_set: set[str]) -> list[str]:
-    return sorted(term for term in profile_term_set if token_variants(term) & job_term_set)
+    return sorted(
+        term for term in profile_term_set if token_variants(term) & job_term_set
+    )
 
 
 def normalized_text(value: str | None) -> str:
@@ -307,11 +314,7 @@ def phrase_in_text(phrase: str, text: str | None) -> bool:
     if not normalized_phrase or not text:
         return False
     normalized_text_value = normalized_text(text)
-    pattern = (
-        r"(?<![0-9a-zåäö])"
-        + re.escape(normalized_phrase)
-        + r"(?![0-9a-zåäö])"
-    )
+    pattern = r"(?<![0-9a-zåäö])" + re.escape(normalized_phrase) + r"(?![0-9a-zåäö])"
     return re.search(pattern, normalized_text_value) is not None
 
 
@@ -363,7 +366,11 @@ def profile_cluster_weights(profile: dict[str, Any]) -> dict[str, float]:
         return {}
     weights = dict(DEFAULT_CLUSTER_WEIGHTS)
     for key, value in configured.items():
-        if key in weights and isinstance(value, (int, float)) and not isinstance(value, bool):
+        if (
+            key in weights
+            and isinstance(value, (int, float))
+            and not isinstance(value, bool)
+        ):
             if 0 <= float(value) <= 100:
                 weights[key] = float(value)
     return weights
@@ -421,7 +428,9 @@ def score_job(profile: dict[str, Any], job: JobForScoring) -> ScoreResult:
     negative_keyword_term_set = negative_keyword_terms(profile)
     caution_terms = qualification_caution_terms(profile)
 
-    raw_job_text = " ".join(part or "" for part in (job.title, job.employer, job.description))
+    raw_job_text = " ".join(
+        part or "" for part in (job.title, job.employer, job.description)
+    )
     language_gate = evaluate_language_requirements(
         profile, title=job.title, text=raw_job_text
     )
@@ -430,29 +439,29 @@ def score_job(profile: dict[str, Any], job: JobForScoring) -> ScoreResult:
     )
     job_title_terms = expanded_tokens(job.title)
     job_text = normalized_text(raw_job_text)
-    job_text_terms = expanded_tokens(" ".join(part or "" for part in (job.title, job.employer, job.description)))
+    job_text_terms = expanded_tokens(
+        " ".join(part or "" for part in (job.title, job.employer, job.description))
+    )
     job_location_terms = expanded_tokens(job.location)
 
     title_matches = matching_terms(title_terms, job_title_terms)
     keyword_matches = matching_terms(keyword_terms, job_text_terms)
     application_title_matches = matching_terms(application_title_terms, job_title_terms)
-    application_keyword_matches = matching_terms(application_keyword_terms, job_text_terms)
-    application_location_matches = matching_terms(application_location_terms, job_location_terms)
+    application_keyword_matches = matching_terms(
+        application_keyword_terms, job_text_terms
+    )
+    application_location_matches = matching_terms(
+        application_location_terms, job_location_terms
+    )
     learned_title_matches = matching_terms(learned_title_terms, job_title_terms)
     learned_keyword_matches = matching_terms(learned_keyword_terms, job_text_terms)
-    learned_location_matches = matching_terms(learned_location_terms, job_location_terms)
+    learned_location_matches = matching_terms(
+        learned_location_terms, job_location_terms
+    )
     sector_matches = matching_terms(sector_terms, job_text_terms)
     negative_matches = sorted(
-        {
-            phrase
-            for phrase in negative_terms
-            if phrase_in_text(phrase, job.title)
-        }
-        | {
-            term
-            for term in negative_keyword_term_set
-            if term in job_text
-        }
+        {phrase for phrase in negative_terms if phrase_in_text(phrase, job.title)}
+        | {term for term in negative_keyword_term_set if term in job_text}
     )
     caution_matches = sorted(term for term in caution_terms if term in job_text)
     missing_qualification_matches = missing_qualification_reject_matches(job_text)
@@ -532,7 +541,9 @@ def score_job(profile: dict[str, Any], job: JobForScoring) -> ScoreResult:
         candidate_lanes.append("application_history")
     if not title_matches and len(keyword_matches) >= 2:
         candidate_lanes.append("transferable_duty")
-    if sector_matches and (keyword_matches or application_keyword_matches or application_title_matches):
+    if sector_matches and (
+        keyword_matches or application_keyword_matches or application_title_matches
+    ):
         candidate_lanes.append("sector_context")
     hidden_opportunity = not title_matches and any(
         lane in candidate_lanes
@@ -543,11 +554,18 @@ def score_job(profile: dict[str, Any], job: JobForScoring) -> ScoreResult:
 
     rationale_parts = []
     if title_matches:
-        rationale_parts.append(f"Nimike sopii hakijalle: {', '.join(title_matches[:4])}.")
+        rationale_parts.append(
+            f"Nimike sopii hakijalle: {', '.join(title_matches[:4])}."
+        )
     if keyword_matches:
-        rationale_parts.append(f"Sisältö vastaa osaamista: {', '.join(keyword_matches[:5])}.")
+        rationale_parts.append(
+            f"Sisältö vastaa osaamista: {', '.join(keyword_matches[:5])}."
+        )
     if application_title_matches or application_keyword_matches:
-        application_matches = [*application_title_matches[:3], *application_keyword_matches[:4]]
+        application_matches = [
+            *application_title_matches[:3],
+            *application_keyword_matches[:4],
+        ]
         rationale_parts.append(
             f"Aiemmin kiinnostaviksi valitut tehtävät tukevat osumaa: {', '.join(application_matches[:5])}."
         )
@@ -557,11 +575,15 @@ def score_job(profile: dict[str, Any], job: JobForScoring) -> ScoreResult:
             f"Palautteen perusteella opitut signaalit tukevat osumaa: {', '.join(learned_matches[:5])}."
         )
     if hidden_opportunity:
-        rationale_parts.append("Tehtävä voi olla ei-ilmeinen mutta siirrettävien taitojen perusteella kiinnostava osuma.")
+        rationale_parts.append(
+            "Tehtävä voi olla ei-ilmeinen mutta siirrettävien taitojen perusteella kiinnostava osuma."
+        )
     if location_matches:
         rationale_parts.append(f"Sijainti sopii: {', '.join(location_matches[:3])}.")
     elif application_location_matches:
-        rationale_parts.append(f"Sijainti vastaa aiempaa hakuvalintaa: {', '.join(application_location_matches[:3])}.")
+        rationale_parts.append(
+            f"Sijainti vastaa aiempaa hakuvalintaa: {', '.join(application_location_matches[:3])}."
+        )
     if not rationale_parts:
         rationale_parts.append("Osuma perustuu heikkoihin tekstisignaaleihin.")
 
@@ -681,20 +703,28 @@ def merge_semantic_scores(
             pre_anti_vector >= SEMANTIC_VECTOR_THRESHOLD
             and not deterministic_result.get("title_matches")
         )
-        is_exploration = "exploration" in candidate_lanes or semantic_exploration_candidate
+        is_exploration = (
+            "exploration" in candidate_lanes or semantic_exploration_candidate
+        )
         if job.id in anti_scores and not is_exploration:
             adjusted_vector -= beta * anti_scores[job.id]
         adjusted_vector = max(0.0, min(1.0, adjusted_vector))
-        if adjusted_vector >= SEMANTIC_VECTOR_THRESHOLD and "semantic_similarity" not in candidate_lanes:
+        if (
+            adjusted_vector >= SEMANTIC_VECTOR_THRESHOLD
+            and "semantic_similarity" not in candidate_lanes
+        ):
             candidate_lanes.append("semantic_similarity")
         hidden_opportunity = bool(deterministic_result.get("hidden_opportunity")) or (
-            adjusted_vector >= SEMANTIC_VECTOR_THRESHOLD and not deterministic_result.get("title_matches")
+            adjusted_vector >= SEMANTIC_VECTOR_THRESHOLD
+            and not deterministic_result.get("title_matches")
         )
         if hidden_opportunity and "exploration" not in candidate_lanes:
             candidate_lanes.append("exploration")
         semantic_score = 15 + max(0.0, min(1.0, adjusted_vector)) * 20
         machine_score = max(result.machine_score, round(semantic_score, 2))
-        unpenalized = result.deterministic_result.get("unpenalized_machine_score", result.machine_score)
+        unpenalized = result.deterministic_result.get(
+            "unpenalized_machine_score", result.machine_score
+        )
         unpenalized_machine_score = round(max(float(unpenalized), machine_score), 2)
         passes = result.hard_eligible and (
             result.passes
@@ -721,8 +751,13 @@ def merge_semantic_scores(
             }
         )
         rationale = result.rationale
-        if "semantic_similarity" in candidate_lanes and "Semanttinen samankaltaisuus" not in rationale:
-            rationale = f"{rationale} Semanttinen samankaltaisuus nostaa tämän LLM-arvioon."
+        if (
+            "semantic_similarity" in candidate_lanes
+            and "Semanttinen samankaltaisuus" not in rationale
+        ):
+            rationale = (
+                f"{rationale} Semanttinen samankaltaisuus nostaa tämän LLM-arvioon."
+            )
         merged.append(
             (
                 job,
@@ -739,7 +774,9 @@ def merge_semantic_scores(
     return merged
 
 
-def score_sort_key(item: tuple[JobForScoring, ScoreResult], *, use_unpenalized: bool = False) -> tuple[float, int]:
+def score_sort_key(
+    item: tuple[JobForScoring, ScoreResult], *, use_unpenalized: bool = False
+) -> tuple[float, int]:
     job, result = item
     if use_unpenalized:
         unpenalized = result.deterministic_result.get("unpenalized_machine_score")
@@ -763,7 +800,9 @@ def rank_scored_candidates_for_review(
             item
             for item in sorted(
                 scored,
-                key=lambda item: score_sort_key(item, use_unpenalized=lane == "exploration"),
+                key=lambda item: score_sort_key(
+                    item, use_unpenalized=lane == "exploration"
+                ),
             )
             if item[0].id not in selected_ids
             and lane in item[1].deterministic_result.get("candidate_lanes", [])
@@ -801,7 +840,9 @@ def apply_travel_to_scored_candidates(
     transit_by_destination = resolve_transit_for_queries(
         connection,
         destination_queries,
-        max_lookups=min(len(destination_queries), settings.recommendation_transit_lookup_budget),
+        max_lookups=min(
+            len(destination_queries), settings.recommendation_transit_lookup_budget
+        ),
     )
 
     travel_scored: list[tuple[JobForScoring, ScoreResult, TravelAssessment]] = []
@@ -824,7 +865,9 @@ def apply_travel_to_scored_candidates(
         if "unpenalized_machine_score" not in deterministic_result:
             deterministic_result["unpenalized_machine_score"] = result.machine_score
         pre_travel_score = result.machine_score
-        adjusted_score = max(0.0, min(100.0, pre_travel_score + assessment.score_adjustment))
+        adjusted_score = max(
+            0.0, min(100.0, pre_travel_score + assessment.score_adjustment)
+        )
         deterministic_result["travel_assessment"] = assessment.to_audit_dict()
         deterministic_result["location_evidence"] = {
             "text": assessment.evidence_text,
@@ -890,7 +933,9 @@ def discovery_pool_terms(
     if isinstance(preferences, dict):
         signals = preferences.get("application_history_signals", {})
         if isinstance(signals, dict):
-            candidates.extend(str(title) for title in signals.get("boost_titles_fi", []))
+            candidates.extend(
+                str(title) for title in signals.get("boost_titles_fi", [])
+            )
     candidates.extend(
         str(title) for title in learned_boosts(profile).get("boost_titles_fi", [])
     )
@@ -949,7 +994,9 @@ def fetch_active_job_rows(
         """
     recent_rows = [
         dict(row)
-        for row in connection.execute(sa.text(base_sql), {"max_jobs": max_jobs}).mappings()
+        for row in connection.execute(
+            sa.text(base_sql), {"max_jobs": max_jobs}
+        ).mappings()
     ]
 
     rows_by_id: dict[int, dict[str, Any]] = {int(row["id"]): row for row in recent_rows}
@@ -1029,7 +1076,9 @@ def fetch_active_job_rows(
     discovery_rows_added = 0
     discovery_job_ids: set[int] = set()
     if discovery_terms:
-        params: dict[str, Any] = {"discovery_max_jobs": max(max_jobs * 3, max_jobs + 1000)}
+        params: dict[str, Any] = {
+            "discovery_max_jobs": max(max_jobs * 3, max_jobs + 1000)
+        }
         clauses: list[str] = []
         for index, term in enumerate(discovery_terms):
             key = f"discovery_term_{index}"
@@ -1086,16 +1135,20 @@ def run_deterministic_recommendations(
         activate_candidates = deterministic_only
     if deactivate_existing is None:
         deactivate_existing = deterministic_only
-    profile_row = connection.execute(
-        sa.text(
-            """
+    profile_row = (
+        connection.execute(
+            sa.text(
+                """
             select id, profile
             from job_seeker_profiles
             order by id
             limit 1
             """
+            )
         )
-    ).mappings().one_or_none()
+        .mappings()
+        .one_or_none()
+    )
     if profile_row is None:
         return {"profile_id": 0, "evaluated": 0, "recommended": 0}
 
@@ -1147,9 +1200,7 @@ def run_deterministic_recommendations(
             job_text = " ".join(
                 part or "" for part in (job.title, job.employer, job.description)
             )
-            if any(
-                phrase_in_text(term, job_text) for term in learned_discovery_terms
-            ):
+            if any(phrase_in_text(term, job_text) for term in learned_discovery_terms):
                 deterministic_result = dict(result.deterministic_result)
                 lanes = list(deterministic_result.get("candidate_lanes", []))
                 if "learned_discovery" not in lanes:
@@ -1208,18 +1259,16 @@ def run_deterministic_recommendations(
         except Exception:
             logger.exception("event=semantic_matching_failed")
 
-    scored = [
-        (job, result)
-        for job, result in all_scored
-        if result.passes
-    ]
+    scored = [(job, result) for job, result in all_scored if result.passes]
 
     travel_scored = apply_travel_to_scored_candidates(
         scored,
         profile=profile,
         connection=connection,
     )
-    assessment_by_job_id = {job.id: assessment for job, _result, assessment in travel_scored}
+    assessment_by_job_id = {
+        job.id: assessment for job, _result, assessment in travel_scored
+    }
     scored = rank_scored_candidates_for_review(
         [(job, result) for job, result, _assessment in travel_scored],
         profile=profile,
@@ -1238,7 +1287,9 @@ def run_deterministic_recommendations(
             commutable_rank_by_job_id[job.id] = commutable_order
         if assessment.commutable_or_full_remote:
             commutable_or_full_remote_order += 1
-            commutable_or_full_remote_rank_by_job_id[job.id] = commutable_or_full_remote_order
+            commutable_or_full_remote_rank_by_job_id[job.id] = (
+                commutable_or_full_remote_order
+            )
 
     if deactivate_existing:
         connection.execute(
@@ -1265,7 +1316,9 @@ def run_deterministic_recommendations(
         deterministic_result["hard_reasons"] = list(result.hard_reasons)
         nationwide_rank = nationwide_rank_by_job_id[job.id]
         commutable_rank = commutable_rank_by_job_id.get(job.id)
-        commutable_or_full_remote_rank = commutable_or_full_remote_rank_by_job_id.get(job.id)
+        commutable_or_full_remote_rank = commutable_or_full_remote_rank_by_job_id.get(
+            job.id
+        )
         connection.execute(
             sa.text(
                 """
@@ -1396,7 +1449,9 @@ def run_deterministic_recommendations(
             {
                 "job_id": job.id,
                 "profile_id": profile_id,
-                "deterministic_result": json.dumps(deterministic_result, ensure_ascii=False),
+                "deterministic_result": json.dumps(
+                    deterministic_result, ensure_ascii=False
+                ),
                 "machine_score": result.machine_score,
                 "vector_score": result.vector_score,
                 "rank": nationwide_rank,
@@ -1431,7 +1486,9 @@ def run_deterministic_recommendations(
         "learned_discovery_attributed": learned_discovery_attributed,
         "deterministic_passes": len(travel_scored),
         "commutable_candidates": len(commutable_rank_by_job_id),
-        "commutable_or_full_remote_candidates": len(commutable_or_full_remote_rank_by_job_id),
+        "commutable_or_full_remote_candidates": len(
+            commutable_or_full_remote_rank_by_job_id
+        ),
         "recommended": len(scored),
     }
 
@@ -1497,7 +1554,9 @@ def evaluation_request_context(profile: dict[str, Any]) -> tuple[str, dict[str, 
             few_shot_examples, ensure_ascii=False
         )
     if eval_hints:
-        summary += "\n\nArviointivihjeet:\n" + "\n".join(str(hint) for hint in eval_hints)
+        summary += "\n\nArviointivihjeet:\n" + "\n".join(
+            str(hint) for hint in eval_hints
+        )
     summary = sanitize_outbound(summary, extra_secrets=profile_secrets)
     return summary, {"few_shot_examples": few_shot_examples, "eval_hints": eval_hints}
 
@@ -1518,9 +1577,10 @@ def select_llm_review_candidates(
     structure_predicate, structure_params = structural_eligibility_predicate(
         profile=profile, as_of=capture_as_of()
     )
-    rows = list(connection.execute(
-        sa.text(
-            f"""
+    rows = list(
+        connection.execute(
+            sa.text(
+                f"""
             with eligible as (
                 select
                     r.id as recommendation_id,
@@ -1612,16 +1672,17 @@ def select_llm_review_candidates(
                 machine_score desc,
                 recommendation_id desc
             """
-        ),
-        {
-            "profile_id": profile_id,
-            "commutable_llm_limit": scan_limits["commutable"],
-            "remote_llm_limit": scan_limits["remote"],
-            "nationwide_llm_limit": scan_limits["nationwide"],
-            "prompt_version": settings.llm_prompt_version,
-            **structure_params,
-        },
-    ).mappings())
+            ),
+            {
+                "profile_id": profile_id,
+                "commutable_llm_limit": scan_limits["commutable"],
+                "remote_llm_limit": scan_limits["remote"],
+                "nationwide_llm_limit": scan_limits["nationwide"],
+                "prompt_version": settings.llm_prompt_version,
+                **structure_params,
+            },
+        ).mappings()
+    )
     logger.info(
         "event=llm_evaluation_candidates_selected total=%s paid_budget=%s scan_commutable=%s scan_remote=%s scan_nationwide=%s prompt_version=%s",
         len(rows),
@@ -1641,16 +1702,20 @@ def run_llm_evaluations(
     max_jobs: int,
 ) -> dict[str, int]:
     settings = get_settings()
-    profile_row = connection.execute(
-        sa.text(
-            """
+    profile_row = (
+        connection.execute(
+            sa.text(
+                """
             select id, profile
             from job_seeker_profiles
             order by id
             limit 1
             """
+            )
         )
-    ).mappings().one_or_none()
+        .mappings()
+        .one_or_none()
+    )
     if profile_row is None:
         return {"llm_evaluated": 0, "llm_failed": 0}
 
@@ -1681,7 +1746,9 @@ def run_llm_evaluations(
         if isinstance(deterministic_result, str):
             deterministic_result = json.loads(deterministic_result)
         anti_similarity = deterministic_result.get("anti_preference_similarity")
-        learned_exclusion_matches = deterministic_result.get("learned_exclusion_matches") or []
+        learned_exclusion_matches = (
+            deterministic_result.get("learned_exclusion_matches") or []
+        )
         if (
             anti_similarity is not None
             and float(anti_similarity) >= 0.75
@@ -1704,25 +1771,31 @@ def run_llm_evaluations(
             profile_id=profile_id,
             learned_input=learned_input or None,
         )
-        existing = connection.execute(
-            sa.text(
-                """
+        existing = (
+            connection.execute(
+                sa.text(
+                    """
                 select id, response
                 from llm_evaluations
                 where request_hash = :request_hash
                   and job_id = :job_id
                   and profile_id = :profile_id
                 """
-            ),
-            {
-                "request_hash": request_hash,
-                "job_id": int(row["job_id"]),
-                "profile_id": profile_id,
-            },
-        ).mappings().one_or_none()
+                ),
+                {
+                    "request_hash": request_hash,
+                    "job_id": int(row["job_id"]),
+                    "profile_id": profile_id,
+                },
+            )
+            .mappings()
+            .one_or_none()
+        )
         commit_if_supported(connection)
         cached_payload = (
-            validated_evaluation_payload(existing["response"]) if existing is not None else None
+            validated_evaluation_payload(existing["response"])
+            if existing is not None
+            else None
         )
         if existing is not None and cached_payload is None:
             logger.warning(
@@ -1744,7 +1817,10 @@ def run_llm_evaluations(
                 ),
                 {"profile_id": profile_id},
             ).scalar_one_or_none()
-            if current_revision is not None and str(current_revision) != profile_revision:
+            if (
+                current_revision is not None
+                and str(current_revision) != profile_revision
+            ):
                 deferred += 1
                 logger.warning(
                     "event=llm_evaluation_deferred reason=profile_revision_changed job_id=%s",
@@ -1756,9 +1832,15 @@ def run_llm_evaluations(
                 evaluation_id = int(existing["id"])
                 response_payload = cached_payload
             else:
-                # Consume the paid budget before the call: a billable response
-                # that fails parsing still counts as an attempt.
-                paid_calls += 1
+                # Every provider attempt, including a parse retry, claims the
+                # aggregate paid budget before it happens.
+                def _claim_attempt() -> bool:
+                    nonlocal paid_calls
+                    if paid_calls >= max_jobs:
+                        return False
+                    paid_calls += 1
+                    return True
+
                 commit_if_supported(connection)
                 started = time.monotonic()
                 evaluation, metadata = evaluate_with_parse_retry(
@@ -1768,13 +1850,15 @@ def run_llm_evaluations(
                     model=eval_model,
                     prompt_version=settings.llm_prompt_version,
                     max_retries=settings.llm_eval_parse_retries,
+                    claim_attempt=_claim_attempt,
                 )
                 latency_ms = int((time.monotonic() - started) * 1000)
                 response_payload = evaluation.model_dump()
                 accounting = metadata.get("usage_normalized") or {}
-                current_row = connection.execute(
-                    sa.text(
-                        """
+                current_row = (
+                    connection.execute(
+                        sa.text(
+                            """
                         select r.deterministic_result, j.title, j.employer, j.description, j.location
                         from recommendations r
                         join jobs j on j.id = r.job_id
@@ -1782,13 +1866,16 @@ def run_llm_evaluations(
                           and r.job_id = :job_id
                           and r.profile_id = :profile_id
                         """
-                    ),
-                    {
-                        "recommendation_id": int(row["recommendation_id"]),
-                        "job_id": int(row["job_id"]),
-                        "profile_id": profile_id,
-                    },
-                ).mappings().one_or_none()
+                        ),
+                        {
+                            "recommendation_id": int(row["recommendation_id"]),
+                            "job_id": int(row["job_id"]),
+                            "profile_id": profile_id,
+                        },
+                    )
+                    .mappings()
+                    .one_or_none()
+                )
                 current_hash = (
                     evaluation_request_hash(
                         profile_summary=augmented_profile_summary,
@@ -1879,10 +1966,13 @@ def run_llm_evaluations(
                             "profile_id": profile_id,
                             "provider": provider.provider_name,
                             "configured_model": eval_model,
-                            "returned_model": metadata.get("returned_model") or eval_model,
+                            "returned_model": metadata.get("returned_model")
+                            or eval_model,
                             "prompt_version": settings.llm_prompt_version,
                             "request_hash": request_hash,
-                            "response": json.dumps(response_payload, ensure_ascii=False),
+                            "response": json.dumps(
+                                response_payload, ensure_ascii=False
+                            ),
                             "input_tokens": accounting.get("input_tokens"),
                             "output_tokens": accounting.get("output_tokens"),
                             "cached_tokens": accounting.get("cached_tokens"),
@@ -1917,7 +2007,9 @@ def run_llm_evaluations(
                     "fit_tier": response_payload["fit_tier"],
                     "suggested_action": response_payload["suggested_action"],
                     "rationale": response_payload["rationale"],
-                    "concerns": json.dumps(response_payload["concerns"], ensure_ascii=False),
+                    "concerns": json.dumps(
+                        response_payload["concerns"], ensure_ascii=False
+                    ),
                 },
             )
             evaluated += 1
@@ -2005,32 +2097,36 @@ def _process_llm_candidate(
         learned_input=learned_input or None,
     )
     with engine.begin() as connection:
-        existing = connection.execute(
-            sa.text(
-                """
+        existing = (
+            connection.execute(
+                sa.text(
+                    """
                 select id, response
                 from llm_evaluations
                 where request_hash = :request_hash
                   and job_id = :job_id
                   and profile_id = :profile_id
                 """
-            ),
-            {
-                "request_hash": request_hash,
-                "job_id": int(row["job_id"]),
-                "profile_id": profile_id,
-            },
-        ).mappings().one_or_none()
+                ),
+                {
+                    "request_hash": request_hash,
+                    "job_id": int(row["job_id"]),
+                    "profile_id": profile_id,
+                },
+            )
+            .mappings()
+            .one_or_none()
+        )
 
     cached_payload = (
-        validated_evaluation_payload(existing["response"]) if existing is not None else None
+        validated_evaluation_payload(existing["response"])
+        if existing is not None
+        else None
     )
     if cached_payload is not None:
         evaluation_id = int(existing["id"])
         response_payload = cached_payload
     else:
-        if not budget.claim():
-            return "deferred"
         if stop.is_set():
             return "skipped"
         if profile_revision is not None:
@@ -2041,10 +2137,15 @@ def _process_llm_candidate(
                     ),
                     {"profile_id": profile_id},
                 ).scalar_one_or_none()
-            if current_revision is not None and str(current_revision) != profile_revision:
+            if (
+                current_revision is not None
+                and str(current_revision) != profile_revision
+            ):
                 return "deferred"
         started = time.monotonic()
         try:
+            # The shared budget is claimed before every attempt, so a parse
+            # retry cannot push the aggregate above the configured cap.
             evaluation, metadata = evaluate_with_parse_retry(
                 provider,
                 profile_summary=augmented_profile_summary,
@@ -2052,7 +2153,10 @@ def _process_llm_candidate(
                 model=eval_model,
                 prompt_version=settings.llm_prompt_version,
                 max_retries=settings.llm_eval_parse_retries,
+                claim_attempt=budget.claim,
             )
+        except PaidBudgetExhausted:
+            return "deferred"
         except EvaluationProviderUnavailable as exc:
             stop.set()
             mark_provider_unavailable(settings, str(exc))
@@ -2064,9 +2168,10 @@ def _process_llm_candidate(
         response_payload = evaluation.model_dump()
         accounting = metadata.get("usage_normalized") or {}
         with engine.begin() as connection:
-            current_row = connection.execute(
-                sa.text(
-                    """
+            current_row = (
+                connection.execute(
+                    sa.text(
+                        """
                     select r.deterministic_result, j.title, j.employer, j.description, j.location
                     from recommendations r
                     join jobs j on j.id = r.job_id
@@ -2074,13 +2179,16 @@ def _process_llm_candidate(
                       and r.job_id = :job_id
                       and r.profile_id = :profile_id
                     """
-                ),
-                {
-                    "recommendation_id": int(row["recommendation_id"]),
-                    "job_id": int(row["job_id"]),
-                    "profile_id": profile_id,
-                },
-            ).mappings().one_or_none()
+                    ),
+                    {
+                        "recommendation_id": int(row["recommendation_id"]),
+                        "job_id": int(row["job_id"]),
+                        "profile_id": profile_id,
+                    },
+                )
+                .mappings()
+                .one_or_none()
+            )
             current_hash = (
                 evaluation_request_hash(
                     profile_summary=augmented_profile_summary,
@@ -2180,7 +2288,9 @@ def _process_llm_candidate(
                 "fit_tier": response_payload["fit_tier"],
                 "suggested_action": response_payload["suggested_action"],
                 "rationale": response_payload["rationale"],
-                "concerns": json.dumps(response_payload["concerns"], ensure_ascii=False),
+                "concerns": json.dumps(
+                    response_payload["concerns"], ensure_ascii=False
+                ),
             },
         )
     return "evaluated"
@@ -2202,11 +2312,22 @@ def run_llm_evaluations_concurrent(
     settings = get_settings()
     workers = max(1, min(int(concurrency), max(1, max_jobs), 16))
     with engine.connect() as connection:
-        profile_row = connection.execute(
-            sa.text("select id, profile from job_seeker_profiles order by id limit 1")
-        ).mappings().one_or_none()
+        profile_row = (
+            connection.execute(
+                sa.text(
+                    "select id, profile from job_seeker_profiles order by id limit 1"
+                )
+            )
+            .mappings()
+            .one_or_none()
+        )
         if profile_row is None:
-            return {"llm_evaluated": 0, "llm_failed": 0, "llm_skipped": 0, "llm_deferred": 0}
+            return {
+                "llm_evaluated": 0,
+                "llm_failed": 0,
+                "llm_skipped": 0,
+                "llm_deferred": 0,
+            }
         profile_id = int(profile_row["id"])
         profile = dict(profile_row["profile"])
         augmented_profile_summary, learned_input = evaluation_request_context(profile)
@@ -2493,16 +2614,20 @@ def refresh_active_recommendation_ranks(
 
 
 def load_active_profile(connection: Connection) -> dict[str, Any] | None:
-    row = connection.execute(
-        sa.text(
-            """
+    row = (
+        connection.execute(
+            sa.text(
+                """
             select profile
             from job_seeker_profiles
             order by id
             limit 1
             """
+            )
         )
-    ).mappings().one_or_none()
+        .mappings()
+        .one_or_none()
+    )
     if row is None:
         return None
     profile = row["profile"]
@@ -2606,9 +2731,10 @@ def reconcile_recommendation_publication(
     predicate, predicate_params = structural_eligibility_predicate(
         profile=profile, as_of=as_of
     )
-    deactivated = connection.execute(
-        sa.text(
-            f"""
+    deactivated = (
+        connection.execute(
+            sa.text(
+                f"""
             update recommendations r
             set is_active = false,
                 rank = null,
@@ -2619,9 +2745,11 @@ def reconcile_recommendation_publication(
               and r.is_active = true
               and not ({predicate})
             """
-        ),
-        {"profile_id": profile_id, **predicate_params},
-    ).rowcount or 0
+            ),
+            {"profile_id": profile_id, **predicate_params},
+        ).rowcount
+        or 0
+    )
 
     hard_rejected = 0
     identity_mode = bool(provider_name and eval_model)
@@ -2740,7 +2868,9 @@ def reconcile_recommendation_publication(
                 ),
                 {
                     "recommendation_id": int(row["recommendation_id"]),
-                    "deterministic_result": json.dumps(deterministic_result, ensure_ascii=False),
+                    "deterministic_result": json.dumps(
+                        deterministic_result, ensure_ascii=False
+                    ),
                 },
             )
             hard_rejected += 1
@@ -2753,7 +2883,9 @@ def reconcile_recommendation_publication(
     }
 
 
-def resolve_publication_mode(settings: Any, *, hosted_allowed: bool, provider: Any) -> str:
+def resolve_publication_mode(
+    settings: Any, *, hosted_allowed: bool, provider: Any
+) -> str:
     """Classify why hosted review is or is not available.
 
     - hosted: a provider is ready.
@@ -2765,7 +2897,10 @@ def resolve_publication_mode(settings: Any, *, hosted_allowed: bool, provider: A
     """
     if provider is not None:
         return "hosted"
-    if not hosted_allowed or not str(getattr(settings, "llm_provider", "") or "").strip():
+    if (
+        not hosted_allowed
+        or not str(getattr(settings, "llm_provider", "") or "").strip()
+    ):
         return "deterministic_only"
     return "unavailable"
 
@@ -2888,7 +3023,9 @@ def inventory_review_backlog(
         by_state[state] = by_state.get(state, 0) + 1
         if state != "current":
             stale_ids.append(int(row["recommendation_id"]))
-            stale_identities.append(expected_identity or f"id:{row['recommendation_id']}")
+            stale_identities.append(
+                expected_identity or f"id:{row['recommendation_id']}"
+            )
     cohort_hash = hashlib.sha256(
         json.dumps(sorted(stale_identities), separators=(",", ":")).encode("utf-8")
     ).hexdigest()
@@ -2906,17 +3043,51 @@ def inventory_review_backlog(
     }
 
 
+def _stale_inventory(
+    connection: Connection,
+    *,
+    settings: Any,
+    profile: dict[str, Any],
+    provider: Any,
+) -> dict[str, Any]:
+    row = (
+        connection.execute(
+            sa.text("select id from job_seeker_profiles order by id limit 1")
+        )
+        .mappings()
+        .one_or_none()
+    )
+    profile_id = int(row["id"]) if row is not None else 0
+    return inventory_review_backlog(
+        connection,
+        profile_id=profile_id,
+        prompt_version=settings.llm_prompt_version,
+        profile=profile,
+        provider_name=provider.provider_name if provider is not None else None,
+        eval_model=(
+            configured_eval_model(settings, provider.provider_name)
+            if provider is not None
+            else None
+        ),
+    )
+
+
 def run_review_backfill(
     *,
     allow_paid: bool = False,
     max_calls: int = 0,
     dry_run: bool = True,
 ) -> dict[str, Any]:
-    """Inventory the stale review cohort; paid execution needs authorization.
+    """Inventory the stale review cohort and optionally execute a bounded recovery.
 
     Paid recovery is deliberately gated: the plan requires an explicitly set
-    aggregate budget and separate authorization, so this returns the frozen
-    inventory and refuses to spend unless both are supplied.
+    aggregate budget and a separate authorization flag, so a dry run returns the
+    frozen inventory and execution refuses to spend unless both are supplied.
+
+    Execution reuses the normal evaluation paths, so every attempt (including a
+    parse retry) claims the shared paid budget before the provider call. Because
+    a completed evaluation is stored under its request hash, re-running the
+    command resumes the remaining backlog instead of repeating paid work.
     """
     settings = get_settings()
     engine = get_engine()
@@ -2924,22 +3095,9 @@ def run_review_backfill(
         profile = load_active_profile(connection)
         if profile is None:
             return {"status": "skipped", "reason": "no_profile"}
-        row = connection.execute(
-            sa.text("select id from job_seeker_profiles order by id limit 1")
-        ).mappings().one_or_none()
-        profile_id = int(row["id"]) if row is not None else 0
         provider = build_evaluation_provider(settings)
-        inventory = inventory_review_backlog(
-            connection,
-            profile_id=profile_id,
-            prompt_version=settings.llm_prompt_version,
-            profile=profile,
-            provider_name=provider.provider_name if provider is not None else None,
-            eval_model=(
-                configured_eval_model(settings, provider.provider_name)
-                if provider is not None
-                else None
-            ),
+        inventory = _stale_inventory(
+            connection, settings=settings, profile=profile, provider=provider
         )
     inventory["status"] = "dry_run" if dry_run else "ready"
     inventory["budget_max_calls"] = max_calls
@@ -2949,9 +3107,53 @@ def run_review_backfill(
         inventory["status"] = "blocked"
         inventory["reason"] = "paid_backfill_requires_explicit_authorization_and_budget"
         return inventory
-    inventory["status"] = "blocked"
-    inventory["reason"] = "resumable_backfill_execution_not_yet_implemented"
-    return inventory
+    if provider is None:
+        inventory["status"] = "blocked"
+        inventory["reason"] = "provider_unavailable"
+        return inventory
+    if not hosted_calls_allowed_for_profile(profile):
+        inventory["status"] = "blocked"
+        inventory["reason"] = "hosted_calls_denied_by_profile_privacy"
+        return inventory
+
+    cohort_hash_before = inventory.get("cohort_hash")
+    if settings.llm_eval_concurrency > 1:
+        execution = run_llm_evaluations_concurrent(
+            engine,
+            provider=provider,
+            max_jobs=max_calls,
+            concurrency=settings.llm_eval_concurrency,
+        )
+    else:
+        with engine.connect() as connection:
+            execution = run_llm_evaluations(
+                connection, provider=provider, max_jobs=max_calls
+            )
+    with engine.connect() as connection:
+        after = _stale_inventory(
+            connection, settings=settings, profile=profile, provider=provider
+        )
+    return {
+        "status": "executed",
+        "budget_max_calls": max_calls,
+        "concurrency": settings.llm_eval_concurrency,
+        "cohort_hash_before": cohort_hash_before,
+        "cohort_hash_after": after.get("cohort_hash"),
+        "execution": execution,
+        "before": {
+            "stale_total": inventory.get("stale_total"),
+            "by_review_state": inventory.get("by_review_state"),
+            "by_scope": inventory.get("by_scope"),
+            "by_publication": inventory.get("by_publication"),
+        },
+        "after": {
+            "stale_total": after.get("stale_total"),
+            "by_review_state": after.get("by_review_state"),
+            "by_scope": after.get("by_scope"),
+            "by_publication": after.get("by_publication"),
+        },
+        "remaining_stale": after.get("stale_total"),
+    }
 
 
 def run_matching(max_jobs: int = 500) -> dict[str, int]:
@@ -2961,7 +3163,9 @@ def run_matching(max_jobs: int = 500) -> dict[str, int]:
         profile = load_active_profile(connection)
     hosted_allowed = hosted_calls_allowed_for_profile(profile)
     provider = build_evaluation_provider(settings) if hosted_allowed else None
-    mode = resolve_publication_mode(settings, hosted_allowed=hosted_allowed, provider=provider)
+    mode = resolve_publication_mode(
+        settings, hosted_allowed=hosted_allowed, provider=provider
+    )
     as_of = capture_as_of()
     # A plain connection (not engine.begin()) so the embedding/transit phases can
     # commit before their remote calls; the final write transaction is committed
@@ -2992,7 +3196,9 @@ def run_matching(max_jobs: int = 500) -> dict[str, int]:
                     settings=settings,
                     as_of=as_of,
                     publication_mode=mode,
-                    provider_name=provider.provider_name if provider is not None else None,
+                    provider_name=provider.provider_name
+                    if provider is not None
+                    else None,
                     eval_model=(
                         configured_eval_model(settings, provider.provider_name)
                         if provider is not None

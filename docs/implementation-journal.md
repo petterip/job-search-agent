@@ -550,13 +550,32 @@ source and fixed:
   `LLM_REQUIREMENT_AWARE_EXCERPT=true`, verified inside the running api and
   worker containers. The excerpt change invalidates existing evaluation
   identities once; the per-run `LLM_EVAL_MAX_JOBS` cap bounds the refresh.
+- **P0-3 paid backfill implemented.** `run_review_backfill` now executes a
+  bounded recovery instead of returning "not implemented": it refuses without
+  `--allow-paid-backfill` and a positive `--max-paid-calls`, blocks when the
+  provider or profile privacy forbids hosted calls, reuses the normal
+  sequential/concurrent evaluation paths, and re-inventories afterwards with the
+  cohort hash before/after. Re-running resumes because completed work is stored
+  under its request hash.
+- **Attempt-level paid budget.** `evaluate_with_parse_retry` now claims the
+  shared budget before *every* provider attempt via a `claim_attempt` callback
+  and raises `PaidBudgetExhausted`, so a parse retry can no longer push a run
+  above its declared aggregate budget; both evaluation paths treat that as
+  `deferred`.
+- **P2-4 startup validation and smoke check.** `Settings.llm_config_problems()`
+  reports unsupported provider, missing key, empty model and invalid concurrency
+  /retry/max-jobs/timeout values without exposing secrets; `/health` returns them
+  as `config_warnings` (liveness stays up), and the worker exits with one
+  actionable message. `python -m app.llm_check` (also `make llm-check`) makes one
+  billable call to verify credentials, model access and structured output, and is
+  deliberately not wired into `/health`.
 
 ### Verification commands
 
 ```bash
 cd backend
-python -m pytest --timeout=10 -q                       # 439 passed, 55 skipped
-TEST_DATABASE_URL=postgresql+psycopg://... python -m pytest --timeout=30 -q  # 494 passed
+python -m pytest --timeout=10 -q                       # 447 passed, 57 skipped
+TEST_DATABASE_URL=postgresql+psycopg://... python -m pytest --timeout=30 -q  # 504 passed
 cd ../web && npm run typecheck && npm run build
 ```
 

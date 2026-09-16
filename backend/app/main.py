@@ -10,7 +10,10 @@ from pydantic import BaseModel, Field
 
 from app.config import get_settings
 from app.db import get_engine
-from app.enrichers.repository import enrichment_queue_health, latest_enrichment_run_summary
+from app.enrichers.repository import (
+    enrichment_queue_health,
+    latest_enrichment_run_summary,
+)
 from app.freshness import capture_as_of
 from app.llm import configured_eval_model
 from app.matching import load_active_profile, structural_eligibility_predicate
@@ -21,7 +24,11 @@ from app.location_evidence_service import (
 )
 from app.logging import configure_logging
 from app.source_links import normalize_link, source_external_apply_url
-from app.travel_policy import ROUTING_PROFILE, home_city_from_profile, travel_policy_fingerprint
+from app.travel_policy import (
+    ROUTING_PROFILE,
+    home_city_from_profile,
+    travel_policy_fingerprint,
+)
 
 configure_logging()
 
@@ -71,7 +78,7 @@ class HealthResponse(BaseModel):
     embedding_model: str
     embedding_dimension: int
     eval_model: str
-
+    config_warnings: list[str] = []
 
 
 class JobListItem(BaseModel):
@@ -224,7 +231,9 @@ def recommendation_scope_sql(scope: RecommendationScope) -> tuple[str, str]:
     )
 
 
-def current_travel_policy_params(profile: dict[str, Any] | None = None) -> dict[str, Any]:
+def current_travel_policy_params(
+    profile: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     settings = get_settings()
     return {
         "travel_origin_address": settings.transit_origin_address,
@@ -289,9 +298,10 @@ def recommendation_scope_counts(
     commutable_filter, _commutable_order = recommendation_scope_sql("commutable")
     remote_filter, _remote_order = recommendation_scope_sql("commutable_or_full_remote")
     scope_params = dict(predicate_params or current_travel_policy_params())
-    row = connection.execute(
-        sa.text(
-            f"""
+    row = (
+        connection.execute(
+            sa.text(
+                f"""
             select
                 count(*) filter (where {commutable_filter})::int as commutable,
                 count(*) filter (where {remote_filter})::int as commutable_or_full_remote,
@@ -301,9 +311,12 @@ def recommendation_scope_counts(
             where r.is_active = true
               and ({predicate})
             """
-        ),
-        scope_params,
-    ).mappings().one()
+            ),
+            scope_params,
+        )
+        .mappings()
+        .one()
+    )
     commutable = int(row["commutable"] or 0)
     remote = int(row["commutable_or_full_remote"] or 0)
     nationwide = int(row["nationwide"] or 0)
@@ -429,15 +442,21 @@ def build_scoring_snapshot(
         "rank": recommendation.get("rank"),
         "commutable": bool(recommendation.get("commutable", False)),
         "full_remote": bool(recommendation.get("full_remote", False)),
-        "commutable_or_full_remote": bool(recommendation.get("commutable_or_full_remote", False)),
+        "commutable_or_full_remote": bool(
+            recommendation.get("commutable_or_full_remote", False)
+        ),
         "commutable_rank": recommendation.get("commutable_rank"),
-        "commutable_or_full_remote_rank": recommendation.get("commutable_or_full_remote_rank"),
+        "commutable_or_full_remote_rank": recommendation.get(
+            "commutable_or_full_remote_rank"
+        ),
         "nationwide_rank": recommendation.get("nationwide_rank"),
         "travel_status": recommendation.get("travel_status"),
         "travel_reason_code": recommendation.get("travel_reason_code"),
         "travel_duration_seconds": recommendation.get("travel_duration_seconds"),
         "travel_distance_km": recommendation.get("travel_distance_km"),
-        "travel_commute_limit_minutes": recommendation.get("travel_commute_limit_minutes"),
+        "travel_commute_limit_minutes": recommendation.get(
+            "travel_commute_limit_minutes"
+        ),
         "travel_routing_profile": recommendation.get("travel_routing_profile"),
         "travel_assessment": deterministic_result.get("travel_assessment"),
         "is_active": bool(recommendation.get("is_active", True)),
@@ -467,7 +486,9 @@ def resolve_feedback_submission(
     legacy_action: Literal["good_match", "not_relevant", "applied"] | None,
 ) -> tuple[int, bool, str | None, str | None]:
     if legacy_action is not None and body is not None and body.rating is not None:
-        raise HTTPException(status_code=422, detail="use either JSON rating or legacy action, not both")
+        raise HTTPException(
+            status_code=422, detail="use either JSON rating or legacy action, not both"
+        )
     if legacy_action is not None:
         rating, applied = LEGACY_ACTION_TO_RATING[legacy_action]
         return rating, applied, None, legacy_action
@@ -480,7 +501,9 @@ def resolve_feedback_submission(
     if rating is None:
         raise HTTPException(status_code=422, detail="rating is required")
     if applied and rating <= 2:
-        raise HTTPException(status_code=422, detail="applied cannot be set with rating 2 or lower")
+        raise HTTPException(
+            status_code=422, detail="applied cannot be set with rating 2 or lower"
+        )
     return rating, applied, body.comment, legacy_action_for_rating(rating, applied)
 
 
@@ -540,7 +563,9 @@ def apply_recommendation_visibility_from_feedback(
     # forbidden, deterministic-only rows must not be deactivated for lacking an
     # LLM evaluation.
     hosted_allowed = hosted_calls_allowed_for_profile(profile)
-    deterministic_only = (not hosted_allowed) or not str(settings.llm_provider or "").strip()
+    deterministic_only = (not hosted_allowed) or not str(
+        settings.llm_provider or ""
+    ).strip()
     refresh_active_recommendation_ranks(
         connection,
         profile_id=int(profile_id),
@@ -579,7 +604,9 @@ def build_recommendation_category(
     keyword_matches = set(result.get("keyword_matches") or [])
     sector_matches = set(result.get("sector_matches") or [])
     candidate_lanes = set(result.get("candidate_lanes") or [])
-    hidden_opportunity = bool(result.get("hidden_opportunity")) or "exploration" in candidate_lanes
+    hidden_opportunity = (
+        bool(result.get("hidden_opportunity")) or "exploration" in candidate_lanes
+    )
 
     library_terms = {
         "kirjasto",
@@ -599,7 +626,15 @@ def build_recommendation_category(
         "hallintosihteeri",
         "kehittäminen",
     }
-    culture_terms = {"kulttuuri", "tapahtuma", "viestintä", "sisältö", "tuotanto", "museo", "markkinointi"}
+    culture_terms = {
+        "kulttuuri",
+        "tapahtuma",
+        "viestintä",
+        "sisältö",
+        "tuotanto",
+        "museo",
+        "markkinointi",
+    }
     music_literature_terms = {
         "alttoviulu",
         "artikkeli",
@@ -623,11 +658,17 @@ def build_recommendation_category(
     def has_match_term(terms: set[str]) -> bool:
         return bool((title_matches | keyword_matches | sector_matches) & terms)
 
-    if any(term in title_text for term in library_terms) or bool(title_matches & library_terms):
+    if any(term in title_text for term in library_terms) or bool(
+        title_matches & library_terms
+    ):
         return ("Kirjasto ja tietopalvelu", hidden_opportunity)
-    if any(term in title_text for term in strong_leadership_terms) or bool(title_matches & strong_leadership_terms):
+    if any(term in title_text for term in strong_leadership_terms) or bool(
+        title_matches & strong_leadership_terms
+    ):
         return ("Johtaminen ja hallinto", hidden_opportunity)
-    if has_display_term(music_literature_terms) or has_match_term(music_literature_terms):
+    if has_display_term(music_literature_terms) or has_match_term(
+        music_literature_terms
+    ):
         return ("Musiikki, kirjallisuus ja sisällöt", hidden_opportunity)
     if has_display_term(guidance_terms) or has_match_term(guidance_terms):
         return ("Ohjaus ja asiakastyö", hidden_opportunity)
@@ -750,6 +791,8 @@ def build_jobs_where_clause(
 @app.get("/health", response_model=HealthResponse)
 async def health() -> HealthResponse:
     settings = get_settings()
+    # Liveness never depends on provider health, but a configuration that would
+    # fail every evaluation is surfaced once instead of per candidate.
     return HealthResponse(
         status="ok",
         service=settings.app_name,
@@ -759,6 +802,7 @@ async def health() -> HealthResponse:
         embedding_model=settings.openai_embedding_model,
         embedding_dimension=settings.openai_embedding_dimension,
         eval_model=configured_eval_model(settings),
+        config_warnings=settings.llm_config_problems(),
     )
 
 
@@ -841,9 +885,10 @@ async def list_jobs(
 async def get_job(job_id: int) -> JobDetailResponse:
     engine = get_engine()
     with engine.connect() as connection:
-        row = connection.execute(
-            sa.text(
-                """
+        row = (
+            connection.execute(
+                sa.text(
+                    """
                 select id, title, employer, description, location, published_at, status
                 from jobs
                 where id = :job_id
@@ -857,9 +902,12 @@ async def get_job(job_id: int) -> JobDetailResponse:
                         and js.closed_at is null
                   )
                 """
-            ),
-            {"job_id": job_id},
-        ).mappings().one_or_none()
+                ),
+                {"job_id": job_id},
+            )
+            .mappings()
+            .one_or_none()
+        )
         if row is None:
             raise HTTPException(status_code=404, detail="job not found")
 
@@ -902,10 +950,13 @@ async def get_job(job_id: int) -> JobDetailResponse:
                 )
             )
 
-        publication_predicate, publication_params = current_publication_predicate(connection)
-        recommendation_row = connection.execute(
-            sa.text(
-                f"""
+        publication_predicate, publication_params = current_publication_predicate(
+            connection
+        )
+        recommendation_row = (
+            connection.execute(
+                sa.text(
+                    f"""
                 select
                     r.id,
                     r.rank,
@@ -960,9 +1011,12 @@ async def get_job(job_id: int) -> JobDetailResponse:
                 order by r.id desc
                 limit 1
                 """
-            ),
-            {"job_id": job_id, **publication_params},
-        ).mappings().one_or_none()
+                ),
+                {"job_id": job_id, **publication_params},
+            )
+            .mappings()
+            .one_or_none()
+        )
         recommendation = (
             recommendation_item_from_row(recommendation_row)
             if recommendation_row is not None
@@ -971,11 +1025,15 @@ async def get_job(job_id: int) -> JobDetailResponse:
         job_evidence = resolve_location_evidence_for_job(
             connection,
             row["location"],
-            fallback=recommendation.location_evidence if recommendation is not None else None,
+            fallback=recommendation.location_evidence
+            if recommendation is not None
+            else None,
             max_lookups=1,
         )
         if recommendation is not None:
-            recommendation = recommendation.model_copy(update={"location_evidence": job_evidence})
+            recommendation = recommendation.model_copy(
+                update={"location_evidence": job_evidence}
+            )
         connection.commit()
 
     return JobDetailResponse(
@@ -1094,7 +1152,9 @@ async def list_source_status() -> SourceStatusResponse:
     return SourceStatusResponse(
         sources=sources,
         enrichment_last_run=(
-            EnrichmentRunStatus(**enrichment_row) if enrichment_row is not None else None
+            EnrichmentRunStatus(**enrichment_row)
+            if enrichment_row is not None
+            else None
         ),
         enrichment_queue=EnrichmentQueueHealth(**enrichment_queue),
     )
@@ -1194,13 +1254,19 @@ async def list_recommendations(
     )
 
 
-@app.get("/recommendations/{recommendation_id}/feedback", response_model=RecommendationFeedbackResponse)
-async def get_recommendation_feedback(recommendation_id: int) -> RecommendationFeedbackResponse:
+@app.get(
+    "/recommendations/{recommendation_id}/feedback",
+    response_model=RecommendationFeedbackResponse,
+)
+async def get_recommendation_feedback(
+    recommendation_id: int,
+) -> RecommendationFeedbackResponse:
     engine = get_engine()
     with engine.connect() as connection:
-        row = connection.execute(
-            sa.text(
-                """
+        row = (
+            connection.execute(
+                sa.text(
+                    """
                 select
                     rf.id,
                     rf.recommendation_id,
@@ -1211,9 +1277,12 @@ async def get_recommendation_feedback(recommendation_id: int) -> RecommendationF
                 from recommendation_feedback rf
                 where rf.recommendation_id = :recommendation_id
                 """
-            ),
-            {"recommendation_id": recommendation_id},
-        ).mappings().one_or_none()
+                ),
+                {"recommendation_id": recommendation_id},
+            )
+            .mappings()
+            .one_or_none()
+        )
         if row is None:
             raise HTTPException(status_code=404, detail="feedback not found")
     return RecommendationFeedbackResponse(
@@ -1227,11 +1296,16 @@ async def get_recommendation_feedback(recommendation_id: int) -> RecommendationF
     )
 
 
-@app.post("/recommendations/{recommendation_id}/feedback", response_model=RecommendationFeedbackResponse)
+@app.post(
+    "/recommendations/{recommendation_id}/feedback",
+    response_model=RecommendationFeedbackResponse,
+)
 async def create_recommendation_feedback(
     recommendation_id: int,
     body: RecommendationFeedbackBody | None = Body(default=None),
-    action: Literal["good_match", "not_relevant", "applied"] | None = Query(default=None),
+    action: Literal["good_match", "not_relevant", "applied"] | None = Query(
+        default=None
+    ),
     comment: str | None = Query(default=None, max_length=1000),
 ) -> RecommendationFeedbackResponse:
     rating, applied, resolved_comment, legacy_action = resolve_feedback_submission(
@@ -1243,9 +1317,10 @@ async def create_recommendation_feedback(
     settings = get_settings()
     engine = get_engine()
     with engine.begin() as connection:
-        recommendation = connection.execute(
-            sa.text(
-                """
+        recommendation = (
+            connection.execute(
+                sa.text(
+                    """
                 select
                     r.id,
                     r.job_id,
@@ -1278,21 +1353,28 @@ async def create_recommendation_feedback(
                 join jobs j on j.id = r.job_id
                 where r.id = :recommendation_id
                 """
-            ),
-            {"recommendation_id": recommendation_id},
-        ).mappings().one_or_none()
+                ),
+                {"recommendation_id": recommendation_id},
+            )
+            .mappings()
+            .one_or_none()
+        )
         if recommendation is None:
             raise HTTPException(status_code=404, detail="recommendation not found")
-        profile_row = connection.execute(
-            sa.text(
-                """
+        profile_row = (
+            connection.execute(
+                sa.text(
+                    """
                 select profile
                 from job_seeker_profiles
                 order by id
                 limit 1
                 """
+                )
             )
-        ).mappings().one_or_none()
+            .mappings()
+            .one_or_none()
+        )
         profile = (
             dict(profile_row["profile"])
             if profile_row is not None and isinstance(profile_row["profile"], dict)
@@ -1301,16 +1383,20 @@ async def create_recommendation_feedback(
         from app.feedback_analysis import sanitize_feedback_comment
 
         resolved_comment = sanitize_feedback_comment(resolved_comment, profile=profile)
-        existing = connection.execute(
-            sa.text(
-                """
+        existing = (
+            connection.execute(
+                sa.text(
+                    """
                 select id, rating, applied, comment, scoring_snapshot, analysis_status
                 from recommendation_feedback
                 where recommendation_id = :recommendation_id
                 """
-            ),
-            {"recommendation_id": recommendation_id},
-        ).mappings().one_or_none()
+                ),
+                {"recommendation_id": recommendation_id},
+            )
+            .mappings()
+            .one_or_none()
+        )
         # Idempotency is decided from the user's input only. A rank or score
         # change between submissions must not create a new paid analysis.
         same_user_input = (
@@ -1428,7 +1514,9 @@ async def create_recommendation_feedback(
                     "comment": resolved_comment,
                     "action": legacy_action,
                     "job_id": recommendation["job_id"],
-                    "scoring_snapshot": json.dumps(scoring_snapshot, ensure_ascii=False),
+                    "scoring_snapshot": json.dumps(
+                        scoring_snapshot, ensure_ascii=False
+                    ),
                 },
             ).scalar_one()
         )
@@ -1458,9 +1546,10 @@ async def get_recommendation_feedback_analysis(
 ) -> RecommendationFeedbackAnalysisResponse:
     engine = get_engine()
     with engine.connect() as connection:
-        row = connection.execute(
-            sa.text(
-                """
+        row = (
+            connection.execute(
+                sa.text(
+                    """
                 select
                     fa.feedback_id,
                     rf.recommendation_id,
@@ -1474,9 +1563,12 @@ async def get_recommendation_feedback_analysis(
                 join recommendation_feedback rf on rf.id = fa.feedback_id
                 where rf.recommendation_id = :recommendation_id
                 """
-            ),
-            {"recommendation_id": recommendation_id},
-        ).mappings().one_or_none()
+                ),
+                {"recommendation_id": recommendation_id},
+            )
+            .mappings()
+            .one_or_none()
+        )
         if row is None:
             raise HTTPException(status_code=404, detail="feedback analysis not found")
     analysis = row["analysis"]

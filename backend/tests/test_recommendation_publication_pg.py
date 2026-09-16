@@ -76,7 +76,9 @@ def build_profile(
         {
             "freshness": freshness or {"max_age_days": 30, "drop_past_deadline": True},
             "exclusions": exclusions or {},
-            "role_clusters": [{"titles_fi": ["kirjastonhoitaja"], "keywords_fi": ["kirjasto"]}],
+            "role_clusters": [
+                {"titles_fi": ["kirjastonhoitaja"], "keywords_fi": ["kirjasto"]}
+            ],
             "location": {"home_city": "Testikaupunki"},
         }
     )
@@ -213,7 +215,8 @@ def seed_recommendation(
                 "job_id": job_id,
                 "profile_id": profile_id,
                 "deterministic_result": __import__("json").dumps(
-                    deterministic_result or {"passes": True, "candidate_lanes": ["direct_title"]}
+                    deterministic_result
+                    or {"passes": True, "candidate_lanes": ["direct_title"]}
                 ),
                 "is_active": is_active,
                 "llm_score": llm_score,
@@ -238,7 +241,9 @@ def test_disabled_only_source_is_deactivated_by_reconciliation(pg_engine: Any) -
         profile_id = seed_profile(connection)
         source_id = seed_source(connection, name="disabled_only", enabled=False)
         job_id = seed_job(connection, source_id=source_id)
-        recommendation_id = seed_recommendation(connection, job_id=job_id, profile_id=profile_id)
+        recommendation_id = seed_recommendation(
+            connection, job_id=job_id, profile_id=profile_id
+        )
         profile = build_profile()
 
         result = reconcile_recommendation_publication(
@@ -265,7 +270,9 @@ def test_enabled_occurrence_keeps_recommendation_published(pg_engine: Any) -> No
         profile_id = seed_profile(connection)
         source_id = seed_source(connection, name="enabled", enabled=True)
         job_id = seed_job(connection, source_id=source_id)
-        recommendation_id = seed_recommendation(connection, job_id=job_id, profile_id=profile_id)
+        recommendation_id = seed_recommendation(
+            connection, job_id=job_id, profile_id=profile_id
+        )
         profile = build_profile()
 
         result = reconcile_recommendation_publication(
@@ -281,7 +288,9 @@ def test_enabled_occurrence_keeps_recommendation_published(pg_engine: Any) -> No
         assert _is_active(connection, recommendation_id) is True
 
 
-def test_stale_publication_is_deactivated_but_job_stays_in_catalogue(pg_engine: Any) -> None:
+def test_stale_publication_is_deactivated_but_job_stays_in_catalogue(
+    pg_engine: Any,
+) -> None:
     with pg_engine.begin() as connection:
         profile_id = seed_profile(connection)
         source_id = seed_source(connection, name="enabled", enabled=True)
@@ -290,7 +299,9 @@ def test_stale_publication_is_deactivated_but_job_stays_in_catalogue(pg_engine: 
             source_id=source_id,
             published_at=_now() - timedelta(days=31),
         )
-        recommendation_id = seed_recommendation(connection, job_id=job_id, profile_id=profile_id)
+        recommendation_id = seed_recommendation(
+            connection, job_id=job_id, profile_id=profile_id
+        )
         profile = build_profile()
 
         reconcile_recommendation_publication(
@@ -318,7 +329,9 @@ def test_past_deadline_is_deactivated(pg_engine: Any) -> None:
             source_id=source_id,
             expires_at=_now() - timedelta(days=2),
         )
-        recommendation_id = seed_recommendation(connection, job_id=job_id, profile_id=profile_id)
+        recommendation_id = seed_recommendation(
+            connection, job_id=job_id, profile_id=profile_id
+        )
         profile = build_profile()
 
         reconcile_recommendation_publication(
@@ -342,8 +355,12 @@ def test_drop_past_deadline_false_keeps_expired_job_published(pg_engine: Any) ->
             source_id=source_id,
             expires_at=_now() - timedelta(days=2),
         )
-        recommendation_id = seed_recommendation(connection, job_id=job_id, profile_id=profile_id)
-        profile = build_profile(freshness={"max_age_days": 30, "drop_past_deadline": False})
+        recommendation_id = seed_recommendation(
+            connection, job_id=job_id, profile_id=profile_id
+        )
+        profile = build_profile(
+            freshness={"max_age_days": 30, "drop_past_deadline": False}
+        )
 
         reconcile_recommendation_publication(
             connection,
@@ -365,7 +382,9 @@ def test_hard_rejection_outside_retrieval_window_is_deactivated(pg_engine: Any) 
         )
         source_id = seed_source(connection, name="enabled", enabled=True)
         job_id = seed_job(connection, title="Myyntiedustaja", source_id=source_id)
-        recommendation_id = seed_recommendation(connection, job_id=job_id, profile_id=profile_id)
+        recommendation_id = seed_recommendation(
+            connection, job_id=job_id, profile_id=profile_id
+        )
         profile = build_profile(
             exclusions={"hard_negative_titles_fi": ["myyntiedustaja"]}
         )
@@ -388,7 +407,9 @@ def test_hidden_feedback_stays_hidden_after_rank_refresh(pg_engine: Any) -> None
         profile_id = seed_profile(connection)
         source_id = seed_source(connection, name="enabled", enabled=True)
         job_id = seed_job(connection, source_id=source_id)
-        recommendation_id = seed_recommendation(connection, job_id=job_id, profile_id=profile_id)
+        recommendation_id = seed_recommendation(
+            connection, job_id=job_id, profile_id=profile_id
+        )
         connection.execute(
             sa.text(
                 """
@@ -417,7 +438,9 @@ def test_hidden_feedback_stays_hidden_after_rank_refresh(pg_engine: Any) -> None
         assert _is_active(connection, recommendation_id) is False
 
 
-def test_deterministic_only_mode_publishes_null_llm_rows_hosted_does_not(pg_engine: Any) -> None:
+def test_deterministic_only_mode_publishes_null_llm_rows_hosted_does_not(
+    pg_engine: Any,
+) -> None:
     with pg_engine.begin() as connection:
         profile_id = seed_profile(connection)
         source_id = seed_source(connection, name="enabled", enabled=True)
@@ -459,7 +482,9 @@ def test_api_counts_and_items_use_the_same_eligibility_predicate(
         disabled_source = seed_source(connection, name="disabled", enabled=False)
         fresh_job = seed_job(connection, source_id=enabled_source)
         stale_job = seed_job(
-            connection, source_id=enabled_source, published_at=_now() - timedelta(days=45)
+            connection,
+            source_id=enabled_source,
+            published_at=_now() - timedelta(days=45),
         )
         hidden_job = seed_job(connection, source_id=disabled_source)
         seed_recommendation(connection, job_id=fresh_job, profile_id=profile_id)
@@ -508,7 +533,9 @@ def test_structural_predicate_rejects_disabled_only_rows(pg_engine: Any) -> None
 def _settings() -> Any:
     from app.config import Settings
 
-    return Settings(llm_provider="openai", openai_api_key="test-key", llm_prompt_version=8)
+    return Settings(
+        llm_provider="openai", openai_api_key="test-key", llm_prompt_version=8
+    )
 
 
 def test_review_backlog_inventory_freezes_stale_cohort(pg_engine: Any) -> None:
@@ -552,12 +579,98 @@ def test_review_backfill_refuses_paid_execution_without_budget(pg_engine: Any) -
     try:
         with pg_engine.begin() as connection:
             seed_profile(connection)
-        result = matching_module.run_review_backfill(dry_run=False, allow_paid=False, max_calls=0)
+        result = matching_module.run_review_backfill(
+            dry_run=False, allow_paid=False, max_calls=0
+        )
     finally:
         matching_module.get_engine = original  # type: ignore[assignment]
 
     assert result["status"] == "blocked"
     assert "authorization" in result["reason"]
+
+
+def test_review_backfill_executes_within_budget_and_resumes(
+    pg_engine: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import threading
+
+    from app import matching as matching_module
+    from app.llm import JobFitEvaluation
+
+    with pg_engine.begin() as connection:
+        profile_id = seed_profile(connection)
+        source_id = seed_source(connection, name="enabled", enabled=True)
+        for _index in range(4):
+            job_id = seed_job(connection, source_id=source_id)
+            seed_recommendation(connection, job_id=job_id, profile_id=profile_id)
+
+    class Provider:
+        provider_name = "openai"
+
+        def __init__(self) -> None:
+            self.calls = 0
+            self.lock = threading.Lock()
+
+        def evaluate_job_fit(self, **_kwargs):
+            with self.lock:
+                self.calls += 1
+            return (
+                JobFitEvaluation(
+                    score=70,
+                    fit_tier="transferable_weaker",
+                    rationale="Sopii.",
+                    concerns=[],
+                    suggested_action="consider",
+                ),
+                {
+                    "returned_model": "test-model",
+                    "usage_normalized": {"usage_present": False},
+                },
+            )
+
+    provider = Provider()
+    monkeypatch.setattr(matching_module, "get_engine", lambda: pg_engine)
+    monkeypatch.setattr(
+        matching_module, "build_evaluation_provider", lambda settings: provider
+    )
+
+    first = matching_module.run_review_backfill(
+        dry_run=False, allow_paid=True, max_calls=2
+    )
+
+    assert first["status"] == "executed"
+    assert first["execution"]["llm_paid_calls"] <= 2
+    assert provider.calls <= 2
+    assert (
+        first["remaining_stale"]
+        == first["before"]["stale_total"] - first["execution"]["llm_evaluated"]
+    )
+
+    second = matching_module.run_review_backfill(
+        dry_run=False, allow_paid=True, max_calls=2
+    )
+    assert second["status"] == "executed"
+    assert second["after"]["stale_total"] < first["after"]["stale_total"]
+    assert provider.calls <= 4
+
+
+def test_review_backfill_blocks_without_provider_or_privacy(
+    pg_engine: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app import matching as matching_module
+
+    with pg_engine.begin() as connection:
+        seed_profile(connection)
+    monkeypatch.setattr(matching_module, "get_engine", lambda: pg_engine)
+    monkeypatch.setattr(
+        matching_module, "build_evaluation_provider", lambda settings: None
+    )
+
+    blocked = matching_module.run_review_backfill(
+        dry_run=False, allow_paid=True, max_calls=5
+    )
+    assert blocked["status"] == "blocked"
+    assert blocked["reason"] == "provider_unavailable"
 
 
 def test_profile_import_preserves_learned_state_and_learner_cas(pg_engine: Any) -> None:
@@ -680,14 +793,18 @@ def seed_evaluation(
                 "profile_id": profile_id,
                 "prompt_version": prompt_version,
                 "request_hash": request_hash
-                or hashlib.sha256(f"{job_id}:{profile_id}:{prompt_version}".encode()).hexdigest(),
+                or hashlib.sha256(
+                    f"{job_id}:{profile_id}:{prompt_version}".encode()
+                ).hexdigest(),
                 "response": _json.dumps(response),
             },
         ).scalar_one()
     )
 
 
-def _link_evaluation(connection: Any, recommendation_id: int, evaluation_id: int) -> None:
+def _link_evaluation(
+    connection: Any, recommendation_id: int, evaluation_id: int
+) -> None:
     connection.execute(
         sa.text(
             """
@@ -708,10 +825,16 @@ def test_rank_refresh_cannot_resurrect_a_hard_rejected_approval(pg_engine: Any) 
         )
         source_id = seed_source(connection, name="enabled", enabled=True)
         job_id = seed_job(connection, title="Myyntiedustaja", source_id=source_id)
-        recommendation_id = seed_recommendation(connection, job_id=job_id, profile_id=profile_id)
-        evaluation_id = seed_evaluation(connection, job_id=job_id, profile_id=profile_id)
+        recommendation_id = seed_recommendation(
+            connection, job_id=job_id, profile_id=profile_id
+        )
+        evaluation_id = seed_evaluation(
+            connection, job_id=job_id, profile_id=profile_id
+        )
         _link_evaluation(connection, recommendation_id, evaluation_id)
-        profile = build_profile(exclusions={"hard_negative_titles_fi": ["myyntiedustaja"]})
+        profile = build_profile(
+            exclusions={"hard_negative_titles_fi": ["myyntiedustaja"]}
+        )
 
         reconcile_recommendation_publication(
             connection,
@@ -739,8 +862,12 @@ def test_disabled_only_row_with_linked_approval_stays_inactive(pg_engine: Any) -
         profile_id = seed_profile(connection)
         source_id = seed_source(connection, name="disabled", enabled=False)
         job_id = seed_job(connection, source_id=source_id)
-        recommendation_id = seed_recommendation(connection, job_id=job_id, profile_id=profile_id)
-        evaluation_id = seed_evaluation(connection, job_id=job_id, profile_id=profile_id)
+        recommendation_id = seed_recommendation(
+            connection, job_id=job_id, profile_id=profile_id
+        )
+        evaluation_id = seed_evaluation(
+            connection, job_id=job_id, profile_id=profile_id
+        )
         _link_evaluation(connection, recommendation_id, evaluation_id)
         profile = build_profile()
 
@@ -777,7 +904,11 @@ def test_inventory_counts_unreviewed_inactive_rows(pg_engine: Any) -> None:
         source_id = seed_source(connection, name="enabled", enabled=True)
         job_id = seed_job(connection, source_id=source_id)
         seed_recommendation(
-            connection, job_id=job_id, profile_id=profile_id, is_active=False, llm_score=None
+            connection,
+            job_id=job_id,
+            profile_id=profile_id,
+            is_active=False,
+            llm_score=None,
         )
 
         inventory = inventory_review_backlog(
@@ -797,8 +928,12 @@ def test_prompt_only_identity_change_is_compatible_but_model_change_is_not(
         source_id = seed_source(connection, name="enabled", enabled=True)
         prompt_job = seed_job(connection, source_id=source_id)
         model_job = seed_job(connection, source_id=source_id)
-        prompt_rec = seed_recommendation(connection, job_id=prompt_job, profile_id=profile_id)
-        model_rec = seed_recommendation(connection, job_id=model_job, profile_id=profile_id)
+        prompt_rec = seed_recommendation(
+            connection, job_id=prompt_job, profile_id=profile_id
+        )
+        model_rec = seed_recommendation(
+            connection, job_id=model_job, profile_id=profile_id
+        )
         prompt_eval = seed_evaluation(
             connection, job_id=prompt_job, profile_id=profile_id, prompt_version=7
         )
@@ -806,7 +941,9 @@ def test_prompt_only_identity_change_is_compatible_but_model_change_is_not(
             connection, job_id=model_job, profile_id=profile_id, prompt_version=7
         )
         connection.execute(
-            sa.text("update llm_evaluations set configured_model = 'old-model' where id = :id"),
+            sa.text(
+                "update llm_evaluations set configured_model = 'old-model' where id = :id"
+            ),
             {"id": model_eval},
         )
         _link_evaluation(connection, prompt_rec, prompt_eval)
@@ -875,7 +1012,9 @@ def test_job_sources_occurrence_identity_is_unique(pg_engine: Any) -> None:
         indexes = {
             str(row[0])
             for row in connection.execute(
-                sa.text("select indexname from pg_indexes where tablename = 'job_sources'")
+                sa.text(
+                    "select indexname from pg_indexes where tablename = 'job_sources'"
+                )
             )
         }
         assert "uq_job_sources_source_external_id" in indexes
@@ -932,7 +1071,9 @@ def test_upsert_listing_stores_source_deadline_monotonically(pg_engine: Any) -> 
 
     now = datetime.now(timezone.utc)
 
-    def listing(*, expires_at: datetime | None, url: str, title: str = "Kirjastonhoitaja") -> Any:
+    def listing(
+        *, expires_at: datetime | None, url: str, title: str = "Kirjastonhoitaja"
+    ) -> Any:
         return NormalizedListing(
             external_id="deadline-1",
             canonical_source_url=url,
@@ -949,15 +1090,27 @@ def test_upsert_listing_stores_source_deadline_monotonically(pg_engine: Any) -> 
 
     with pg_engine.begin() as connection:
         source_id = seed_source(connection, name="deadline_source", enabled=True)
-        upsert_listing(connection, source_id, listing(expires_at=now + timedelta(days=10), url="https://x.invalid/a"))
+        upsert_listing(
+            connection,
+            source_id,
+            listing(expires_at=now + timedelta(days=10), url="https://x.invalid/a"),
+        )
         first = connection.execute(sa.text("select expires_at from jobs")).scalar_one()
 
         # An earlier deadline must not move the stored value backwards.
-        upsert_listing(connection, source_id, listing(expires_at=now + timedelta(days=2), url="https://x.invalid/a"))
+        upsert_listing(
+            connection,
+            source_id,
+            listing(expires_at=now + timedelta(days=2), url="https://x.invalid/a"),
+        )
         second = connection.execute(sa.text("select expires_at from jobs")).scalar_one()
 
         # A later deadline replaces it.
-        upsert_listing(connection, source_id, listing(expires_at=now + timedelta(days=20), url="https://x.invalid/a"))
+        upsert_listing(
+            connection,
+            source_id,
+            listing(expires_at=now + timedelta(days=20), url="https://x.invalid/a"),
+        )
         third = connection.execute(sa.text("select expires_at from jobs")).scalar_one()
 
     assert first is not None
@@ -976,7 +1129,9 @@ def test_retention_report_runs_against_postgres(pg_engine: Any) -> None:
     assert "raw_listings_not_seen_since_cutoff" in report["candidates"]
 
 
-def test_concurrent_evaluation_respects_concurrency_and_paid_budget(pg_engine: Any) -> None:
+def test_concurrent_evaluation_respects_concurrency_and_paid_budget(
+    pg_engine: Any,
+) -> None:
     import threading
     import time
 
@@ -1015,7 +1170,10 @@ def test_concurrent_evaluation_respects_concurrency_and_paid_budget(pg_engine: A
                     concerns=[],
                     suggested_action="consider",
                 ),
-                {"returned_model": "test-model", "usage_normalized": {"usage_present": False}},
+                {
+                    "returned_model": "test-model",
+                    "usage_normalized": {"usage_present": False},
+                },
             )
 
     provider = Provider()
@@ -1031,12 +1189,16 @@ def test_concurrent_evaluation_respects_concurrency_and_paid_budget(pg_engine: A
     assert result["llm_paid_calls"] <= 4
     with pg_engine.connect() as connection:
         evaluated = connection.execute(
-            sa.text("select count(*) from recommendations where llm_evaluation_id is not null")
+            sa.text(
+                "select count(*) from recommendations where llm_evaluation_id is not null"
+            )
         ).scalar_one()
     assert evaluated == provider.calls
 
 
-def test_concurrent_evaluation_stops_dispatch_on_provider_outage(pg_engine: Any) -> None:
+def test_concurrent_evaluation_stops_dispatch_on_provider_outage(
+    pg_engine: Any,
+) -> None:
     import threading
     import time
 
@@ -1075,7 +1237,9 @@ def test_concurrent_evaluation_stops_dispatch_on_provider_outage(pg_engine: Any)
     assert provider.calls <= 2
     with pg_engine.connect() as connection:
         evaluated = connection.execute(
-            sa.text("select count(*) from recommendations where llm_evaluation_id is not null")
+            sa.text(
+                "select count(*) from recommendations where llm_evaluation_id is not null"
+            )
         ).scalar_one()
     assert evaluated == 0
     assert result["llm_evaluated"] == 0
