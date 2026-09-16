@@ -60,6 +60,34 @@ bucket. Only gates-passing missing rows count toward measured recall.
 states: tag them yourself with `stratum` values when labelling the rows the
 sampler produced.
 
+## Simulated review (provisional labels)
+
+When no human labels exist yet, `app/labelled_review.py` fills the template with
+a hosted LLM that role-plays the job seeker:
+
+```bash
+cd backend
+python -m app.labelled_review --labels ../profile/inkeri/labelled-evaluation-sample.json \
+  --out ../profile/inkeri/labelled-evaluation.json --budget 60
+```
+
+Rules the tool enforces:
+
+- the review prompt is deliberately different from the pipeline evaluation
+  prompt and never receives the stratum, so the labels are not a copy of the
+  decision being measured;
+- only sanitized outbound text is sent (the same privacy projection as the
+  evaluation path);
+- the sample is refused when it has more unique jobs than `--budget`, and an
+  existing output file is refused before any paid call is made;
+- the output records `labeler: simulated_llm_reviewer`, the model, and a caveat
+  that the labels are not human judgements.
+
+**These labels are provisional.** The reviewer shares a model family with the
+evaluator, so its errors are correlated with the pipeline; a real human label
+set supersedes them, and any enable/disable decision made from simulated labels
+must be revisited once real labels exist.
+
 Strata may overlap (a published local job can also be accepted and unreviewed).
 That is intentional: per-stratum metrics keep every membership, while overall
 recall and precision count each job exactly once, and a job labelled with
@@ -110,6 +138,19 @@ The report gives, per stratum and overall:
 - published precision over published labelled rows (a different denominator);
 - a Wilson 95% interval for every proportion.
 
-Report the sample method, denominators and uncertainty together. Do not treat a
-nonzero local result as the target, and do not compare runs on different labelled
-samples.
+Report the sample method, denominators and uncertainty together, and state the
+labeller provenance. Do not treat a nonzero local result as the target, and do
+not compare runs on different labelled samples.
+
+## Measured run (2026-09-16, simulated labels)
+
+41 unique jobs from the production sample (8 per stratum; `oulu_local` was empty
+because production has no commutable recommendations): simulated relevance 8/41.
+Overall stage coverage for labelled positives was 8/8 recommendation row, 8/8
+hard eligible, 8/8 LLM reviewed, 7/8 published and 1/8 accepted; published
+precision was 7/16 (0.438, Wilson 0.231-0.668). The informative per-stratum
+signals were simulated relevance 0/8 in both `not_retrieved` and `unreviewed`
+and 4/8 (`nationwide`) plus 3/8 (`remote`) in the published scopes. The sample is
+stratified from pipeline states, so the overall recall figure is not a
+population estimate; the `not_retrieved` denominator is 8 with a 0-0.32 interval,
+which cannot rule out a substantial missed-relevant share.

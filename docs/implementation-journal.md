@@ -527,12 +527,29 @@ source and fixed:
   +92 input tokens. The production profile contains no `profile_rules`, so the
   feature stays inert until the owner writes calibration rules; no private
   profile content was invented or written.
-- **P2-23 simulated review.** New `app/labelled_review.py` fills an unlabelled
-  sample with a hosted LLM acting as a stand-in reviewer. It uses a separate
-  review prompt (never the pipeline evaluation prompt), never discloses the
-  stratum, sends only sanitized outbound text, refuses to spend more calls than
-  an explicit budget, and stamps `labeler`, `labeler_model` and `labeler_caveat`
-  into the private output. Labels stay private under `profile/`.
+- **P2-23 simulated review and first labelled report.** New
+  `app/labelled_review.py` filled a production sample with a hosted LLM acting
+  as a stand-in reviewer: 41 unique jobs, 41 paid label calls, 8 simulated
+  relevant, 104 s. The labels, the sample and the report live only under the
+  ignored `profile/inkeri/` tree (never committed). Report: overall stage
+  coverage for labelled positives 8/8 recommendation row, 8/8 hard eligible,
+  8/8 LLM reviewed, 7/8 published, 1/8 accepted; published precision 7/16
+  (0.438, Wilson 0.231-0.668); simulated relevance 0/8 in `not_retrieved` and
+  0/8 in `unreviewed`, 4/8 in `nationwide`, 3/8 in `remote`, 0/8 in
+  `hard_rejection`. `oulu_local` was empty because production has no commutable
+  recommendations. The reviewer shares a model family with the evaluator and the
+  sample is stratified from pipeline states, so overall recall is not a
+  population estimate; the labels are provisional and a real human label set
+  supersedes them.
+- **Paid-call budget used:** 32 benchmark calls (16 throughput, 12 excerpt,
+  4 profile-rules) plus 41 label calls, all bounded by explicit `--budget`
+  flags. No production rows were written by the benchmarks (they ran against a
+  disposable local database) and the label run only wrote a `/tmp` file inside
+  the api container, which was copied to the private tree and removed.
+- **Enabled in production after measurement:** `LLM_EVAL_CONCURRENCY=4` and
+  `LLM_REQUIREMENT_AWARE_EXCERPT=true`, verified inside the running api and
+  worker containers. The excerpt change invalidates existing evaluation
+  identities once; the per-run `LLM_EVAL_MAX_JOBS` cap bounds the refresh.
 
 ### Verification commands
 

@@ -102,11 +102,16 @@ Embed canonical job text and the minimized profile summary. Re-embed on content-
 > **Implementation status (2026-09-16).** Only the primary evaluator runs.
 > Escalation is **not implemented**: `OPENAI_EVAL_MODEL_ESCALATED` is read into
 > configuration but never used to select a model, and there is no automatic
-> second review. Evaluation runs sequentially (no bounded parallelism yet);
-> `LLM_EVAL_MAX_JOBS` is a per-invocation cap, not a daily spend limit. Token
-> usage, latency, attempts, outcome and returned model are now persisted on
-> `llm_evaluations`. Treat the escalation and concurrency sections below as
-> proposed design, not shipped behaviour.
+> second review. Bounded parallelism **is** implemented: `LLM_EVAL_CONCURRENCY`
+> selects the thread-pool path (production runs 4 after a measured 3.7x
+> speed-up on identical inputs, recorded in `implementation-journal.md`).
+> `LLM_EVAL_MAX_JOBS` is a per-invocation cap, not a daily spend limit, and the
+> paid budget is claimed before every provider call. Long descriptions use the
+> requirement-aware excerpt (`LLM_REQUIREMENT_AWARE_EXCERPT`), which measured
+> 63/87 decisive requirement sentences retained versus 2/87 for a plain head
+> excerpt at about 1% more input tokens. Token usage, latency, attempts, outcome
+> and returned model are persisted on `llm_evaluations`. Treat the escalation
+> and batching sections below as proposed design, not shipped behaviour.
 
 ### Recommendation
 
