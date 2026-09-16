@@ -503,12 +503,43 @@ source and fixed:
   defaults to a bounded `--scan-limit 1000`, so a production template run takes
   seconds rather than minutes.
 
+### Fifteenth implementation batch (2026-09-16)
+
+- **P2-1 measured and enabled.** New bounded benchmark
+  `python -m app.eval_benchmark --mode throughput` (guarded by
+  `--allow-paid-calls` and `--database-is-disposable`, with a declared budget)
+  runs the real sequential and concurrent paths over the same cohort on a
+  disposable database. Measured with the production provider (OpenAI
+  `gpt-5.4-nano`) on a disposable copy of 8 real long listings: sequential
+  18.67 s / 8 paid calls versus concurrency 4 at 5.05 s / 8 paid calls, a
+  **3.7x speed-up** with identical input tokens (67,827) and equal attempt
+  counts on both arms. `LLM_EVAL_CONCURRENCY=4` enabled in production.
+- **P2-7 measured and enabled.** `--mode prompt-variant --variant excerpt` made
+  paired real calls on 6 long listings: decision parity 6/6 (action and tier),
+  input tokens -484 (-1.0%), identity changed as designed. An offline count of
+  decisive requirement/deadline sentences showed the previous `description[:4000]`
+  policy kept only **2 of 87** sentences while the requirement-aware excerpt kept
+  **63 of 87**, so `LLM_REQUIREMENT_AWARE_EXCERPT=true` is enabled in production.
+  The one-time identity change makes existing evaluations stale; the bounded
+  per-run budget (`LLM_EVAL_MAX_JOBS`) refreshes them gradually.
+- **P2-6 mechanism verified end to end.** `--variant profile-rules` with a
+  synthetic rule changed the request identity and kept decision parity 2/2 at
+  +92 input tokens. The production profile contains no `profile_rules`, so the
+  feature stays inert until the owner writes calibration rules; no private
+  profile content was invented or written.
+- **P2-23 simulated review.** New `app/labelled_review.py` fills an unlabelled
+  sample with a hosted LLM acting as a stand-in reviewer. It uses a separate
+  review prompt (never the pipeline evaluation prompt), never discloses the
+  stratum, sends only sanitized outbound text, refuses to spend more calls than
+  an explicit budget, and stamps `labeler`, `labeler_model` and `labeler_caveat`
+  into the private output. Labels stay private under `profile/`.
+
 ### Verification commands
 
 ```bash
 cd backend
-python -m pytest --timeout=10 -q                       # 437 passed, 51 skipped
-TEST_DATABASE_URL=postgresql+psycopg://... python -m pytest --timeout=30 -q  # 488 passed
+python -m pytest --timeout=10 -q                       # 439 passed, 55 skipped
+TEST_DATABASE_URL=postgresql+psycopg://... python -m pytest --timeout=30 -q  # 494 passed
 cd ../web && npm run typecheck && npm run build
 ```
 
