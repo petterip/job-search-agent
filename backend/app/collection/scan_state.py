@@ -179,11 +179,13 @@ def claim_scan_batch(
     limit: int,
     now: datetime | None = None,
 ) -> list[ScanMember]:
-    """Claim the oldest unresolved members of the frozen frontier.
+    """Claim the newest unresolved members of the frozen frontier.
 
-    Oldest-first by ``(lastmod, external_id)`` with no-date entries first, so a
-    bounded run never re-fetches the same newest prefix and no-date entries are
-    not dropped.
+    Durable state removes the old reason for oldest-first claiming (a fresh
+    sitemap prefix would otherwise be re-fetched forever), and newest-first is
+    what keeps fresh listings from starving behind a large historical backlog.
+    No-date entries are claimed last because their recency is unknown; they are
+    still never closed without confirmed-missing evidence.
     """
     if limit <= 0:
         return []
@@ -196,7 +198,7 @@ def claim_scan_batch(
             where source_id = :source_id
               and state in ('pending', 'retry')
               and (next_attempt_at is null or next_attempt_at <= :now)
-            order by lastmod asc nulls first, external_id asc
+            order by lastmod desc nulls last, external_id desc
             limit :limit
             """
         ),
@@ -230,15 +232,19 @@ def mark_scan_outcome(
     after ``closure_attempts`` confirmations. Parse-invalid never closes.
     """
     moment = now or datetime.now(timezone.utc)
-    row = connection.execute(
-        sa.text(
-            """
+    row = (
+        connection.execute(
+            sa.text(
+                """
             select attempts, missing_attempts from source_scan_members
             where source_id = :source_id and external_id = :external_id
             """
-        ),
-        {"source_id": source_id, "external_id": external_id},
-    ).mappings().one_or_none()
+            ),
+            {"source_id": source_id, "external_id": external_id},
+        )
+        .mappings()
+        .one_or_none()
+    )
     if row is None:
         return SCAN_STATE_PENDING
     attempts = int(row["attempts"]) + 1
@@ -328,9 +334,10 @@ def close_absent_members(
 
 
 def _refresh_progress(connection: Connection, *, source_id: int, now: datetime) -> None:
-    counts = connection.execute(
-        sa.text(
-            """
+    counts = (
+        connection.execute(
+            sa.text(
+                """
             select
                 count(*) filter (where state <> 'closed') as frontier_size,
                 count(*) filter (where state = 'classified') as classified_count,
@@ -338,9 +345,12 @@ def _refresh_progress(connection: Connection, *, source_id: int, now: datetime) 
             from source_scan_members
             where source_id = :source_id
             """
-        ),
-        {"source_id": source_id},
-    ).mappings().one()
+            ),
+            {"source_id": source_id},
+        )
+        .mappings()
+        .one()
+    )
     frontier_size = int(counts["frontier_size"] or 0)
     pending_count = int(counts["pending_count"] or 0)
     connection.execute(
@@ -507,9 +517,10 @@ def scan_backlog_report(
 ) -> dict[str, Any]:
     """Backlog age and per-state counts, independent of a single run's cap."""
     moment = now or datetime.now(timezone.utc)
-    row = connection.execute(
-        sa.text(
-            """
+    row = (
+        connection.execute(
+            sa.text(
+                """
             select
                 count(*) filter (where state = 'pending') as pending,
                 count(*) filter (where state = 'retry') as retry,
@@ -520,9 +531,12 @@ def scan_backlog_report(
             from source_scan_members
             where source_id = :source_id
             """
-        ),
-        {"source_id": source_id},
-    ).mappings().one()
+            ),
+            {"source_id": source_id},
+        )
+        .mappings()
+        .one()
+    )
     oldest = row["oldest_open_at"]
     if oldest is not None and oldest.tzinfo is None:
         oldest = oldest.replace(tzinfo=timezone.utc)
@@ -534,6 +548,8 @@ def scan_backlog_report(
         "absent": int(row["absent"] or 0),
         "oldest_open_at": oldest.isoformat() if oldest is not None else None,
         "oldest_open_age_hours": (
-            round((moment - oldest).total_seconds() / 3600, 1) if oldest is not None else None
+            round((moment - oldest).total_seconds() / 3600, 1)
+            if oldest is not None
+            else None
         ),
     }

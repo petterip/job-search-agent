@@ -52,7 +52,9 @@ TABLES = (
 def pg_engine() -> Iterator[Any]:
     engine = create_engine(str(TEST_DATABASE_URL))
     with engine.begin() as connection:
-        connection.execute(sa.text(f"truncate table {', '.join(TABLES)} restart identity cascade"))
+        connection.execute(
+            sa.text(f"truncate table {', '.join(TABLES)} restart identity cascade")
+        )
     try:
         yield engine
     finally:
@@ -89,7 +91,11 @@ def test_sync_freezes_frontier_and_marks_absent(pg_engine: Any) -> None:
         report = sync_sitemap_entries(
             connection,
             source_id=source_id,
-            entries=[_entry("101", lastmod=base), _entry("102"), _entry("103", lastmod=base)],
+            entries=[
+                _entry("101", lastmod=base),
+                _entry("102"),
+                _entry("103", lastmod=base),
+            ],
         )
         assert report["frontier_size"] == 3
         assert report["inserted"] == 3
@@ -115,11 +121,15 @@ def test_sync_freezes_frontier_and_marks_absent(pg_engine: Any) -> None:
             {"source_id": source_id},
         ).scalar_one()
 
-    assert states == {"101": SCAN_STATE_PENDING, "102": SCAN_STATE_PENDING, "103": SCAN_STATE_PENDING}
+    assert states == {
+        "101": SCAN_STATE_PENDING,
+        "102": SCAN_STATE_PENDING,
+        "103": SCAN_STATE_PENDING,
+    }
     assert absent is False
 
 
-def test_claim_is_oldest_first_with_no_date_entries_first(pg_engine: Any) -> None:
+def test_claim_is_newest_first_with_no_date_entries_last(pg_engine: Any) -> None:
     base = datetime(2026, 9, 1, 12, 0, tzinfo=timezone.utc)
     with pg_engine.begin() as connection:
         source_id = _source(connection)
@@ -135,7 +145,7 @@ def test_claim_is_oldest_first_with_no_date_entries_first(pg_engine: Any) -> Non
         )
 
         first = claim_scan_batch(connection, source_id=source_id, limit=2)
-        assert [member.external_id for member in first] == ["nodate", "oldest"]
+        assert [member.external_id for member in first] == ["newest", "middle"]
 
         # Equal timestamps fall back to external_id ordering deterministically.
         sync_sitemap_entries(
@@ -144,35 +154,50 @@ def test_claim_is_oldest_first_with_no_date_entries_first(pg_engine: Any) -> Non
             entries=[_entry("b", lastmod=base), _entry("a", lastmod=base)],
         )
         # Mark the first two classified so the equal-timestamp pair is claimed.
-        for external_id in ("nodate", "oldest"):
+        for external_id in ("newest", "middle"):
             mark_scan_outcome(
                 connection,
                 source_id=source_id,
                 external_id=external_id,
                 outcome=OUTCOME_CLASSIFIED,
             )
-        # "middle"/"newest" still pending; the new a/b pair is older.
+        # Dated entries are claimed newest-first (equal dates by external_id
+        # descending); the no-date entry is claimed last.
         batch = claim_scan_batch(connection, source_id=source_id, limit=10)
-        assert [m.external_id for m in batch][:2] == ["a", "b"]
+        assert [m.external_id for m in batch] == ["oldest", "b", "a", "nodate"]
 
 
 def test_missing_is_retryable_until_confirmed_closed(pg_engine: Any) -> None:
     now = datetime(2026, 9, 16, 12, 0, tzinfo=timezone.utc)
     with pg_engine.begin() as connection:
         source_id = _source(connection)
-        sync_sitemap_entries(connection, source_id=source_id, entries=[_entry("404")], now=now)
+        sync_sitemap_entries(
+            connection, source_id=source_id, entries=[_entry("404")], now=now
+        )
 
         first = mark_scan_outcome(
-            connection, source_id=source_id, external_id="404", outcome=OUTCOME_MISSING,
-            now=now, closure_attempts=3,
+            connection,
+            source_id=source_id,
+            external_id="404",
+            outcome=OUTCOME_MISSING,
+            now=now,
+            closure_attempts=3,
         )
         second = mark_scan_outcome(
-            connection, source_id=source_id, external_id="404", outcome=OUTCOME_MISSING,
-            now=now + timedelta(hours=2), closure_attempts=3,
+            connection,
+            source_id=source_id,
+            external_id="404",
+            outcome=OUTCOME_MISSING,
+            now=now + timedelta(hours=2),
+            closure_attempts=3,
         )
         third = mark_scan_outcome(
-            connection, source_id=source_id, external_id="404", outcome=OUTCOME_MISSING,
-            now=now + timedelta(hours=4), closure_attempts=3,
+            connection,
+            source_id=source_id,
+            external_id="404",
+            outcome=OUTCOME_MISSING,
+            now=now + timedelta(hours=4),
+            closure_attempts=3,
         )
 
     assert first == SCAN_STATE_RETRY
@@ -184,7 +209,9 @@ def test_parse_invalid_never_closes(pg_engine: Any) -> None:
     now = datetime(2026, 9, 16, 12, 0, tzinfo=timezone.utc)
     with pg_engine.begin() as connection:
         source_id = _source(connection)
-        sync_sitemap_entries(connection, source_id=source_id, entries=[_entry("bad")], now=now)
+        sync_sitemap_entries(
+            connection, source_id=source_id, entries=[_entry("bad")], now=now
+        )
         for attempt in range(6):
             state = mark_scan_outcome(
                 connection,
@@ -206,7 +233,11 @@ def test_classified_member_survives_unchanged_resync(pg_engine: Any) -> None:
             connection, source_id=source_id, entries=[_entry("1", lastmod=now)], now=now
         )
         mark_scan_outcome(
-            connection, source_id=source_id, external_id="1", outcome=OUTCOME_CLASSIFIED, now=now
+            connection,
+            source_id=source_id,
+            external_id="1",
+            outcome=OUTCOME_CLASSIFIED,
+            now=now,
         )
         # An unchanged sitemap entry keeps the classified state.
         sync_sitemap_entries(
@@ -216,7 +247,9 @@ def test_classified_member_survives_unchanged_resync(pg_engine: Any) -> None:
             now=now + timedelta(hours=1),
         )
         state = connection.execute(
-            sa.text("select state from source_scan_members where source_id = :source_id and external_id = '1'"),
+            sa.text(
+                "select state from source_scan_members where source_id = :source_id and external_id = '1'"
+            ),
             {"source_id": source_id},
         ).scalar_one()
         drained = frontier_drained(connection, source_id=source_id)
@@ -230,34 +263,54 @@ def test_absent_members_close_only_after_grace(pg_engine: Any) -> None:
     with pg_engine.begin() as connection:
         source_id = _source(connection)
         sync_sitemap_entries(
-            connection, source_id=source_id, entries=[_entry("keep"), _entry("gone")], now=now
+            connection,
+            source_id=source_id,
+            entries=[_entry("keep"), _entry("gone")],
+            now=now,
         )
         mark_scan_outcome(
-            connection, source_id=source_id, external_id="gone", outcome=OUTCOME_CLASSIFIED, now=now
+            connection,
+            source_id=source_id,
+            external_id="gone",
+            outcome=OUTCOME_CLASSIFIED,
+            now=now,
         )
         # "gone" disappears from the sitemap at T+1h.
         sync_sitemap_entries(
-            connection, source_id=source_id, entries=[_entry("keep")], now=now + timedelta(hours=1)
+            connection,
+            source_id=source_id,
+            entries=[_entry("keep")],
+            now=now + timedelta(hours=1),
         )
         closed_early = close_absent_members(
-            connection, source_id=source_id, grace_hours=24, now=now + timedelta(hours=2)
+            connection,
+            source_id=source_id,
+            grace_hours=24,
+            now=now + timedelta(hours=2),
         )
         closed_late = close_absent_members(
-            connection, source_id=source_id, grace_hours=24, now=now + timedelta(hours=30)
+            connection,
+            source_id=source_id,
+            grace_hours=24,
+            now=now + timedelta(hours=30),
         )
 
     assert closed_early == []
     assert closed_late == ["gone"]
 
 
-def test_backlog_report_reports_age_and_counts_independent_of_cap(pg_engine: Any) -> None:
+def test_backlog_report_reports_age_and_counts_independent_of_cap(
+    pg_engine: Any,
+) -> None:
     now = datetime(2026, 9, 16, 12, 0, tzinfo=timezone.utc)
     with pg_engine.begin() as connection:
         source_id = _source(connection)
         sync_sitemap_entries(
             connection,
             source_id=source_id,
-            entries=[_entry(str(i), lastmod=now - timedelta(days=10)) for i in range(150)],
+            entries=[
+                _entry(str(i), lastmod=now - timedelta(days=10)) for i in range(150)
+            ],
             now=now,
         )
         batch = claim_scan_batch(connection, source_id=source_id, limit=100, now=now)
@@ -278,7 +331,9 @@ def test_backlog_report_reports_age_and_counts_independent_of_cap(pg_engine: Any
     assert report["oldest_open_age_hours"] >= 0
 
 
-def _seed_job_with_occurrence(connection: Any, *, source_id: int, external_id: str) -> int:
+def _seed_job_with_occurrence(
+    connection: Any, *, source_id: int, external_id: str
+) -> int:
     job_id = int(
         connection.execute(
             sa.text(
@@ -313,7 +368,12 @@ def _seed_job_with_occurrence(connection: Any, *, source_id: int, external_id: s
             values (:job_id, :source_id, :listing_id, :external_id, 'h')
             """
         ),
-        {"job_id": job_id, "source_id": source_id, "listing_id": listing_id, "external_id": external_id},
+        {
+            "job_id": job_id,
+            "source_id": source_id,
+            "listing_id": listing_id,
+            "external_id": external_id,
+        },
     )
     return job_id
 
@@ -324,7 +384,9 @@ def test_closure_removes_only_when_no_live_occurrence_remains(pg_engine: Any) ->
     with pg_engine.begin() as connection:
         source_a = _source(connection, name="jobly")
         source_b = _source(connection, name="other")
-        job_id = _seed_job_with_occurrence(connection, source_id=source_a, external_id="101")
+        job_id = _seed_job_with_occurrence(
+            connection, source_id=source_a, external_id="101"
+        )
         # A second, live occurrence from another enabled source.
         listing_id = int(
             connection.execute(
@@ -390,7 +452,9 @@ def test_reappearing_closed_member_is_reopened_for_claim(pg_engine: Any) -> None
     now = datetime(2026, 9, 16, 12, 0, tzinfo=timezone.utc)
     with pg_engine.begin() as connection:
         source_id = _source(connection)
-        sync_sitemap_entries(connection, source_id=source_id, entries=[_entry("reopen")], now=now)
+        sync_sitemap_entries(
+            connection, source_id=source_id, entries=[_entry("reopen")], now=now
+        )
         for attempt in range(3):
             mark_scan_outcome(
                 connection,
@@ -401,7 +465,9 @@ def test_reappearing_closed_member_is_reopened_for_claim(pg_engine: Any) -> None
                 closure_attempts=3,
             )
         closed_state = connection.execute(
-            sa.text("select state from source_scan_members where source_id = :s and external_id = 'reopen'"),
+            sa.text(
+                "select state from source_scan_members where source_id = :s and external_id = 'reopen'"
+            ),
             {"s": source_id},
         ).scalar_one()
 
@@ -412,7 +478,9 @@ def test_reappearing_closed_member_is_reopened_for_claim(pg_engine: Any) -> None
             entries=[_entry("reopen", lastmod=now)],
             now=now + timedelta(hours=5),
         )
-        batch = claim_scan_batch(connection, source_id=source_id, limit=5, now=now + timedelta(hours=5))
+        batch = claim_scan_batch(
+            connection, source_id=source_id, limit=5, now=now + timedelta(hours=5)
+        )
         claimed = [member.external_id for member in batch]
         mark_scan_outcome(
             connection,
@@ -422,7 +490,9 @@ def test_reappearing_closed_member_is_reopened_for_claim(pg_engine: Any) -> None
             now=now + timedelta(hours=5),
         )
         final_state = connection.execute(
-            sa.text("select state from source_scan_members where source_id = :s and external_id = 'reopen'"),
+            sa.text(
+                "select state from source_scan_members where source_id = :s and external_id = 'reopen'"
+            ),
             {"s": source_id},
         ).scalar_one()
 
@@ -432,7 +502,11 @@ def test_reappearing_closed_member_is_reopened_for_claim(pg_engine: Any) -> None
 
 
 def test_corrected_lastmod_schedules_revalidation(pg_engine: Any) -> None:
-    from app.collection.scan_state import OUTCOME_CLASSIFIED, mark_scan_outcome, sync_sitemap_entries
+    from app.collection.scan_state import (
+        OUTCOME_CLASSIFIED,
+        mark_scan_outcome,
+        sync_sitemap_entries,
+    )
 
     now = datetime(2026, 9, 16, 12, 0, tzinfo=timezone.utc)
     with pg_engine.begin() as connection:
@@ -441,7 +515,11 @@ def test_corrected_lastmod_schedules_revalidation(pg_engine: Any) -> None:
             connection, source_id=source_id, entries=[_entry("x", lastmod=now)], now=now
         )
         mark_scan_outcome(
-            connection, source_id=source_id, external_id="x", outcome=OUTCOME_CLASSIFIED, now=now
+            connection,
+            source_id=source_id,
+            external_id="x",
+            outcome=OUTCOME_CLASSIFIED,
+            now=now,
         )
         sync_sitemap_entries(
             connection,
@@ -450,7 +528,9 @@ def test_corrected_lastmod_schedules_revalidation(pg_engine: Any) -> None:
             now=now + timedelta(hours=1),
         )
         state = connection.execute(
-            sa.text("select state from source_scan_members where source_id = :s and external_id = 'x'"),
+            sa.text(
+                "select state from source_scan_members where source_id = :s and external_id = 'x'"
+            ),
             {"s": source_id},
         ).scalar_one()
 
@@ -470,22 +550,40 @@ def test_parse_failure_does_not_shorten_closure(pg_engine: Any) -> None:
     now = datetime(2026, 9, 16, 12, 0, tzinfo=timezone.utc)
     with pg_engine.begin() as connection:
         source_id = _source(connection)
-        sync_sitemap_entries(connection, source_id=source_id, entries=[_entry("mix")], now=now)
+        sync_sitemap_entries(
+            connection, source_id=source_id, entries=[_entry("mix")], now=now
+        )
         mark_scan_outcome(
-            connection, source_id=source_id, external_id="mix", outcome=OUTCOME_INVALID, now=now,
+            connection,
+            source_id=source_id,
+            external_id="mix",
+            outcome=OUTCOME_INVALID,
+            now=now,
             closure_attempts=2,
         )
         mark_scan_outcome(
-            connection, source_id=source_id, external_id="mix", outcome=OUTCOME_INVALID,
-            now=now + timedelta(hours=1), closure_attempts=2,
+            connection,
+            source_id=source_id,
+            external_id="mix",
+            outcome=OUTCOME_INVALID,
+            now=now + timedelta(hours=1),
+            closure_attempts=2,
         )
         after_one_missing = mark_scan_outcome(
-            connection, source_id=source_id, external_id="mix", outcome=OUTCOME_MISSING,
-            now=now + timedelta(hours=2), closure_attempts=2,
+            connection,
+            source_id=source_id,
+            external_id="mix",
+            outcome=OUTCOME_MISSING,
+            now=now + timedelta(hours=2),
+            closure_attempts=2,
         )
         after_second_missing = mark_scan_outcome(
-            connection, source_id=source_id, external_id="mix", outcome=OUTCOME_MISSING,
-            now=now + timedelta(hours=3), closure_attempts=2,
+            connection,
+            source_id=source_id,
+            external_id="mix",
+            outcome=OUTCOME_MISSING,
+            now=now + timedelta(hours=3),
+            closure_attempts=2,
         )
 
     assert after_one_missing == SCAN_STATE_RETRY

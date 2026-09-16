@@ -594,6 +594,17 @@ source and fixed:
   `NameError` on the next scheduled Jobly collection. `tests/test_collection_scan_pg.py`
   now executes the branch with a fake resumable adapter.
 
+- **P1-7b claim order changed to newest-first after a production check.** The
+  first production Jobly runs after the resumable path shipped claimed the
+  oldest sitemap members, which are mostly dead 2023 listings returning 404, so
+  fresh listings would have waited behind a 13.8k-member historical frontier at
+  100 members/day. Claiming now orders by `lastmod desc nulls last, external_id
+  desc`: fresh listings are fetched promptly, the backlog drains whenever new
+  and retried members are fewer than the batch, and no-date members are claimed
+  last but never closed without confirmed-missing evidence. Verified in
+  production: the run claims members, fetches them, and persists
+  `classified`/`missing` outcomes.
+
 ### Verification commands
 
 ```bash
