@@ -581,12 +581,25 @@ source and fixed:
   billable call to verify credentials, model access and structured output, and is
   deliberately not wired into `/health`.
 
+- **P1-13 both-order merge test and two latent collection bugs.** The new
+  `tests/test_collection_merge_pg.py` collects the same job from two sources in
+  both orders and asserts one canonical row. It immediately exposed a genuine
+  collection bug: the merge update compared an untyped `:expires_at` parameter,
+  so a re-collected listing without a deadline raised PostgreSQL
+  `AmbiguousParameter` and the occurrence failed to merge. It also exposed an
+  order-dependent canonical description (raw source text was stored on insert
+  but stripped on merge), now normalized on both paths. While fixing the test
+  setup, a missing `get_settings` import in the resumable-scan branch of
+  `app/collection/runner.py` was found — that branch would have raised
+  `NameError` on the next scheduled Jobly collection. `tests/test_collection_scan_pg.py`
+  now executes the branch with a fake resumable adapter.
+
 ### Verification commands
 
 ```bash
 cd backend
-python -m pytest --timeout=10 -q                       # 447 passed, 57 skipped
-TEST_DATABASE_URL=postgresql+psycopg://... python -m pytest --timeout=30 -q  # 504 passed
+python -m pytest --timeout=10 -q                       # 448 passed, 60 skipped
+TEST_DATABASE_URL=postgresql+psycopg://... python -m pytest --timeout=30 -q  # 508 passed
 cd ../web && npm run typecheck && npm run build
 ```
 

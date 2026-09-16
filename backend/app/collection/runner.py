@@ -10,6 +10,7 @@ import sqlalchemy as sa
 from sqlalchemy.engine import Connection, Engine
 
 from app.adapters.base import NormalizedListing, SourceAdapter, ensure_aware_utc
+from app.config import get_settings
 from app.collection.scan_state import (
     OUTCOME_INVALID,
     SCAN_STATE_CLASSIFIED,
@@ -102,7 +103,9 @@ class RunOwnership:
             )
         except Exception:
             logger.warning(
-                "event=run_ownership_unlock_failed lock=%s", self.lock_name, exc_info=True
+                "event=run_ownership_unlock_failed lock=%s",
+                self.lock_name,
+                exc_info=True,
             )
         finally:
             try:
@@ -165,7 +168,9 @@ def acquire_run_ownership(
     )
 
 
-def advisory_lock_is_held(connection: Connection, *, lock_class: int, lock_object: int) -> bool:
+def advisory_lock_is_held(
+    connection: Connection, *, lock_class: int, lock_object: int
+) -> bool:
     """Whether any live session currently owns a two-integer advisory lock."""
     return bool(
         connection.execute(
@@ -194,7 +199,9 @@ def resolve_active_profile_id(connection: Connection) -> int | None:
     return int(row) if row is not None else None
 
 
-def acquire_publication_ownership(*, engine: Engine | None = None) -> RunOwnership | None:
+def acquire_publication_ownership(
+    *, engine: Engine | None = None
+) -> RunOwnership | None:
     """Own the active profile's publication lock.
 
     Matching, feedback analysis/learning and profile import all publish into
@@ -219,7 +226,9 @@ def acquire_publication_ownership(*, engine: Engine | None = None) -> RunOwnersh
     )
 
 
-def ensure_source(connection: Connection, adapter: SourceAdapter) -> tuple[int, datetime | None]:
+def ensure_source(
+    connection: Connection, adapter: SourceAdapter
+) -> tuple[int, datetime | None]:
     """Return the source id and watermark, creating the row atomically.
 
     A concurrent first collection must not fail with a uniqueness error before
@@ -371,7 +380,9 @@ def should_mark_missing_source_listings_removed(
     return True
 
 
-def find_cross_source_job(connection: Connection, source_id: int, listing: NormalizedListing) -> int | None:
+def find_cross_source_job(
+    connection: Connection, source_id: int, listing: NormalizedListing
+) -> int | None:
     key = dedupe_key(listing)
     if key is None:
         return None
@@ -456,20 +467,35 @@ def upsert_listing(
     ).scalar_one()
 
     application_url = listing.application_url or listing.canonical_source_url
+    # The canonical body is normalized on insert as well as on merge, so the
+    # stored text cannot depend on which source was collected first (P1-13).
+    canonical_description = (
+        listing.description.strip()
+        if listing.description and listing.description.strip()
+        else None
+    )
 
-    existing_source_row = connection.execute(
-        sa.text(
-            """
+    existing_source_row = (
+        connection.execute(
+            sa.text(
+                """
             select js.id as job_source_id, js.job_id
             from job_sources js
             where js.source_id = :source_id and js.external_id = :external_id
             """
-        ),
-        {"source_id": source_id, "external_id": listing.external_id},
-    ).mappings().one_or_none()
-    existing_job = existing_source_row["job_id"] if existing_source_row is not None else None
+            ),
+            {"source_id": source_id, "external_id": listing.external_id},
+        )
+        .mappings()
+        .one_or_none()
+    )
+    existing_job = (
+        existing_source_row["job_id"] if existing_source_row is not None else None
+    )
     existing_job_source_id = (
-        int(existing_source_row["job_source_id"]) if existing_source_row is not None else None
+        int(existing_source_row["job_source_id"])
+        if existing_source_row is not None
+        else None
     )
 
     relinked_to_cross_source = False
@@ -525,7 +551,7 @@ def upsert_listing(
                 {
                     "title": listing.title,
                     "employer": listing.employer,
-                    "description": listing.description,
+                    "description": canonical_description,
                     "location": listing.location,
                     "published_at": listing.published_at,
                     "expires_at": listing.expires_at,
@@ -575,7 +601,7 @@ def upsert_listing(
             },
         ).scalar_one()
         effective_description: str | None = None
-        if result == "inserted" and listing.description and listing.description.strip():
+        if result == "inserted" and canonical_description:
             record_source_provenance(
                 connection,
                 job_id=int(job_id),
@@ -591,10 +617,16 @@ def upsert_listing(
                 )
             # Canonical fields (including the source deadline) are refreshed even
             # when this occurrence has no description of its own.
-            current = connection.execute(
-                sa.text("select title, employer, location from jobs where id = :job_id"),
-                {"job_id": job_id},
-            ).mappings().one()
+            current = (
+                connection.execute(
+                    sa.text(
+                        "select title, employer, location from jobs where id = :job_id"
+                    ),
+                    {"job_id": job_id},
+                )
+                .mappings()
+                .one()
+            )
             effective_title = canonical_field(current["title"], listing.title)
             effective_employer = canonical_field(current["employer"], listing.employer)
             effective_location = canonical_field(current["location"], listing.location)
@@ -618,9 +650,12 @@ def upsert_listing(
                         description = coalesce(:effective_description, jobs.description),
                         location = coalesce(:location, jobs.location),
                         expires_at = case
-                            when :expires_at is not null
-                             and (jobs.expires_at is null or :expires_at > jobs.expires_at)
-                            then :expires_at
+                            when CAST(:expires_at AS timestamptz) is not null
+                             and (
+                                 jobs.expires_at is null
+                                 or CAST(:expires_at AS timestamptz) > jobs.expires_at
+                             )
+                            then CAST(:expires_at AS timestamptz)
                             else jobs.expires_at
                         end,
                         updated_at = case
@@ -628,8 +663,11 @@ def upsert_listing(
                             when jobs.employer is distinct from coalesce(:employer, jobs.employer) then now()
                             when jobs.description is null and :effective_description is not null then now()
                             when jobs.location is distinct from coalesce(:location, jobs.location) then now()
-                            when :expires_at is not null
-                             and (jobs.expires_at is null or :expires_at > jobs.expires_at) then now()
+                            when CAST(:expires_at AS timestamptz) is not null
+                             and (
+                                 jobs.expires_at is null
+                                 or CAST(:expires_at AS timestamptz) > jobs.expires_at
+                             ) then now()
                             else jobs.updated_at
                         end
                     where id = :job_id
@@ -1109,7 +1147,9 @@ async def run_source_collection(
                         connection, source_id=source_id, closed_external_ids=closed_ids
                     )
                     counts["scan_reopened_jobs"] = reopen_scan_members(
-                        connection, source_id=source_id, reopened_external_ids=reopened_ids
+                        connection,
+                        source_id=source_id,
+                        reopened_external_ids=reopened_ids,
                     )
                     scan_drained = frontier_drained(connection, source_id=source_id)
                     counts["scan_backlog"] = scan_backlog_report(
@@ -1184,8 +1224,12 @@ async def run_source_collection(
                     details={
                         **counts,
                         "watermark": watermark.isoformat() if watermark else None,
-                        "next_watermark": next_watermark.isoformat() if next_watermark else None,
-                        "duration_seconds": round(time.monotonic() - started_monotonic, 3),
+                        "next_watermark": next_watermark.isoformat()
+                        if next_watermark
+                        else None,
+                        "duration_seconds": round(
+                            time.monotonic() - started_monotonic, 3
+                        ),
                     },
                 )
 
@@ -1216,7 +1260,9 @@ async def run_source_collection(
                     message=str(exc),
                     details={
                         "exception_type": type(exc).__name__,
-                        "duration_seconds": round(time.monotonic() - started_monotonic, 3),
+                        "duration_seconds": round(
+                            time.monotonic() - started_monotonic, 3
+                        ),
                     },
                 )
             raise
