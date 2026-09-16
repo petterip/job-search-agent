@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+from types import SimpleNamespace
 from typing import Any, Iterator
 
 import pytest
@@ -250,4 +251,117 @@ def test_prompt_variant_mode_reports_tokens_parity_and_identity(
     with pytest.raises(LabelledEvaluationError, match="--rule is required"):
         run_prompt_variant_benchmark(
             variant="profile-rules", limit=1, budget=4, allow_paid_calls=True, rules=[]
+        )
+
+
+class StubProvider:
+    provider_name = "stub"
+
+    def __init__(
+        self, *, model: str, score: int, action: str, in_tokens: int, usage_style: str
+    ) -> None:
+        self.model = model
+        self.score = score
+        self.action = action
+        self.in_tokens = in_tokens
+        self.usage_style = usage_style
+        self.calls = 0
+
+    def evaluate_job_fit(self, *, profile_summary, job_summary, model, prompt_version):
+        self.calls += 1
+        evaluation = JobFitEvaluation(
+            score=self.score,
+            fit_tier="strong_fit",
+            rationale="stub",
+            concerns=[],
+            suggested_action=self.action,
+        )
+        usage = (
+            {"promptTokenCount": self.in_tokens, "candidatesTokenCount": 100}
+            if self.usage_style == "gemini"
+            else {"input_tokens": self.in_tokens, "output_tokens": 100}
+        )
+        return evaluation, {"returned_model": model, "usage": usage}
+
+
+@pg_only
+def test_model_compare_reports_parity_tokens_and_cost(
+    pg_engine: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import app.eval_benchmark as benchmark
+
+    with pg_engine.begin() as connection:
+        _seed_profile(connection)
+        for index in range(1, 4):
+            _seed_job(connection, index=index, description=LONG_DESCRIPTION)
+
+    baseline = StubProvider(
+        model="base", score=70, action="apply", in_tokens=1000, usage_style="openai"
+    )
+    candidate = StubProvider(
+        model="cand", score=65, action="apply", in_tokens=800, usage_style="gemini"
+    )
+
+    def fake_provider_for(provider_name: str, settings: Any) -> Any:
+        return baseline if provider_name == "openai" else candidate
+
+    monkeypatch.setattr(benchmark, "get_engine", lambda: pg_engine)
+    monkeypatch.setattr(benchmark, "provider_for", fake_provider_for)
+    monkeypatch.setattr(
+        benchmark,
+        "get_settings",
+        lambda: SimpleNamespace(
+            database_url="postgresql+psycopg://stub:stub@127.0.0.1:55432/stub",
+            llm_provider="openai",
+            openai_eval_model="base",
+            gemini_eval_model="cand",
+            openai_api_key="k",
+            gemini_api_key="k",
+            openai_eval_timeout_seconds=10,
+            llm_prompt_version=1,
+            llm_eval_max_jobs=800,
+        ),
+    )
+
+    report = benchmark.run_model_compare_benchmark(
+        limit=2,
+        budget=8,
+        allow_paid_calls=True,
+        candidate_provider="gemini",
+        candidate_model="cand",
+        baseline_provider="openai",
+        baseline_model="base",
+        prices={
+            "baseline": {"input": 0.20, "output": 1.25},
+            "candidate": {"input": 0.30, "output": 2.50},
+        },
+    )
+
+    assert report["jobs"] == 2
+    assert report["paid_calls"] == 4
+    assert report["decision_parity"]["same_action"] == 2
+    assert report["decision_parity"]["same_tier"] == 2
+    assert report["baseline"]["input_tokens"] == 2000
+    assert report["candidate"]["input_tokens"] == 1600
+    # baseline 2000/1000 in+out, candidate 1600/200
+    assert report["baseline"]["cost_per_call_usd"] == round(
+        (2000 / 1e6 * 0.20 + 200 / 1e6 * 1.25) / 2, 6
+    )
+    assert report["candidate"]["cost_per_call_usd"] == round(
+        (1600 / 1e6 * 0.30 + 200 / 1e6 * 2.50) / 2, 6
+    )
+    assert report["baseline"]["projected_run_cost_usd"] is not None
+    json.dumps(report, default=str)
+
+
+def test_model_compare_requires_paid_authorization() -> None:
+    import app.eval_benchmark as benchmark
+
+    with pytest.raises(LabelledEvaluationError, match="allow-paid-calls"):
+        benchmark.run_model_compare_benchmark(
+            limit=2,
+            budget=8,
+            allow_paid_calls=False,
+            candidate_provider="gemini",
+            candidate_model="cand",
         )

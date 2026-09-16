@@ -68,6 +68,30 @@ Hosted calls are **bounded**, **stored**, and **opt-in**. If `LLM_PROVIDER` or i
 
 ## Embeddings
 
+### Measured model comparison (2026-09-16)
+
+`python -m app.eval_benchmark --mode model-compare` runs the configured
+evaluator and a candidate model over identical sanitized prompts on real long
+listings and reports decision agreement, tokens, latency and per-call cost.
+Measured with production credentials on disposable data:
+
+| Model | Released | Price in/out ($/1M) | Measured $/call | 800-call run | Latency/call | Action parity | Tier parity | Mean |score gap| |
+|---|---|---|---|---|---|---|---|---|
+| `gpt-5.4-nano` (current) | 2026-03-17 | 0.20 / 1.25 | 0.00200 | 1.60 | 2.3-3.3 s | - | - | - |
+| `gemini-3.5-flash-lite` | 2026-07-21 | 0.30 / 2.50 | 0.00301-0.00306 | 2.45 | 4.9-13.5 s | 8/8 | 8/8 | 14.0-14.7 |
+| `gpt-5.4-mini` | 2026-03-17 | 0.75 / 4.50 | 0.00721 | 5.76 | 2.6 s | 4/4 | 3/4 | 4.2 |
+
+Reading: the only newer near-price option that is already reachable with the
+existing keys and fully supported by the code is Gemini 3.5 Flash-Lite. It
+agreed on every action and tier in the paired sample but scored systematically
+lower, was 2-6x slower per call, and costs about 1.5-2x more, so it is not
+recommended as the primary evaluator. `gpt-5.4-mini` stays closest to nano's
+decisions at 3.6x the price; it is configured as `OPENAI_EVAL_MODEL_ESCALATED`
+but automatic escalation is still not implemented, so switching to it means
+changing the primary model. Cheaper alternatives (`gpt-5-nano` at 0.05/0.40,
+DeepSeek V4 Flash at 0.14/0.28) are either older without reasoning effort or
+need a new provider integration plus a privacy review.
+
 ### Recommendation
 
 Start with **OpenAI `text-embedding-3-small` at 1536 dimensions**.

@@ -50,6 +50,20 @@ from app.matching import (
 )
 
 
+def provider_for(provider_name: str, settings: Any) -> Any:
+    """Build the provider client for an explicit provider name."""
+    if provider_name == "gemini":
+        from app.llm import GeminiEvaluationProvider
+
+        return GeminiEvaluationProvider(api_key=settings.gemini_api_key)
+    from app.llm import OpenAIEvaluationProvider
+
+    return OpenAIEvaluationProvider(
+        api_key=settings.openai_api_key,
+        timeout_seconds=settings.openai_eval_timeout_seconds,
+    )
+
+
 def _database_label() -> str:
     """Report the database host/database without credentials."""
     from sqlalchemy.engine import make_url
@@ -509,10 +523,174 @@ def run_prompt_variant_benchmark(
     }
 
 
+def run_model_compare_benchmark(
+    *,
+    limit: int,
+    budget: int,
+    allow_paid_calls: bool,
+    candidate_provider: str,
+    candidate_model: str,
+    baseline_provider: str | None = None,
+    baseline_model: str | None = None,
+    prices: dict[str, dict[str, float]] | None = None,
+) -> dict[str, Any]:
+    """Compare the configured evaluator with a candidate model on fixed jobs.
+
+    Both models receive the identical sanitized prompts, so the report shows
+    decision agreement, measured token use, latency and per-call cost. Prices
+    are passed in explicitly (USD per million tokens) instead of being guessed.
+    """
+    _require_paid_authorization(allow_paid_calls, budget, expected_calls=2 * limit)
+    settings = get_settings()
+    baseline_provider = (baseline_provider or settings.llm_provider).lower()
+    baseline_model = baseline_model or configured_eval_model(
+        settings, baseline_provider
+    )
+    prices = prices or {}
+    engine = get_engine()
+    with engine.connect() as connection:
+        profile_id, profile = _profile_document(connection)
+        profile_summary, learned_input = evaluation_request_context(profile)
+        jobs = _variant_jobs(connection, limit=limit, long_only=True)
+    if not jobs:
+        raise LabelledEvaluationError("no jobs with a usable description found")
+
+    baseline_client = provider_for(baseline_provider, settings)
+    candidate_client = provider_for(candidate_provider, settings)
+
+    calls = 0
+    results: list[dict[str, Any]] = []
+    for job in jobs:
+        job_text = job_summary(job)
+        baseline_started = time.monotonic()
+        baseline_evaluation, baseline_meta = baseline_client.evaluate_job_fit(
+            profile_summary=profile_summary,
+            job_summary=job_text,
+            model=baseline_model,
+            prompt_version=settings.llm_prompt_version,
+        )
+        baseline_elapsed = time.monotonic() - baseline_started
+        candidate_started = time.monotonic()
+        candidate_evaluation, candidate_meta = candidate_client.evaluate_job_fit(
+            profile_summary=profile_summary,
+            job_summary=job_text,
+            model=candidate_model,
+            prompt_version=settings.llm_prompt_version,
+        )
+        candidate_elapsed = time.monotonic() - candidate_started
+        calls += 2
+        if calls > budget:
+            raise LabelledEvaluationError(
+                f"benchmark exceeded the declared budget of {budget} paid calls"
+            )
+        baseline_usage = normalize_provider_usage(
+            baseline_provider, baseline_meta.get("usage")
+        )
+        candidate_usage = normalize_provider_usage(
+            candidate_provider, candidate_meta.get("usage")
+        )
+        results.append(
+            {
+                "job_id": int(job["id"]),
+                "description_chars": len(str(job.get("description") or "")),
+                "baseline": {
+                    "score": baseline_evaluation.score,
+                    "action": baseline_evaluation.suggested_action,
+                    "tier": baseline_evaluation.fit_tier,
+                    "elapsed_seconds": round(baseline_elapsed, 2),
+                    "input_tokens": baseline_usage["input_tokens"],
+                    "output_tokens": baseline_usage["output_tokens"],
+                    "returned_model": baseline_meta.get("returned_model"),
+                },
+                "candidate": {
+                    "score": candidate_evaluation.score,
+                    "action": candidate_evaluation.suggested_action,
+                    "tier": candidate_evaluation.fit_tier,
+                    "elapsed_seconds": round(candidate_elapsed, 2),
+                    "input_tokens": candidate_usage["input_tokens"],
+                    "output_tokens": candidate_usage["output_tokens"],
+                    "returned_model": candidate_meta.get("returned_model"),
+                },
+                "score_gap": abs(
+                    baseline_evaluation.score - candidate_evaluation.score
+                ),
+                "same_action": baseline_evaluation.suggested_action
+                == candidate_evaluation.suggested_action,
+                "same_tier": baseline_evaluation.fit_tier
+                == candidate_evaluation.fit_tier,
+            }
+        )
+
+    def _totals(arm: str) -> dict[str, Any]:
+        def _sum(field: str) -> int | None:
+            values = [entry[arm][field] for entry in results]
+            if any(value is None for value in values):
+                return None
+            return int(sum(values))
+
+        input_tokens = _sum("input_tokens")
+        output_tokens = _sum("output_tokens")
+        price = prices.get(arm) or {}
+        cost = None
+        if input_tokens is not None and output_tokens is not None and price:
+            cost = round(
+                input_tokens / 1_000_000 * float(price.get("input", 0))
+                + output_tokens / 1_000_000 * float(price.get("output", 0)),
+                6,
+            )
+        return {
+            "elapsed_seconds": round(
+                sum(entry[arm]["elapsed_seconds"] for entry in results), 2
+            ),
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "cost_usd": cost,
+            "cost_per_call_usd": (
+                round(cost / len(results), 6) if cost is not None and results else None
+            ),
+            "projected_run_cost_usd": (
+                round(cost / len(results) * settings.llm_eval_max_jobs, 4)
+                if cost is not None and results
+                else None
+            ),
+        }
+
+    return {
+        "mode": "model-compare",
+        "database": _database_label(),
+        "baseline": {
+            "provider": baseline_provider,
+            "model": baseline_model,
+            **(_totals("baseline")),
+        },
+        "candidate": {
+            "provider": candidate_provider,
+            "model": candidate_model,
+            **(_totals("candidate")),
+        },
+        "prices_usd_per_million": prices,
+        "jobs": len(results),
+        "budget": budget,
+        "paid_calls": calls,
+        "decision_parity": {
+            "same_action": sum(1 for entry in results if entry["same_action"]),
+            "same_tier": sum(1 for entry in results if entry["same_tier"]),
+            "jobs": len(results),
+            "mean_abs_score_gap": round(
+                sum(entry["score_gap"] for entry in results) / len(results), 1
+            ),
+        },
+        "run_cap_jobs": settings.llm_eval_max_jobs,
+        "per_job": results,
+    }
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Bounded paid pipeline benchmarks.")
     parser.add_argument(
-        "--mode", required=True, choices=["throughput", "prompt-variant"]
+        "--mode",
+        required=True,
+        choices=["throughput", "prompt-variant", "model-compare"],
     )
     parser.add_argument("--limit", type=int, default=8)
     parser.add_argument("--concurrency", type=int, default=2)
@@ -521,12 +699,46 @@ def main() -> None:
         "--variant", default="excerpt", choices=["excerpt", "profile-rules"]
     )
     parser.add_argument("--rule", action="append", default=[])
+    parser.add_argument("--candidate-provider", default="gemini")
+    parser.add_argument("--candidate-model", default="gemini-3.5-flash-lite")
+    parser.add_argument("--baseline-provider", default=None)
+    parser.add_argument("--baseline-model", default=None)
+    parser.add_argument(
+        "--baseline-price",
+        default=None,
+        help="Baseline price as INPUT/OUTPUT USD per million tokens, e.g. 0.20/1.25.",
+    )
+    parser.add_argument(
+        "--candidate-price",
+        default=None,
+        help="Candidate price as INPUT/OUTPUT USD per million tokens, e.g. 0.30/2.50.",
+    )
     parser.add_argument("--allow-paid-calls", action="store_true")
     parser.add_argument("--database-is-disposable", action="store_true")
     parser.add_argument("--out", default=None, help="Optional JSON report destination.")
     args = parser.parse_args()
 
-    if args.mode == "throughput":
+    def _price(value: str | None) -> dict[str, float] | None:
+        if not value:
+            return None
+        input_price, _, output_price = value.partition("/")
+        return {"input": float(input_price), "output": float(output_price)}
+
+    if args.mode == "model-compare":
+        report = run_model_compare_benchmark(
+            limit=args.limit,
+            budget=args.budget,
+            allow_paid_calls=args.allow_paid_calls,
+            candidate_provider=args.candidate_provider,
+            candidate_model=args.candidate_model,
+            baseline_provider=args.baseline_provider,
+            baseline_model=args.baseline_model,
+            prices={
+                "baseline": _price(args.baseline_price) or {},
+                "candidate": _price(args.candidate_price) or {},
+            },
+        )
+    elif args.mode == "throughput":
         report = run_throughput_benchmark(
             limit=args.limit,
             concurrency=args.concurrency,

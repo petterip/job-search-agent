@@ -623,12 +623,27 @@ source and fixed:
   the remaining unimplemented part is normalizer/revision-based location
   reprocessing for historical rows.
 
+### Model comparison round (2026-09-16)
+
+- Added `--mode model-compare` to `app/eval_benchmark.py`: identical sanitized
+  prompts through the configured evaluator and a candidate model, reporting
+  decision agreement, tokens, latency and per-call cost from explicit prices.
+- Measured with production credentials on real long listings (24 paid calls):
+  `gpt-5.4-nano` $0.00200/call (2.3-3.3 s), `gemini-3.5-flash-lite`
+  $0.00301-0.00306/call (4.9-13.5 s, action/tier parity 8/8, mean score gap
+  14.0-14.7), `gpt-5.4-mini` $0.00721/call (2.6 s, action parity 4/4, tier 3/4,
+  mean score gap 4.2). Conclusion recorded in `docs/llm-hosted.md`: Gemini 3.5
+  Flash-Lite is the only newer near-price model already reachable and supported,
+  but it is slower and scores lower, so the primary evaluator stays
+  `gpt-5.4-nano`; `gpt-5.4-mini` would be a capability upgrade at 3.6x cost and
+  is not wired as an automatic escalation.
+
 ### Verification commands
 
 ```bash
 cd backend
-python -m pytest --timeout=10 -q                       # 448 passed, 60 skipped
-TEST_DATABASE_URL=postgresql+psycopg://... python -m pytest --timeout=30 -q  # 508 passed
+python -m pytest --timeout=10 -q                       # 449 passed, 61 skipped
+TEST_DATABASE_URL=postgresql+psycopg://... python -m pytest --timeout=30 -q  # 510 passed
 cd ../web && npm run typecheck && npm run build
 ```
 
