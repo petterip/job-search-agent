@@ -412,12 +412,15 @@ def classify_unretrieved_jobs(
     seed: str,
     scan_limit: int,
     as_of: Any,
+    required_counts: dict[str, int] | None = None,
 ) -> tuple[dict[str, list[dict[str, Any]]], int]:
     """Split source-backed jobs without a recommendation row using the real gates.
 
     Only missing rows that would pass today's deterministic and hard gates are
     retrieval misses; everything else is an explicit rejection, so a
-    deterministic reject can never inflate measured recall.
+    deterministic reject can never inflate measured recall. Scanning stops early
+    once the requested buckets are full, because the remaining rows only change
+    diagnostic counters.
     """
     buckets: dict[str, list[dict[str, Any]]] = {
         "not_retrieved": [],
@@ -425,12 +428,19 @@ def classify_unretrieved_jobs(
         "deterministic_rejection": [],
         "classification_error": [],
     }
+    wanted = {
+        stratum: max(count, 0) for stratum, count in (required_counts or {}).items()
+    }
     scanned = 0
     rows = connection.execute(
         sa.text(UNRETRIEVED_JOBS_SQL),
         {"profile_id": profile_id, "seed": seed, "scan_limit": scan_limit},
     ).mappings()
     for row in rows:
+        if wanted and all(
+            len(buckets[stratum]) >= count for stratum, count in wanted.items()
+        ):
+            break
         scanned += 1
         job = JobForScoring(
             id=int(row["job_id"]),
@@ -484,7 +494,7 @@ def build_label_sample(
     profile: dict[str, Any] | None = None,
     prompt_version: int | None = None,
     as_of: Any = None,
-    scan_limit: int = 5000,
+    scan_limit: int = 1000,
 ) -> dict[str, Any]:
     """Build a private, unlabelled sample template across the required strata."""
     if per_stratum <= 0:
@@ -545,6 +555,12 @@ def build_label_sample(
         seed=seed,
         scan_limit=scan_limit,
         as_of=resolved_as_of,
+        required_counts={
+            "not_retrieved": per_stratum,
+            "hard_rejection": max(
+                per_stratum - per_stratum_counts.get("hard_rejection", 0), 0
+            ),
+        },
     )
     for stratum in ("hard_rejection", "not_retrieved"):
         remaining = max(per_stratum - per_stratum_counts.get(stratum, 0), 0)
@@ -753,7 +769,7 @@ def run_build_sample(
     per_stratum: int,
     seed: str,
     overwrite: bool = False,
-    scan_limit: int = 5000,
+    scan_limit: int = 1000,
 ) -> dict[str, Any]:
     destination = resolve_private_destination(path)
     engine = get_engine()
@@ -825,7 +841,7 @@ def main() -> None:
     parser.add_argument(
         "--scan-limit",
         type=int,
-        default=5000,
+        default=1000,
         help="Maximum source-backed jobs without a row to classify by gate outcome.",
     )
     parser.add_argument(

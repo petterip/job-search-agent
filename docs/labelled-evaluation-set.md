@@ -85,9 +85,13 @@ tree, and an existing file is never replaced: a second run fails rather than
 discarding labels you have already written. Use `--force` only to discard a
 template deliberately; `--force` still rewrites the file with owner-only
 permissions, publishes atomically from a temporary file, never follows a symlink
-at any path component, and never truncates another name for a hard-linked file. `--seed` selects the deterministic sample, `--scan-limit`
-bounds how many missing-row jobs are classified by the gates (the output records
-`scanned` and whether the limit was reached).
+at any path component, and never truncates another name for a hard-linked file.
+
+`--seed` selects the deterministic sample. `--scan-limit` (default 1000) bounds
+how many missing-row jobs are replayed through the gates; scanning stops early
+once the requested `not_retrieved` and computed `hard_rejection` samples are
+full. The output records `scanned` and `scan_limit_reached`, so raise
+`--scan-limit` and re-run if a bucket is short and the limit was reached.
 
 ```bash
 python -m app.labelled_evaluation --labels ../profile/inkeri/labelled-evaluation.json

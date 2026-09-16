@@ -485,13 +485,16 @@ source and fixed:
   the image, so every non-`/profile` destination looked like a repository path.
   Project-root detection now prefers the version-control root and falls back to
   the project file, and applies no repository rule when neither marker exists.
+  The gate replay also stops early once the requested buckets are full and
+  defaults to a bounded `--scan-limit 1000`, so a production template run takes
+  seconds rather than minutes.
 
 ### Verification commands
 
 ```bash
 cd backend
-python -m pytest --timeout=10 -q                       # 437 passed, 50 skipped
-TEST_DATABASE_URL=postgresql+psycopg://... python -m pytest --timeout=30 -q  # 487 passed
+python -m pytest --timeout=10 -q                       # 437 passed, 51 skipped
+TEST_DATABASE_URL=postgresql+psycopg://... python -m pytest --timeout=30 -q  # 488 passed
 cd ../web && npm run typecheck && npm run build
 ```
 

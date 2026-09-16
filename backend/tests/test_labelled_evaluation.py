@@ -464,6 +464,31 @@ def test_hard_rejection_budget_is_shared_between_row_and_computed_rejects(
 
 
 @pg_only
+def test_scan_stops_once_requested_buckets_are_full(pg_engine: Any) -> None:
+    with pg_engine.begin() as connection:
+        profile_id = _seed_profile(connection)
+        persisted_job = _sample_job(
+            connection, index=1, title="Kirjastonhoitaja", description="Kirjasto."
+        )
+        _sample_recommendation(
+            connection, job_id=persisted_job, profile_id=profile_id, hard_eligible=False
+        )
+        for index in range(2, 10):
+            _sample_job(
+                connection,
+                index=index,
+                title="Kirjastonhoitaja",
+                description="Kirjasto ja asiakaspalvelu.",
+            )
+        sample = build_label_sample(connection, profile_id=profile_id, per_stratum=1)
+    assert sample["per_stratum_counts"]["hard_rejection"] == 1
+    assert sample["per_stratum_counts"]["not_retrieved"] == 1
+    # The persisted rejection fills its budget, so one scorable row is enough.
+    assert sample["scan"]["scanned"] == 1
+    assert sample["scan"]["scan_limit_reached"] is False
+
+
+@pg_only
 def test_accepted_stratum_requires_positive_feedback(pg_engine: Any) -> None:
     with pg_engine.begin() as connection:
         profile_id = _seed_profile(connection)
